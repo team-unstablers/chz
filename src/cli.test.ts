@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { BIN_NAME, buildUsage, run } from "./cli.ts";
 import { FakeBackend } from "./realize.ts";
+import type { RealizationTestOutcome } from "./verify.ts";
 
 const tempDirs: string[] = [];
 /** Write `source` to a temp `.chz.ts` file and return its path. */
@@ -117,7 +118,11 @@ describe("run", () => {
     expect(backend.prompts).toEqual([]);
   });
 
-  it("realize emits the realization layout via an injected fake backend (exit 0)", async () => {
+  /** A green {@link RealizationTestOutcome}, so cli tests never spawn vitest. */
+  const greenTests = (): Promise<RealizationTestOutcome> =>
+    Promise.resolve({ passed: true, timedOut: false, output: "Tests  1 passed (1)", testFiles: [], testCount: 1 });
+
+  it("realize emits the layout, runs tests green, and records the cache (exit 0)", async () => {
     const file = writeChzFixture(
       "collide.chz.ts",
       [
@@ -132,7 +137,11 @@ describe("run", () => {
     const code = await run(
       ["realize", "--model", "test-model", file],
       { out: (m) => out.push(m), err: (m) => err.push(m) },
-      { makeBackend: (opts) => new FakeBackend(() => fakeResponse("collide"), opts.model ?? "?") },
+      {
+        makeBackend: (opts) => new FakeBackend(() => fakeResponse("collide"), opts.model ?? "?"),
+        runTests: greenTests,
+        chzVersion: "9.9.9",
+      },
     );
 
     expect(code).toBe(0);
@@ -140,8 +149,8 @@ describe("run", () => {
     expect(printed).toContain("realized 1 imagine function");
     expect(printed).toContain("model: test-model");
     expect(printed).toContain(`implementations/collide.ts`);
-    // Step 4 hand-off reminder on stderr.
-    expect(err.join("\n")).toContain("tests not yet run (Step 4)");
+    expect(printed).toContain("1 test passed");
+    expect(printed).toContain("cache:");
 
     // Files landed on disk next to the source under chz/realization/collide.
     const baseDir = join(file, "..", "chz", "realization", "collide");
@@ -152,6 +161,76 @@ describe("run", () => {
     expect(readFileSync(ensureFile, "utf8")).toContain(
       "(args, retval) => typeof retval === 'boolean',",
     );
+
+    // The cache was written green with the injected version.
+    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
+    expect(cache.chzVersion).toBe("9.9.9");
+    expect(cache.testsSkipped).toBe(false);
+    expect(cache.symbols.collide.testsPassed).toBe(true);
+  });
+
+  it("realize --skip-tests emits + caches unverified, does not run tests (exit 0)", async () => {
+    const file = writeChzFixture(
+      "skip.chz.ts",
+      "imagine function skipme(a: number): number {\n  ensure((args, retval) => typeof retval === 'number');\n}\n",
+    );
+    const out: string[] = [];
+    const err: string[] = [];
+    let ranTests = false;
+    const code = await run(
+      ["realize", "--skip-tests", file],
+      { out: (m) => out.push(m), err: (m) => err.push(m) },
+      {
+        makeBackend: () => new FakeBackend(() => fakeResponse("skipme")),
+        runTests: () => {
+          ranTests = true;
+          return greenTests();
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(ranTests).toBe(false);
+    expect(err.join("\n")).toContain("--skip-tests set");
+    const baseDir = join(file, "..", "chz", "realization", "skip");
+    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
+    expect(cache.testsSkipped).toBe(true);
+    expect(cache.symbols.skipme.testsPassed).toBe(false);
+  });
+
+  it("realize surfaces vitest output and exits 1 when tests fail (cache testsPassed:false)", async () => {
+    const file = writeChzFixture(
+      "red.chz.ts",
+      "imagine function redme(a: number): number {\n  ensure((args, retval) => typeof retval === 'number');\n}\n",
+    );
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await run(
+      ["realize", file],
+      { out: (m) => out.push(m), err: (m) => err.push(m) },
+      {
+        makeBackend: () => new FakeBackend(() => fakeResponse("redme")),
+        runTests: () =>
+          Promise.resolve({
+            passed: false,
+            timedOut: false,
+            output: "FAIL some assertion\nexpected true got false",
+            testFiles: [],
+            testCount: null,
+          }),
+      },
+    );
+
+    expect(code).toBe(1);
+    const errText = err.join("\n");
+    expect(errText).toContain("expected true got false"); // preserved vitest output
+    expect(errText).toContain("tests FAILED");
+    const baseDir = join(file, "..", "chz", "realization", "red");
+    // Emitted files are kept for human review.
+    expect(existsSync(join(baseDir, "implementations", "redme.ts"))).toBe(true);
+    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
+    expect(cache.symbols.redme.testsPassed).toBe(false);
+    expect(cache.testsSkipped).toBe(false);
   });
 
   it("realize reports a read error for a missing file (exit 1)", async () => {

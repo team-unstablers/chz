@@ -17,6 +17,12 @@ import {
   writeRealization,
   type RealizeBackend,
 } from "./realize.ts";
+import {
+  readChzVersion,
+  runRealizationTests,
+  writeRealizationCache,
+  type RealizationTestOutcome,
+} from "./verify.ts";
 
 /** Sink for user-facing output, injected so the dispatcher stays testable. */
 export interface CliIO {
@@ -32,8 +38,15 @@ export interface CliIO {
 export interface CliDeps {
   /** Factory for the realize backend. Defaults to a {@link ClaudeCliBackend}. */
   makeBackend?: (opts: { model?: string }) => RealizeBackend;
-  /** Clock for the provenance timestamp; defaults to `new Date()`. */
+  /** Clock for the provenance/cache timestamp; defaults to `new Date()`. */
   now?: () => Date;
+  /**
+   * Realization test runner. Defaults to the real vitest spawner
+   * ({@link runRealizationTests}); injected so tests never spawn vitest.
+   */
+  runTests?: (baseDir: string) => Promise<RealizationTestOutcome>;
+  /** chz tool version stamped into the cache; defaults to reading package.json. */
+  chzVersion?: string;
 }
 
 /** A subcommand implementation. Returns the process exit code (sync or async). */
@@ -48,19 +61,23 @@ export const BIN_NAME = "chz";
 /**
  * `chz realize <file>` — realize the `imagine` functions in a `.chz.ts` file.
  *
- * Extracts the specs, sends each to the LLM backend, and emits the auditable
- * implementation + tests under `chz/realization/<base>/`. This milestone
- * (Step 3) stops after emit: it does NOT run the tests or record a cache — that
- * is Step 4, so a reminder is printed to stderr on success.
+ * Extracts the specs, sends each to the LLM backend, emits the auditable
+ * implementation + tests under `chz/realization/<base>/`, then runs those tests
+ * (Step 4). On green it records `realization-cache.json` and exits 0; on red it
+ * keeps the emitted files, shows the vitest output on stderr, records the cache
+ * with `testsPassed: false`, and exits 1 so a human can review the artifacts.
  *
  * Flags:
  *   --json          print the extracted specs as JSON and exit (no LLM call).
  *   --dry-run       print the assembled prompt(s) and exit (no LLM call).
  *   --model <name>  model name to pass to the claude CLI (default: CLI default).
+ *   --skip-tests    emit and cache but do not run the tests (cache marks them
+ *                   unverified); the explicit escape hatch from idea-sketch §4.3.
  */
 const realizeCommand: CommandHandler = (args, io, deps) => {
   let json = false;
   let dryRun = false;
+  let skipTests = false;
   let model: string | undefined;
   let file: string | undefined;
 
@@ -72,6 +89,10 @@ const realizeCommand: CommandHandler = (args, io, deps) => {
     }
     if (arg === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (arg === "--skip-tests") {
+      skipTests = true;
       continue;
     }
     if (arg === "--model") {
@@ -97,7 +118,7 @@ const realizeCommand: CommandHandler = (args, io, deps) => {
 
   if (file === undefined) {
     io.err(`${BIN_NAME} realize: missing <file> argument`);
-    io.err(`usage: ${BIN_NAME} realize <file> [--json] [--dry-run] [--model <name>]`);
+    io.err(`usage: ${BIN_NAME} realize <file> [--json] [--dry-run] [--skip-tests] [--model <name>]`);
     return 1;
   }
   const sourceFile = file;
@@ -148,19 +169,68 @@ const realizeCommand: CommandHandler = (args, io, deps) => {
 
   const makeBackend = deps.makeBackend ?? ((opts) => new ClaudeCliBackend(opts));
   const backend = makeBackend({ model });
+  const runTests = deps.runTests ?? ((baseDir) => runRealizationTests(baseDir));
+  const chzVersion = deps.chzVersion ?? readChzVersion();
 
   return realize(source, sourceFile, { backend, now: deps.now })
-    .then((result) => {
+    .then(async (result) => {
       writeRealization(result);
       const count = result.symbols.length;
+      const realizedAt = (deps.now ? deps.now() : new Date()).toISOString();
       io.out(
         `${sourceFile}: realized ${count} imagine function${count === 1 ? "" : "s"} ` +
           `(model: ${backend.modelLabel})`,
       );
       io.out(`  output: ${result.baseDir}`);
       for (const file of result.files) io.out(`  + ${file.relPath}`);
-      io.err(`${BIN_NAME} realize: tests not yet run (Step 4) — run them before trusting the realization.`);
-      return 0;
+
+      // The cache write is shared across all three outcomes; only the flags
+      // (testsPassed / testsSkipped) differ.
+      const recordCache = (testsPassed: boolean, testsSkipped: boolean): void => {
+        const cachePath = writeRealizationCache({
+          result,
+          source,
+          chzVersion,
+          modelLabel: backend.modelLabel,
+          realizedAt,
+          testsPassed,
+          testsSkipped,
+        });
+        io.out(`  cache: ${cachePath}`);
+      };
+
+      // --skip-tests: emit + cache, but record the realization as unverified.
+      if (skipTests) {
+        io.err(
+          `${BIN_NAME} realize: --skip-tests set — emitted files were NOT verified; ` +
+            `cache records testsPassed: false (skipped).`,
+        );
+        recordCache(false, true);
+        return 0;
+      }
+
+      const outcome = await runTests(result.baseDir);
+      if (outcome.passed) {
+        recordCache(true, false);
+        const testsLabel = outcome.testCount === null ? "tests" : `${outcome.testCount} test`;
+        const plural = outcome.testCount === 1 ? "" : "s";
+        io.out(
+          `${sourceFile}: realized ${count} symbol${count === 1 ? "" : "s"}, ` +
+            `${testsLabel}${outcome.testCount === null ? "" : plural} passed`,
+        );
+        return 0;
+      }
+
+      // Red: keep the emitted files, surface the full vitest output for review,
+      // and record the realization as failed so the cache reflects reality.
+      io.err(outcome.output);
+      io.err(
+        outcome.timedOut
+          ? `${BIN_NAME} realize: tests TIMED OUT — see output above; emitted files kept for review.`
+          : `${BIN_NAME} realize: tests FAILED — see output above; emitted files kept for review.`,
+      );
+      recordCache(false, false);
+      return 1;
     })
     .catch((error) => {
       io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
@@ -187,9 +257,10 @@ export function buildUsage(): string {
     "",
     "commands:",
     `  realize <file>   realize the imagine symbols in a .chz.ts file`,
-    `                   [--json]      print the extracted specs as JSON`,
-    `                   [--dry-run]   print the assembled prompt(s), no LLM call`,
-    `                   [--model <n>] model to pass to the claude CLI`,
+    `                   [--json]        print the extracted specs as JSON`,
+    `                   [--dry-run]     print the assembled prompt(s), no LLM call`,
+    `                   [--skip-tests]  emit + cache but do not run the tests`,
+    `                   [--model <n>]   model to pass to the claude CLI`,
     "",
     "options:",
     "  -h, --help       show this help and exit",
