@@ -8,13 +8,16 @@ expresses intent (specs, contracts, oversight); the LLM produces the
 implementation. Cheese's core differentiator is that this division of roles is
 enforced by the language grammar and the compiler, not left to convention.
 
-**Current status: concept / design-discussion stage. There is no code yet.**
+**Current status: early v0.** The pipeline runs end-to-end for one example
+(`examples/collision.chz.ts`), but the current `src/` implementation is a
+one-shot prototype that predates the design docs below — expect large
+rewrites. When code and docs disagree, the docs are more current.
 
-Detailed design discussion lives in `docs/idea-sketches/` (Korean, living
-documents). For anything not covered here — open design questions, rationale,
-discussion history — read the latest sketch first:
-`docs/idea-sketches/260723-00-init.md`. If this file and a sketch disagree,
-the sketch is more likely to be current.
+Design lives in two places (both Korean, living documents): numbered specs in
+`docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,
+`62` dependency graph — and `docs/idea-sketches/` for open questions,
+rationale, and discussion history (`260723-00-init.md` is the latest sketch).
+If this file and those docs disagree, the docs are more likely to be current.
 
 ## Core concepts
 
@@ -69,6 +72,40 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
 - Precedent: Civet, a small-team TS-superset transpiler, proves this path is
   viable.
 
+## Realize subsystem design (docs 60–62)
+
+- **Realization layout (60, 00)** — `chz realize` emits into
+  `chz/realization/{name}/`. Human-written code is copied in alongside the
+  realized per-symbol files: code that does not reference imagine symbols
+  goes to `implementations/__prologue__.ts`, code that does goes to
+  `__epilogue__.ts`. One-way ES-module layering (prologue ← realized code ←
+  epilogue) means realized code may only reference prologue symbols;
+  referencing epilogue is an error. Build/CI compile this directory alone,
+  with no LLM. `.chz.ts` stays the source of truth; realized code is edited
+  only via `@chz-realize-override` markers, and unauthorized drift is caught
+  by hashes in `realization-cache.json`. Preserving top-level side-effect
+  order across the split is an open design issue.
+- **Realizer (61)** — the LLM adapter/harness:
+  `realize(symbol, context) → resolution`. `ChzRealizerBase` owns the agentic
+  loop, tool dispatch, boundary checks (reads inside project root, writes
+  only to the realization output dir), turn caps, and retries; subclasses
+  implement only the transport (`chat()`). `ClaudeCodeRealizer` is the
+  exception: it delegates the whole loop to Claude Code and injects the
+  harness rules instead. The tool set is fixed (ReadFile, ReadDir, WriteFile,
+  FindAndReplace, RunTests, RunTypeCheck, RunLinter, Finish, Abort) —
+  deliberately no shell tool. `Finish` is only a claim: the engine re-runs
+  verification independently, feeds red results back as bounded retries, and
+  on final failure halts realize for dependent symbols.
+- **Dependency graph (62)** — a symbol-level DAG drives realize order
+  (topological, leaves first). Edges are discovered in three stages:
+  signature type refs → requirements/ensure mentions → actual usage extracted
+  from realized artifacts (authoritative from then on). Cycles (SCCs) are
+  realized together as one session — warned, and an error past a size cap;
+  extracting a human-owned interface is the recommended fix. Invalidation
+  propagates to dependents only when a symbol's public surface (signature +
+  ensure contracts) changed; otherwise dependents merely re-run their tests
+  and are invalidated only if those go red.
+
 ## v0 scope
 
 - Syntax: `imagine function/class` + `requirements` + `ensure` + minimal
@@ -76,5 +113,6 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
 - Pipeline: `.chz` preprocessing (declaration-level) → tsc diagnostics →
   realize (via the claude CLI) → emit TS + vitest tests → on green tests,
   record the hash in a lockfile.
-- First milestone: a single function (`충돌판정_2D`, 2D collision check)
-  end-to-end — `.chz` → realize → tests green.
+- First milestone — a single function (`충돌판정_2D`, 2D collision check)
+  end-to-end, `.chz` → realize → tests green — is **done**
+  (`examples/collision.chz.ts`).
