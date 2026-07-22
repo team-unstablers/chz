@@ -121,6 +121,9 @@ imagine class ShootingGame {
     requirements(`총알 발사 효과음을 생성하십시오. 짧고 날카로운 소리여야 합니다.`);
   };
 }
+
+// imagine 함수는 평범한 함수처럼 호출할 수 있습니다.
+console.log(greetLikePirate('치즈군'));
 ```
 
 ### 그러면, 이 코드는 어떻게 실행하나요?
@@ -136,10 +139,12 @@ $ chz realize example.chz.ts
 |- chz/realization
     |- example/
         |- realization-cache.json                # 증분 realize를 위한 캐시
-        |- implementation.ts                     # LLM이 구현한 함수/클래스로의 진입점
+        |- implementation.ts                     # 진입점 — prologue → 구현 → epilogue 순으로 연결합니다
         |- implementations/                      # 실제 구현이 들어 있는 디렉토리 
+            |- __prologue__.ts                   # 사람이 작성한 코드 중 imagine 심볼을 참조하지 않는 부분 (a, b, c, greet)
             |- greetLikePirate.ts                # 실제 구현된 greetLikePirate 함수
             |- ShootingGame.ts                   # 실제 구현된 ShootingGame 클래스
+            |- __epilogue__.ts                   # 사람이 작성한 코드 중 imagine 심볼을 참조하는 부분 (마지막의 console.log)
         |- tests/                                # 테스트 코드
             |- test_greetLikePirate.ensure.ts    # 사람이 작성한 ensure() 계약 테스트
             |- test_greetLikePirate.autogen.ts   # 구현 과정에서 LLM이 필요하다고 판단하여 자동 작성한 테스트
@@ -153,5 +158,12 @@ $ chz realize example.chz.ts
                 |- shootSound.ogg
 ```
 
-realize에 대한 자세한 명세는 [realize.md](realize.md)에서 확인할 수 있습니다. (작성 중)
+사람이 직접 작성한 코드도 realization 디렉토리에 복사된다는 점에 주목하십시오.
+`chz build`는 이 디렉토리만으로 — LLM 호출 없이 — 빌드를 수행해야 하기
+때문입니다. 이때 imagine 심볼을 참조하지 않는 코드는 `__prologue__.ts`로,
+참조하는 코드는 `__epilogue__.ts`로 나뉘어 저장됩니다. 구현보다 먼저 로드되어야
+하는 코드와 나중에 로드되어야 하는 코드의 구분이며, 자세한 규칙은
+[60-realize-intro.ko.md](60-realize-intro.ko.md)를 참조하십시오.
+
+realize에 대한 자세한 명세는 [60-realize-intro.ko.md](60-realize-intro.ko.md)에서 확인할 수 있습니다.
 

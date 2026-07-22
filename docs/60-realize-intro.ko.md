@@ -157,3 +157,47 @@ function payDepositInterest(account: DepositAccount, baseRate: number): Interest
 - `ensure` 계약 테스트는 오버라이드를 포함한 최종 코드에 대해 실행되며, 실패하면 빌드가 실패합니다.
 - 계약 역시 사람이 작성한 스펙입니다. 오버라이드와 계약이 충돌한다는 것은 '사람이 작성한 의도끼리의 모순'이며, 치즈는 이를 감추지 않고 드러냅니다. 오버라이드를 고치거나, 계약을 갱신하십시오.
 - 단, `--skip-tests` 같은 옵션을 명시적으로 사용한 경우에는 검증을 건너뛰고 편집이 우선할 수 있습니다. 이 경우에도 경고는 출력됩니다.
+
+## 사람이 작성한 코드는 어디에 저장되나요?
+
+`chz build`와 CI는 커밋된 realization 디렉토리만으로 — LLM 호출 없이 — 빌드를
+수행합니다. 따라서 realization 디렉토리는 그 자체로 완결된 TypeScript 컴파일
+단위여야 하며, LLM이 생성한 구현뿐 아니라 **사람이 직접 작성한 코드의 사본**도
+포함해야 합니다.
+
+이때 사람 코드는 imagine 심볼과의 관계에 따라 두 파일로 나뉘어 저장됩니다
+(00 문서의 `example.chz.ts` 기준):
+
+```
+chz/realization/example/implementations/
+├── __prologue__.ts     # imagine 심볼을 참조하지 않는 사람 코드
+├── greetLikePirate.ts  # realize 산출물 (imagine 심볼당 파일 하나)
+├── ShootingGame.ts
+└── __epilogue__.ts     # imagine 심볼을 참조하는 사람 코드
+```
+
+- **`__prologue__.ts`** — imagine 심볼이 없는, 원래부터 구현되어 있는 심볼들
+  (타입 정의, 상수, 헬퍼 함수 등)이 모입니다. realize 산출물보다 **먼저**
+  로드됩니다.
+- **`__epilogue__.ts`** — imagine 심볼을 참조하는 사람 코드(배선 코드, 진입
+  코드)가 모입니다. realize 산출물보다 **나중에** 로드됩니다.
+
+세 층은 평범한 ES 모듈 import로 연결됩니다. `__prologue__.ts`를 realize
+산출물들이 import하고, 그 산출물들을 `__epilogue__.ts`가 import하는 단방향
+레이어링입니다. 이 레이어링에서 중요한 규칙 하나가 따라 나옵니다:
+
+> **realize 산출물이 참조할 수 있는 사람 코드는 `__prologue__.ts`에 있는
+> 것뿐입니다.** 구현이 `__epilogue__.ts`의 심볼을 참조하면 import가 순환하게
+> 되므로, realize 단계에서 에러로 보고됩니다. 구현에게 보여주고 싶은 타입과
+> 헬퍼는 imagine 심볼을 참조하지 않는 형태로 작성하여 prologue에 남게 하십시오.
+
+또한 `.chz.ts` 원본이 여전히 유일한 source of truth입니다. prologue와
+epilogue는 파생 산출물이므로 직접 수정해서는 안 되며(수정은 `.chz.ts`에서),
+직접 편집은 위의 '무단 드리프트'와 동일하게 해시 비교로 감지됩니다.
+
+> **NOTE (설계 중)**: 최상위(top-level)에서 부작용을 일으키는 문장들은 분할
+> 후에도 소스에서의 상대 실행 순서가 보존되어야 합니다. 참조 여부만으로 나누면
+> 순서가 보존되지 않는 배치가 존재합니다 — 예를 들어 imagine 심볼을 참조하는
+> 문장 *뒤에* 놓인, 참조하지 않는 부작용 문장은 prologue로 끌려 올라가면서
+> 실행 시점이 앞당겨집니다. 이런 배치를 에러로 보고할지, 순서를 보존하는 더
+> 정교한 분할을 수행할지는 설계 중입니다.
