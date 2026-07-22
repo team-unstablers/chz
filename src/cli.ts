@@ -6,7 +6,10 @@
  * It intentionally parses `process.argv` by hand — v0 is a zero-dependency CLI.
  */
 
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+
+import { ChzSyntaxError, extractImagineSpecs, type ImagineSpec } from "./preprocessor.ts";
 
 /** Sink for user-facing output, injected so the dispatcher stays testable. */
 export interface CliIO {
@@ -20,20 +23,82 @@ export type CommandHandler = (args: string[], io: CliIO) => number;
 export const BIN_NAME = "chz";
 
 /**
- * `chz realize <file>` — realize the `imagine` symbols in a `.chz.ts` file.
- * Not implemented in this milestone; the command exists only so the dispatch
- * wiring and usage text are in place for the realize engine to fill in later.
+ * `chz realize <file>` — extract the `imagine` specs from a `.chz.ts` file.
+ *
+ * In this milestone (Step 2) the command runs the preprocessor and prints a
+ * summary of the extracted specs (or their raw JSON with `--json`), then bows
+ * out — the actual realize engine (the LLM call) lands in Step 3, so the
+ * command still reports "not implemented yet" and exits 1.
  */
 const realizeCommand: CommandHandler = (args, io) => {
-  const file = args[0];
+  let json = false;
+  let file: string | undefined;
+  for (const arg of args) {
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      io.err(`${BIN_NAME} realize: unknown option '${arg}'`);
+      return 1;
+    }
+    if (file === undefined) file = arg;
+  }
+
   if (file === undefined) {
     io.err(`${BIN_NAME} realize: missing <file> argument`);
-    io.err(`usage: ${BIN_NAME} realize <file>`);
+    io.err(`usage: ${BIN_NAME} realize <file> [--json]`);
     return 1;
   }
-  io.err(`${BIN_NAME} realize: not implemented yet (requested: ${file})`);
+
+  let source: string;
+  try {
+    source = readFileSync(file, "utf8");
+  } catch (error) {
+    io.err(`${BIN_NAME} realize: cannot read file '${file}': ${(error as Error).message}`);
+    return 1;
+  }
+
+  let specs: ImagineSpec[];
+  try {
+    specs = extractImagineSpecs(source, file);
+  } catch (error) {
+    if (error instanceof ChzSyntaxError) {
+      io.err(`${BIN_NAME} realize: ${error.message}`);
+      return 1;
+    }
+    throw error;
+  }
+
+  if (json) {
+    io.out(JSON.stringify(specs, null, 2));
+  } else {
+    for (const line of formatSpecSummary(file, specs)) io.out(line);
+  }
+
+  io.err(`${BIN_NAME} realize: realize engine not implemented yet (Step 3)`);
   return 1;
 };
+
+/** Render a human-readable summary of the extracted specs, one string per line. */
+function formatSpecSummary(fileName: string, specs: ImagineSpec[]): string[] {
+  const lines: string[] = [
+    `${fileName}: found ${specs.length} imagine function${specs.length === 1 ? "" : "s"}`,
+  ];
+  for (const spec of specs) {
+    const predicates = spec.ensures.filter((e) => e.kind === "predicate").length;
+    const naturals = spec.ensures.filter((e) => e.kind === "natural").length;
+    // Collapse whitespace so a multi-line parameter list stays on one summary line.
+    const params = spec.parameters.replace(/\s+/g, " ").trim();
+    const signature = `${spec.name}(${params})${spec.returnType ? `: ${spec.returnType}` : ""}`;
+    lines.push(`  - ${signature}`);
+    lines.push(
+      `      requirements: ${spec.requirements !== null ? "yes" : "no"} | ` +
+        `ensure: ${spec.ensures.length} (${predicates} predicate, ${naturals} natural)`,
+    );
+  }
+  return lines;
+}
 
 /**
  * Registry of subcommands. New subcommands (build, check, …) are added here;
@@ -54,6 +119,7 @@ export function buildUsage(): string {
     "",
     "commands:",
     `  realize <file>   realize the imagine symbols in a .chz.ts file`,
+    `                   (--json prints the extracted specs as JSON)`,
     "",
     "options:",
     "  -h, --help       show this help and exit",
