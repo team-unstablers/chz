@@ -161,7 +161,7 @@ class ChzExampleOpenAIAgenticRealizer implements ChzRealizer {
     context: ChzRealizeContext,
   ): Promise<ChzImagineSymbolResolution> {
     const messages: OpenAI.ChatCompletionMessageParam[] = [
-      { role: 'system', content: CHZ_HARNESS_SYSTEM_PROMPT }, // '하네스 툴' 절 참조
+      { role: 'system', content: CHZ_HARNESS_SYSTEM_PROMPT }, // 하네스 시스템 프롬프트: 64 문서 참조
       { role: 'user', content: this.buildPrompt(symbol, context) },
     ];
 
@@ -171,7 +171,7 @@ class ChzExampleOpenAIAgenticRealizer implements ChzRealizer {
       const response = await this.openai.chat.completions.create({
         model: 'gpt-oss-20b',
         messages,
-        tools: CHZ_HARNESS_TOOLS, // ReadFile, WriteFile, RunTests, Finish, ... ('하네스 툴' 절 참조)
+        tools: CHZ_HARNESS_TOOLS, // ReadFile, WriteFile, RunTests, Finish, ... (63 문서 참조)
       });
 
       const message = response.choices[0].message;
@@ -246,27 +246,14 @@ abstract class ChzRealizerBase implements ChzRealizer {
 
 ## 하네스 툴
 
-에이전틱 세션에서 LLM에게 주어지는 툴은 다음이 전부입니다:
-
-| 툴 | 시그니처 | 설명과 경계 |
-|----|----------|-------------|
-| `ReadFile` | `(path: string): string` | 파일 읽기. `projectRoot` 내부만 허용되며, `.env`·`.git` 등 차단 목록에 걸리는 경로는 거부됩니다. |
-| `ReadDir` | `(path: string): string[]` | 디렉토리 목록. `ReadFile`과 동일한 경계를 따릅니다. |
-| `WriteFile` | `(path: string, content: string): void` | 파일 쓰기. **`outputDir` 내부만** 허용됩니다. 스코프 밖의 기존 코드는 이 툴로 수정할 수 없습니다. |
-| `FindAndReplace` | `(path: string, find: string, replace: string): void` | 자기 산출물의 부분 수정용. `WriteFile`과 동일한 경계를 따릅니다. |
-| `RunTests` | `(testFiles: string[]): TestResult[]` | 엔진이 고정된 테스트 러너(vitest)로 실행하고 결과만 돌려줍니다. |
-| `RunTypeCheck` | `(): TypeCheckResult` | 엔진이 tsc를 실행하고 진단 결과를 돌려줍니다. |
-| `RunLinter` | `(): LintResult[]` | 엔진이 린터를 실행하고 결과를 돌려줍니다. |
-| `Finish` | `(): void` | 산출물이 완성되었음을 선언하고 세션을 종료합니다. |
-| `Abort` | `(reason: string): void` | 구현이 불가능함(요구사항 모순, 정보 부족 등)을 선언하고 세션을 포기합니다. |
-
-여기서 중요한 설계 결정은 **셸 툴이 없다**는 점입니다. Claude Code 같은
-범용 하네스와 달리, Realizer의 검증 수단(`RunTests`/`RunTypeCheck`/`RunLinter`)은
-엔진이 미리 정해 둔 명령을 실행할 뿐이므로, LLM이 임의의 명령을 실행할 수 있는
-표면 자체가 존재하지 않습니다. 읽기는 `projectRoot`로, 쓰기는 `outputDir`로
-제한되므로, "스코프 외의 코드를 수정하거나 삭제하지 못하도록 제한한다"는 앞의
-역할 정의는 별도의 감시 장치가 아니라 툴 디스패처의 경로 검사 그 자체로
-구현됩니다.
+에이전틱 세션에서 LLM에게 주어지는 툴의 목록과 명세는
+[63 문서](63-realize-harness-rules.ko.md)의 '하네스 툴 명세' 절에서 정의합니다.
+요약하면 — 읽기(`ReadFile`/`ReadDir`)와 검색(`Glob`/`Grep`)은 `projectRoot`로,
+쓰기(`WriteFile`/`FindAndReplace`)는 `outputDir`로 제한되고,
+검증(`RunTests`/`RunTypeCheck`/`RunLinter`)은 엔진이 미리 정해 둔 명령만
+실행하며, 세션의 종료는 `Finish`/`Block`/`Abort`로 선언합니다. **셸 툴은
+의도적으로 없습니다.** 사람에게 질문하는 `AskUser` 툴과 에스컬레이션 규칙
+역시 63 문서를 따릅니다.
 
 ## 세션의 종료와 검증
 
