@@ -23,7 +23,10 @@ the sketch is more likely to be current.
 - **realize** — a development-time step (`chz realize`) where an LLM-based
   code resolver emits the implementation, typedefs, and unit tests for
   `imagine` symbols. Realized artifacts are committed to git; builds and CI
-  run only from committed realized code and never call an LLM.
+  run only from committed realized code and never call an LLM. Realized code
+  targets auditability, not just correctness: it is densely commented, with
+  explicit `ASSUMPTION:` notes wherever the requirements left room for
+  interpretation.
 - **`required`** — "usage creates the contract": referencing a not-yet-existing
   symbol of an `imagine` class/module (e.g. `game.start()`) places a
   compile-time obligation on the LLM to implement it. Can also be declared
