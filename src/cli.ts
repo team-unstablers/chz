@@ -10,6 +10,13 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { ChzSyntaxError, extractImagineSpecs, type ImagineSpec } from "./preprocessor.ts";
+import {
+  buildRealizePrompt,
+  ClaudeCliBackend,
+  realize,
+  writeRealization,
+  type RealizeBackend,
+} from "./realize.ts";
 
 /** Sink for user-facing output, injected so the dispatcher stays testable. */
 export interface CliIO {
@@ -17,25 +24,68 @@ export interface CliIO {
   err: (message: string) => void;
 }
 
-/** A subcommand implementation. Returns the process exit code. */
-export type CommandHandler = (args: string[], io: CliIO) => number;
+/**
+ * Injected dependencies for command handlers. Kept out of {@link CliIO} because
+ * only realize needs them: they let tests exercise the full realize wiring with
+ * a fake backend and a fixed clock, never touching the real claude CLI.
+ */
+export interface CliDeps {
+  /** Factory for the realize backend. Defaults to a {@link ClaudeCliBackend}. */
+  makeBackend?: (opts: { model?: string }) => RealizeBackend;
+  /** Clock for the provenance timestamp; defaults to `new Date()`. */
+  now?: () => Date;
+}
+
+/** A subcommand implementation. Returns the process exit code (sync or async). */
+export type CommandHandler = (
+  args: string[],
+  io: CliIO,
+  deps: CliDeps,
+) => number | Promise<number>;
 
 export const BIN_NAME = "chz";
 
 /**
- * `chz realize <file>` — extract the `imagine` specs from a `.chz.ts` file.
+ * `chz realize <file>` — realize the `imagine` functions in a `.chz.ts` file.
  *
- * In this milestone (Step 2) the command runs the preprocessor and prints a
- * summary of the extracted specs (or their raw JSON with `--json`), then bows
- * out — the actual realize engine (the LLM call) lands in Step 3, so the
- * command still reports "not implemented yet" and exits 1.
+ * Extracts the specs, sends each to the LLM backend, and emits the auditable
+ * implementation + tests under `chz/realization/<base>/`. This milestone
+ * (Step 3) stops after emit: it does NOT run the tests or record a cache — that
+ * is Step 4, so a reminder is printed to stderr on success.
+ *
+ * Flags:
+ *   --json          print the extracted specs as JSON and exit (no LLM call).
+ *   --dry-run       print the assembled prompt(s) and exit (no LLM call).
+ *   --model <name>  model name to pass to the claude CLI (default: CLI default).
  */
-const realizeCommand: CommandHandler = (args, io) => {
+const realizeCommand: CommandHandler = (args, io, deps) => {
   let json = false;
+  let dryRun = false;
+  let model: string | undefined;
   let file: string | undefined;
-  for (const arg of args) {
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
     if (arg === "--json") {
       json = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (arg === "--model") {
+      const next = args[i + 1];
+      if (next === undefined) {
+        io.err(`${BIN_NAME} realize: --model requires a value`);
+        return 1;
+      }
+      model = next;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--model=")) {
+      model = arg.slice("--model=".length);
       continue;
     }
     if (arg.startsWith("--")) {
@@ -47,21 +97,22 @@ const realizeCommand: CommandHandler = (args, io) => {
 
   if (file === undefined) {
     io.err(`${BIN_NAME} realize: missing <file> argument`);
-    io.err(`usage: ${BIN_NAME} realize <file> [--json]`);
+    io.err(`usage: ${BIN_NAME} realize <file> [--json] [--dry-run] [--model <name>]`);
     return 1;
   }
+  const sourceFile = file;
 
   let source: string;
   try {
-    source = readFileSync(file, "utf8");
+    source = readFileSync(sourceFile, "utf8");
   } catch (error) {
-    io.err(`${BIN_NAME} realize: cannot read file '${file}': ${(error as Error).message}`);
+    io.err(`${BIN_NAME} realize: cannot read file '${sourceFile}': ${(error as Error).message}`);
     return 1;
   }
 
   let specs: ImagineSpec[];
   try {
-    specs = extractImagineSpecs(source, file);
+    specs = extractImagineSpecs(source, sourceFile);
   } catch (error) {
     if (error instanceof ChzSyntaxError) {
       io.err(`${BIN_NAME} realize: ${error.message}`);
@@ -70,35 +121,52 @@ const realizeCommand: CommandHandler = (args, io) => {
     throw error;
   }
 
+  // --json: inspection only. Preserve the Step 2 behaviour of dumping the specs,
+  // but this is now a successful pass (exit 0) since realize is implemented.
   if (json) {
     io.out(JSON.stringify(specs, null, 2));
-  } else {
-    for (const line of formatSpecSummary(file, specs)) io.out(line);
+    return 0;
   }
 
-  io.err(`${BIN_NAME} realize: realize engine not implemented yet (Step 3)`);
-  return 1;
+  // --dry-run: show what would be sent to the LLM, without calling it.
+  if (dryRun) {
+    if (specs.length === 0) {
+      io.err(`${BIN_NAME} realize: no imagine functions found in '${sourceFile}'`);
+      return 0;
+    }
+    for (const spec of specs) {
+      io.out(`===== realize prompt: ${spec.name} =====`);
+      io.out(buildRealizePrompt(spec, source, sourceFile));
+    }
+    return 0;
+  }
+
+  if (specs.length === 0) {
+    io.out(`${sourceFile}: no imagine functions to realize`);
+    return 0;
+  }
+
+  const makeBackend = deps.makeBackend ?? ((opts) => new ClaudeCliBackend(opts));
+  const backend = makeBackend({ model });
+
+  return realize(source, sourceFile, { backend, now: deps.now })
+    .then((result) => {
+      writeRealization(result);
+      const count = result.symbols.length;
+      io.out(
+        `${sourceFile}: realized ${count} imagine function${count === 1 ? "" : "s"} ` +
+          `(model: ${backend.modelLabel})`,
+      );
+      io.out(`  output: ${result.baseDir}`);
+      for (const file of result.files) io.out(`  + ${file.relPath}`);
+      io.err(`${BIN_NAME} realize: tests not yet run (Step 4) — run them before trusting the realization.`);
+      return 0;
+    })
+    .catch((error) => {
+      io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
+      return 1;
+    });
 };
-
-/** Render a human-readable summary of the extracted specs, one string per line. */
-function formatSpecSummary(fileName: string, specs: ImagineSpec[]): string[] {
-  const lines: string[] = [
-    `${fileName}: found ${specs.length} imagine function${specs.length === 1 ? "" : "s"}`,
-  ];
-  for (const spec of specs) {
-    const predicates = spec.ensures.filter((e) => e.kind === "predicate").length;
-    const naturals = spec.ensures.filter((e) => e.kind === "natural").length;
-    // Collapse whitespace so a multi-line parameter list stays on one summary line.
-    const params = spec.parameters.replace(/\s+/g, " ").trim();
-    const signature = `${spec.name}(${params})${spec.returnType ? `: ${spec.returnType}` : ""}`;
-    lines.push(`  - ${signature}`);
-    lines.push(
-      `      requirements: ${spec.requirements !== null ? "yes" : "no"} | ` +
-        `ensure: ${spec.ensures.length} (${predicates} predicate, ${naturals} natural)`,
-    );
-  }
-  return lines;
-}
 
 /**
  * Registry of subcommands. New subcommands (build, check, …) are added here;
@@ -119,7 +187,9 @@ export function buildUsage(): string {
     "",
     "commands:",
     `  realize <file>   realize the imagine symbols in a .chz.ts file`,
-    `                   (--json prints the extracted specs as JSON)`,
+    `                   [--json]      print the extracted specs as JSON`,
+    `                   [--dry-run]   print the assembled prompt(s), no LLM call`,
+    `                   [--model <n>] model to pass to the claude CLI`,
     "",
     "options:",
     "  -h, --help       show this help and exit",
@@ -136,9 +206,11 @@ function isHelpFlag(arg: string): boolean {
 
 /**
  * Dispatch `argv` (already stripped of `node` and the script path) against
- * {@link COMMANDS}. Returns the exit code; all output goes through `io`.
+ * {@link COMMANDS}. Returns the exit code; all output goes through `io`. Sync
+ * commands return a number; `realize` returns a promise, so callers that may hit
+ * it should `await` the result.
  */
-export function run(argv: string[], io: CliIO): number {
+export function run(argv: string[], io: CliIO, deps: CliDeps = {}): number | Promise<number> {
   const [command, ...rest] = argv;
 
   if (command === undefined || isHelpFlag(command)) {
@@ -153,7 +225,7 @@ export function run(argv: string[], io: CliIO): number {
     return 1;
   }
 
-  return handler(rest, io);
+  return handler(rest, io, deps);
 }
 
 /** Default IO sink: line-buffered writes to the real stdout/stderr. */
@@ -162,14 +234,13 @@ const consoleIO: CliIO = {
   err: (message) => process.stderr.write(`${message}\n`),
 };
 
-function main(): void {
-  const exitCode = run(process.argv.slice(2), consoleIO);
-  process.exitCode = exitCode;
+async function main(): Promise<void> {
+  process.exitCode = await run(process.argv.slice(2), consoleIO);
 }
 
 // Only run when invoked directly (e.g. `tsx src/cli.ts`), not when imported by
 // tests. Under NodeNext, `process.argv[1]` is the executed entry script.
 const invokedPath = process.argv[1];
 if (invokedPath !== undefined && import.meta.url === pathToFileURL(invokedPath).href) {
-  main();
+  void main();
 }
