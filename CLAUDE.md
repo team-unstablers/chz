@@ -15,14 +15,16 @@ rewrites. When code and docs disagree, the docs are more current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,
-`62` dependency graph — and `docs/idea-sketches/` for open questions,
-rationale, and discussion history (`260723-00-init.md` is the latest sketch).
-If this file and those docs disagree, the docs are more likely to be current.
+`62` dependency graph, `63` harness rules & tool spec, `64` harness system
+prompt — and `docs/idea-sketches/` for open questions, rationale, and
+discussion history (`260723-00-init.md` is the latest sketch). If this file
+and those docs disagree, the docs are more likely to be current.
 
 Writing conventions for the numbered specs — number-band allocation, target
 audience and tone, cross-reference and code-fence rules — are defined in
 `docs/WRITING_RULES.md`. `docs/idea-sketches/` is a free-form scratchpad and
-exempt from those rules.
+exempt from those rules, and docs `63`–`64` are deliberately exempt as well
+(they are deep implementation-level references, denser than the other specs).
 
 ## Core concepts
 
@@ -77,7 +79,7 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
 - Precedent: Civet, a small-team TS-superset transpiler, proves this path is
   viable.
 
-## Realize subsystem design (docs 60–62)
+## Realize subsystem design (docs 60–64)
 
 - **Realization layout (60, 00)** — `chz realize` emits into
   `chz/realization/{name}/`. Human-written code is copied in alongside the
@@ -96,11 +98,43 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   only to the realization output dir), turn caps, and retries; subclasses
   implement only the transport (`chat()`). `ClaudeCodeRealizer` is the
   exception: it delegates the whole loop to Claude Code and injects the
-  harness rules instead. The tool set is fixed (ReadFile, ReadDir, WriteFile,
-  FindAndReplace, RunTests, RunTypeCheck, RunLinter, Finish, Abort) —
-  deliberately no shell tool. `Finish` is only a claim: the engine re-runs
-  verification independently, feeds red results back as bounded retries, and
-  on final failure halts realize for dependent symbols.
+  harness rules instead. The tool set is fixed (ReadFile, ReadDir, Glob,
+  Grep, WriteFile, FindAndReplace, RunTests, RunTypeCheck, RunLinter,
+  AskUser, Finish, Block, Abort — full spec in doc 63) — deliberately no
+  shell tool. `Finish` is only a claim: the engine re-runs verification
+  independently, feeds red results back as bounded retries, and on final
+  failure halts realize for dependent symbols.
+- **Harness rules & tool spec (63)** — decision boundaries plus the detailed
+  tool contract. Escalation ladder for decisions the LLM must not make alone:
+  `ASSUMPTION:` comment → `AskUser` (structured multi-question schema;
+  engine records answers into `CONTEXTS.md`, which is injected into later
+  sessions and included in the invalidation hash) → `Block` (human must act;
+  outcome `blocked`, nothing cached) → `Abort` (outcome `failed`). Session
+  outcomes are a discriminated union resolved/blocked/failed. Tool-spec
+  principles: boundaries enforced in the dispatcher (realpath+contains;
+  read = projectRoot minus a secrets blocklist, write = outputDir, hard-fail
+  instead of asking); every error message is a recovery hint; descriptions
+  must match implementation; one output-bounding boundary (2000 lines/50KB,
+  overflow saved under `.chz/tool-output/`); write tools return inline
+  diagnostics. ReadFile/ReadDir are paged (offset/limit, line-number
+  prefixes); FindAndReplace is exact-match only (fuzzy is a future note);
+  read-before-write and stale checks are enforced via a per-session
+  read-file hash set; Glob/Grep delegate to a pinned ripgrep.
+- **Harness system prompt (64)** — the canonical prompt `ChzRealizerBase`
+  injects (English canonical text lives in the doc itself; edit the doc to
+  edit the prompt). Layered: prose carries only what code cannot enforce —
+  role division, triage-first, ASSUMPTION vs escalation, auditability style
+  (dense comments, restricted subset, prologue-only imports, override
+  markers untouchable), explicit session endings. Structure: system =
+  [fixed role part (byte-identical across sessions, cache-friendly),
+  per-session baseline]. Baseline is deterministic and frozen per session:
+  `<env>` block (read/write roots, @profile, model, date) → symbol spec
+  (verbatim) → resolved dependency surfaces (name-sorted excerpts) →
+  CONTEXTS.md → verification feedback (retries only); absent sources are
+  omitted, unreadable ones fail the session start. At the turn cap only
+  Finish/Block/Abort stay materialized and a closing prompt forces an
+  explicit ending with a handover summary; no ending → `failed`. Whether
+  prompt revisions join the invalidation hash is an open question.
 - **Dependency graph (62)** — a symbol-level DAG drives realize order
   (topological, leaves first). Edges are discovered in three stages:
   signature type refs → requirements/ensure mentions → actual usage extracted
