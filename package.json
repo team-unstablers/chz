@@ -1,0 +1,21 @@
+{
+  "name": "chz",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cheese (.chz) — a TypeScript superset where the LLM writes the implementation and the human supervises.",
+  "bin": {
+    "chz": "src/cli.ts"
+  },
+  "scripts": {
+    "chz": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

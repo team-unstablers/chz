@@ -1,2 +1,10 @@
 .DS_Store
 .idea/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+.npm/
+.vitest/
