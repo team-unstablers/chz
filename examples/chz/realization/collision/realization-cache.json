@@ -1,0 +1,18 @@
+{
+  "chzVersion": "0.0.0",
+  "sourceFileName": "collision.chz.ts",
+  "sourceHash": "74fd668ef9baf1757e9a72786c02d560cc945e97ca08fdf6cff3c2dde073b598",
+  "testsSkipped": false,
+  "symbols": {
+    "충돌판정_2D": {
+      "name": "충돌판정_2D",
+      "specHash": "24955fff4294048c699a4b35bde70130b1ec3ffe23f327b32d1cb870cde8a2a5",
+      "implementationHash": "e763dc25a2ca37a9ab7e11f422a9c38b07e4dafe0961e2b8e8c596247d4a5137",
+      "autogenTestHash": "94bb7e86f23c0d3a40fd435123e22badace66b340da75d460e2703d6155dd593",
+      "ensureTestHash": "691372d02e7c67664f06bb92eac48a4ce7153de141dce65651add13a94abc894",
+      "model": "claude CLI (default model)",
+      "realizedAt": "2026-07-22T18:56:45.657Z",
+      "testsPassed": true
+    }
+  }
+}
