@@ -19,6 +19,11 @@ Design lives in two places (both Korean, living documents): numbered specs in
 rationale, and discussion history (`260723-00-init.md` is the latest sketch).
 If this file and those docs disagree, the docs are more likely to be current.
 
+Writing conventions for the numbered specs — number-band allocation, target
+audience and tone, cross-reference and code-fence rules — are defined in
+`docs/WRITING_RULES.md`. `docs/idea-sketches/` is a free-form scratchpad and
+exempt from those rules.
+
 ## Core concepts
 
 - **`imagine`** — the human declares a function/class/module with only a

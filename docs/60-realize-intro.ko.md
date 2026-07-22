@@ -166,7 +166,7 @@ function payDepositInterest(account: DepositAccount, baseRate: number): Interest
 포함해야 합니다.
 
 이때 사람 코드는 imagine 심볼과의 관계에 따라 두 파일로 나뉘어 저장됩니다
-(00 문서의 `example.chz.ts` 기준):
+([00 문서](00-chz-intro.ko.md)의 `example.chz.ts` 기준):
 
 ```
 chz/realization/example/implementations/

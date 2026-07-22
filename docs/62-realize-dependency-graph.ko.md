@@ -2,13 +2,13 @@
 
 # 왜 필요한가요?
 
-realize는 한 번에 하나의 imagine 선언을 하나의 세션(61 문서 참조)으로 구현합니다.
+realize는 한 번에 하나의 imagine 선언을 하나의 세션([61 문서](61-realize-realizer.ko.md) 참조)으로 구현합니다.
 그런데 imagine 선언은 다른 imagine 선언을 사용할 수 있으므로, realize 엔진은
 **어떤 선언부터 구현해야 할지**를 알아야 합니다.
 
 예를 들어, 다음과 같은 두 imagine 선언이 있다고 합시다:
 
-```typescript
+```typescript chz
 /// battle.chz.ts (발췌)
 
 imagine function 크리티컬_판정(attacker: CombatStats): boolean {
@@ -36,7 +36,7 @@ imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats):
    존재하지 않습니다. LLM은 존재하지 않는 코드 위에 구현을 쌓아야 합니다.
 2. **검증할 수 없습니다.** `데미지_계산`의 유닛 테스트를 실행하면 `크리티컬_판정`이
    실제로 호출됩니다. 구현이 없으므로 테스트는 실패하는 것이 아니라 **컴파일조차
-   되지 않습니다.** realize의 완료 조건이 '테스트 green'인 이상(60 문서 참조),
+   되지 않습니다.** realize의 완료 조건이 '테스트 green'인 이상([60 문서](60-realize-intro.ko.md) 참조),
    의존 대상이 먼저 완성되어 있어야 합니다.
 
 이처럼 "A를 구현하려면 B가 먼저 필요하다"는 관계를 **의존성**이라고 부르며,

@@ -26,7 +26,7 @@ Realizer는 LLM과 상호작용하며 imagine 선언에 대한 구현을 생성�
 # `chz realize`의 실제 구현 (간략화 버전) / 직접 Realizer를 구현하는 방법
 
 Realizer는 작은 인터페이스 하나로 정의됩니다. `chz realize` 엔진은 의존성
-그래프(62 문서)가 정한 순서대로 심볼을 꺼내, 그 심볼을 처리할 수 있는 Realizer의
+그래프([62 문서](62-realize-dependency-graph.ko.md))가 정한 순서대로 심볼을 꺼내, 그 심볼을 처리할 수 있는 Realizer의
 `realize()`를 호출할 뿐입니다. 따라서 이 인터페이스만 구현하면 누구나 자신의
 Realizer를 만들어 끼울 수 있습니다.
 
@@ -277,8 +277,9 @@ abstract class ChzRealizerBase implements ChzRealizer {
 green을 확인했다고 하더라도, 엔진은 이를 신뢰하지 않고 세션 종료 후 독립적으로
 검증(타입 체크 + 유닛 테스트 + ensure 계약 테스트)을 다시 실행합니다.
 
-- **검증 통과(green)**: 산출물 해시를 `realization-cache.json`에 기록하고(60
-  문서), 의존성 그래프의 다음 심볼로 진행합니다(62 문서).
+- **검증 통과(green)**: 산출물 해시를 `realization-cache.json`에
+  기록하고([60 문서](60-realize-intro.ko.md)), 의존성 그래프의 다음 심볼로
+  진행합니다(62 문서).
 - **검증 실패(red)**: 실패한 테스트와 진단 로그를 피드백으로 붙여 세션을
   재시도합니다. `maxRetries`를 소진하면 해당 심볼은 `resolved: false`로
   확정되고, 62 문서의 규칙에 따라 이 심볼에 의존하는 하류 심볼들의 realize는

@@ -163,7 +163,7 @@ $ chz realize example.chz.ts
 때문입니다. 이때 imagine 심볼을 참조하지 않는 코드는 `__prologue__.ts`로,
 참조하는 코드는 `__epilogue__.ts`로 나뉘어 저장됩니다. 구현보다 먼저 로드되어야
 하는 코드와 나중에 로드되어야 하는 코드의 구분이며, 자세한 규칙은
-[60-realize-intro.ko.md](60-realize-intro.ko.md)를 참조하십시오.
+[60 문서](60-realize-intro.ko.md)를 참조하십시오.
 
-realize에 대한 자세한 명세는 [60-realize-intro.ko.md](60-realize-intro.ko.md)에서 확인할 수 있습니다.
+realize에 대한 자세한 명세는 60 문서에서 확인할 수 있습니다.
 
