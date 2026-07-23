@@ -9,9 +9,12 @@ implementation. Cheese's core differentiator is that this division of roles is
 enforced by the language grammar and the compiler, not left to convention.
 
 **Current status: early v0.** The pipeline runs end-to-end for one example
-(`examples/collision.chz.ts`), but the current `src/` implementation is a
-one-shot prototype that predates the design docs below — expect large
-rewrites. When code and docs disagree, the docs are more current.
+(`examples/collision.chz.ts`). The shared Realizer harness, fixed tool surface,
+OpenAI-compatible transport, `chz.config.js` injection, independent
+verification loop, and prologue/epilogue emission are implemented; broader
+syntax, incremental realization, drift/override handling, and several graph
+rules remain future work. When code and docs disagree, the docs are more
+current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,
@@ -104,6 +107,9 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   shell tool. `Finish` is only a claim: the engine re-runs verification
   independently, feeds red results back as bounded retries, and on final
   failure halts realize for dependent symbols.
+  The current v0 implementation ships `ChzOpenAIRealizer` and accepts custom
+  `ChzRealizer` instances through `chz.config.js`; the documented
+  `ClaudeCodeRealizer` exception remains planned rather than implemented.
 - **Harness rules & tool spec (63)** — decision boundaries plus the detailed
   tool contract. Escalation ladder for decisions the LLM must not make alone:
   `ASSUMPTION:` comment → `AskUser` (structured multi-question schema;
@@ -150,8 +156,8 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
 - Syntax: `imagine function/class` + `requirements` + `ensure` + minimal
   wiring statements. Nothing more.
 - Pipeline: `.chz` preprocessing (declaration-level) → tsc diagnostics →
-  realize (via the claude CLI) → emit TS + vitest tests → on green tests,
-  record the hash in a lockfile.
+  realize (through the configured Realizer; OpenAI-compatible by default) →
+  emit TS + vitest tests → on green tests, record the hash in a lockfile.
 - First milestone — a single function (`충돌판정_2D`, 2D collision check)
   end-to-end, `.chz` → realize → tests green — is **done**
   (`examples/collision.chz.ts`).
