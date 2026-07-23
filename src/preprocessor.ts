@@ -34,19 +34,23 @@
 
 import { basename } from "node:path";
 
-/** How an `ensure(...)` contract is verified. */
-export type EnsureKind = "predicate" | "natural";
+/** The executable shape of a human-authored `ensure(...)` contract. */
+export type EnsureKind = "assertion" | "scenario";
 
 /** A single `ensure(...)` contract lifted from an imagine block. */
 export interface EnsureContract {
   /**
-   * `"predicate"` when the argument is a machine-checked function (run as a
-   * test against the realized code), `"natural"` when it is a template-literal
-   * natural-language contract (the LLM must convert it into an autogen test).
+   * `"assertion"` for `ensure(condition, message?)`, `"scenario"` for
+   * `ensure(message, () => { ... })`.
    */
   kind: EnsureKind;
-  /** The first argument exactly as written in the source (raw text, trimmed). */
+  /** The condition or zero-argument scenario exactly as written. */
   source: string;
+  /** A static string literal exactly as written, or `null` when omitted. */
+  messageSource: string | null;
+  /** One-based source position of the `ensure` keyword. */
+  line: number;
+  column: number;
 }
 
 export type ImagineDeclarationType = "function" | "class";
@@ -650,12 +654,9 @@ function parseImagineBody(
                 `requirements() may appear at most once in ${declaration}`,
               );
             }
-            requirements = literalContent(call.firstArg);
+            requirements = literalContent(call.args[0] ?? "");
           } else {
-            ensures.push({
-              kind: isTemplateLiteral(call.firstArg) ? "natural" : "predicate",
-              source: call.firstArg,
-            });
+            ensures.push(parseEnsureContract(call.args, source, i, fileName));
           }
           i = call.end;
           prev = ")";
@@ -675,12 +676,12 @@ function parseImagineBody(
 }
 
 /**
- * Scan a call argument list whose `(` is at `openParen`. Returns the trimmed
- * raw text of the first argument and the index just past the closing `)`.
+ * Scan a call argument list whose `(` is at `openParen`. Returns every
+ * top-level argument as trimmed raw text and the index past the closing `)`.
  */
-function scanCall(source: string, openParen: number, fileName: string): { firstArg: string; end: number } {
-  const argStart = openParen + 1;
-  let firstArgEnd = -1;
+function scanCall(source: string, openParen: number, fileName: string): { args: string[]; end: number } {
+  const args: string[] = [];
+  let argStart = openParen + 1;
   let depth = 0;
   let i = argStart;
 
@@ -710,15 +711,17 @@ function scanCall(source: string, openParen: number, fileName: string): { firstA
     }
     if (ch === ")" || ch === "]" || ch === "}") {
       if (depth === 0) {
-        if (firstArgEnd === -1) firstArgEnd = i;
-        return { firstArg: source.slice(argStart, firstArgEnd).trim(), end: i + 1 };
+        const last = source.slice(argStart, i).trim();
+        if (last.length > 0) args.push(last);
+        return { args, end: i + 1 };
       }
       depth--;
       i++;
       continue;
     }
-    if (ch === "," && depth === 0 && firstArgEnd === -1) {
-      firstArgEnd = i;
+    if (ch === "," && depth === 0) {
+      args.push(source.slice(argStart, i).trim());
+      argStart = i + 1;
       i++;
       continue;
     }
@@ -726,6 +729,80 @@ function scanCall(source: string, openParen: number, fileName: string): { firstA
   }
 
   throw syntaxError(fileName, source, openParen, "unterminated call: missing ')'");
+}
+
+function parseEnsureContract(
+  args: readonly string[],
+  source: string,
+  offset: number,
+  fileName: string,
+): EnsureContract {
+  const position = lineColumn(source, offset);
+  if (args.length === 0 || args[0] === "") {
+    throw syntaxError(
+      fileName,
+      source,
+      offset,
+      "ensure() requires either a boolean condition or a message plus a zero-argument scenario",
+    );
+  }
+
+  const first = args[0]!;
+  if (isStaticStringLiteral(first)) {
+    if (args.length === 1) {
+      throw syntaxError(
+        fileName,
+        source,
+        offset,
+        "natural-language ensure() contracts are no longer supported; put prose in requirements() and provide an executable assertion",
+      );
+    }
+    if (args.length !== 2 || !isFunctionExpression(args[1]!)) {
+      throw syntaxError(
+        fileName,
+        source,
+        offset,
+        "scenario ensure() must have the form ensure(\"message\", () => { assert(...); })",
+      );
+    }
+    return {
+      kind: "scenario",
+      source: args[1]!,
+      messageSource: first,
+      ...position,
+    };
+  }
+
+  if (isFunctionExpression(first)) {
+    throw syntaxError(
+      fileName,
+      source,
+      offset,
+      "predicate ensure((args, retval) => ...) is no longer supported; provide concrete inputs in ensure(condition) or ensure(\"message\", () => { assert(...); })",
+    );
+  }
+  if (args.length > 2) {
+    throw syntaxError(
+      fileName,
+      source,
+      offset,
+      "assertion ensure() accepts only a condition and an optional static message",
+    );
+  }
+  if (args.length === 2 && !isStaticStringLiteral(args[1]!)) {
+    throw syntaxError(
+      fileName,
+      source,
+      offset,
+      "the optional assertion message passed to ensure() must be a static string literal",
+    );
+  }
+  return {
+    kind: "assertion",
+    source: first,
+    messageSource: args[1] ?? null,
+    ...position,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -887,9 +964,52 @@ function readIdentifier(source: string, pos: number): { value: string; end: numb
   return { value: source.slice(pos, i), end: i };
 }
 
-/** True when a trimmed argument is a template literal. */
-function isTemplateLiteral(arg: string): boolean {
-  return arg.startsWith("`");
+/** True only when the entire expression is a static string literal. */
+function isStaticStringLiteral(arg: string): boolean {
+  return /^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\$]|\$(?!\{))*`)$/su.test(arg.trim());
+}
+
+/** Detect a function/arrow expression at the outermost expression level. */
+function isFunctionExpression(arg: string): boolean {
+  const trimmed = arg.trim();
+  if (/^(?:async\s+)?function(?:\s+[\p{L}_$][\p{L}\p{N}_$]*)?\s*\(/u.test(trimmed)) {
+    return true;
+  }
+
+  let depth = 0;
+  let i = 0;
+  while (i < trimmed.length) {
+    const ch = trimmed[i]!;
+    if (ch === "/" && trimmed[i + 1] === "/") {
+      i = skipLineComment(trimmed, i);
+      continue;
+    }
+    if (ch === "/" && trimmed[i + 1] === "*") {
+      i = skipBlockComment(trimmed, i, "<ensure>");
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      i = skipString(trimmed, i, ch, "<ensure>");
+      continue;
+    }
+    if (ch === "`") {
+      i = skipTemplate(trimmed, i, "<ensure>");
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
+    if (depth === 0 && ch === "=" && trimmed[i + 1] === ">") return true;
+    i++;
+  }
+  return false;
 }
 
 /** Unwrap a string/template literal to its inner text; pass anything else through. */

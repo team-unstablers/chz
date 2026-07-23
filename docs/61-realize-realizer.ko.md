@@ -66,7 +66,7 @@ type ChzImagineSymbolResolution = {
 
   resolved: boolean;               // 구현 생성에 성공했는지 여부
   resolvedFile?: string;           // 구현이 생성된 파일 경로
-  resolvedTestFiles?: string[];    // 함께 emit된 유닛 테스트 / ensure autogen 테스트
+  resolvedTestFiles?: string[];    // Realizer가 함께 emit한 autogen 유닛 테스트
   assumptionsReport?: string;      // ASSUMPTIONS 리포트 경로 (60 문서)
   resolvedLine?: [number, number]; // 구현이 생성된 라인 범위
   resolvedAt?: Date;               // 구현이 생성된 시각

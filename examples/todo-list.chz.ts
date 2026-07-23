@@ -16,19 +16,38 @@ imagine class TodoList {
 
   imagine add(title: string): number {
     requirements(`할 일을 추가하고 새로 부여한 ID를 반환합니다.`);
-    ensure((args, retval) => typeof retval === "number" && Number.isInteger(retval) && retval > 0);
-    ensure(`연속해서 할 일을 추가하면 반환되는 ID가 항상 1씩 증가해야 합니다.`);
+    ensure("새 ID는 1부터 시작해 1씩 증가합니다.", () => {
+      const todos = new TodoList();
+
+      assert(todos.add("첫 번째") === 1);
+      assert(todos.add("두 번째") === 2);
+    });
   }
 
   imagine complete(id: number): boolean {
     requirements(`존재하는 할 일을 완료 상태로 바꾸고 성공 여부를 반환합니다.`);
-    ensure((args, retval) => typeof retval === "boolean");
-    ensure(`존재하지 않는 ID를 완료하려 하면 false를 반환해야 합니다.`);
+    ensure("존재하는 ID만 완료할 수 있습니다.", () => {
+      const todos = new TodoList();
+      const id = todos.add("완료할 일");
+
+      assert(todos.complete(id) === true);
+      assert(todos.complete(id + 1) === false);
+    });
   }
 
   imagine list(): readonly TodoItem[] {
     requirements(`현재 할 일 목록의 방어적 스냅샷을 ID 오름차순으로 반환합니다.`);
-    ensure((args, retval) => Array.isArray(retval));
-    ensure(`반환된 항목은 ID 오름차순이어야 하며 완료 상태를 정확히 반영해야 합니다.`);
+    ensure("목록은 ID 순서와 완료 상태를 보존한 스냅샷입니다.", () => {
+      const todos = new TodoList();
+      const first = todos.add("첫 번째");
+      const second = todos.add("두 번째");
+      assert(todos.complete(second) === true);
+
+      const snapshot = todos.list();
+      assert(Array.isArray(snapshot));
+      assert(snapshot.length === 2);
+      assert(snapshot[0]?.id === first && snapshot[0].completed === false);
+      assert(snapshot[1]?.id === second && snapshot[1].completed === true);
+    });
   }
 }

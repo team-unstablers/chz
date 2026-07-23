@@ -16,7 +16,10 @@ imagine function 크리티컬_판정(attacker: CombatStats): boolean {
     # 공격자의 스탯을 기반으로 이번 공격이 크리티컬인지 판정하십시오.
     - attacker.luck(0~100)이 높을수록 크리티컬 확률이 높아야 합니다.
   `);
-  ensure((args, retval) => typeof retval === "boolean");
+  ensure(
+    typeof 크리티컬_판정({ attack: 10, defense: 5, luck: 100 }) === "boolean",
+    "크리티컬 판정은 boolean을 반환합니다.",
+  );
 }
 
 imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats): number {
@@ -25,7 +28,14 @@ imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats):
     - 크리티컬 여부는 \`크리티컬_판정\`을 사용하여 판정하고,
       크리티컬이면 최종 데미지를 2배로 적용하십시오.
   `);
-  ensure((args, retval) => Number.isInteger(retval) && retval >= 0);
+  ensure("최종 데미지는 음이 아닌 정수입니다.", () => {
+    const damage = 데미지_계산(
+      { attack: 10, defense: 5, luck: 0 },
+      { attack: 5, defense: 5, luck: 0 },
+    );
+    assert(Number.isInteger(damage));
+    assert(damage >= 0);
+  });
 }
 ```
 

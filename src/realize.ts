@@ -171,7 +171,7 @@ export async function realize(
   for (const symbol of order) {
     const spec = specByName.get(symbol.name)!;
     const ensurePath = join(baseDir, "tests", `test_${symbol.name}.ensure.ts`);
-    writeFileSync(ensurePath, renderEnsureHarness(spec, fileName), "utf8");
+    writeFileSync(ensurePath, renderEnsureHarness(spec, fileName, specs), "utf8");
 
     const realizer = selectRealizer(options.realizers, symbol);
     if (realizer === null) {
@@ -208,7 +208,7 @@ export async function realize(
       const resolution = await realizer.realize(symbol, context);
       // This harness is human-contract material owned by the engine. Restore
       // it after every session so a model edit can never weaken self-grading.
-      writeFileSync(ensurePath, renderEnsureHarness(spec, fileName), "utf8");
+      writeFileSync(ensurePath, renderEnsureHarness(spec, fileName, specs), "utf8");
       // The split human source is engine-owned for the same reason: the model
       // may read prologue helpers but must never rewrite either human layer.
       writeHumanCode();
@@ -288,129 +288,89 @@ export async function realize(
   }
 }
 
-/** Deterministic human ensure harness; this file is engine-owned. */
-export function renderEnsureHarness(spec: ImagineSpec, fileName: string): string {
-  if (spec.type === "class") return renderClassEnsureHarness(spec, fileName);
-
-  const base = realizationBaseName(fileName);
-  const predicates = spec.ensures.filter((ensure) => ensure.kind === "predicate");
-  const externalTypes = collectExternalTypeNames(spec);
-  const typeImports = externalTypes.length === 0
-    ? ""
-    : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n\n`;
-  const predicateEntries =
-    predicates.length === 0
-      ? "  // (no predicate `ensure(...)` contracts were declared for this function)"
-      : predicates.map((predicate) => `  ${predicate.source},`).join("\n");
-  const sourceEntries = predicates.map((predicate) => `  ${JSON.stringify(predicate.source)},`).join("\n");
-
-  return `/// test_${spec.name}.ensure.ts
-/// AUTO-GENERATED ensure-contract harness — DO NOT EDIT.
-/// Generated deterministically by chz-realize from ${base}.chz.ts.
-
-${typeImports}type EnsurePredicate = (args: readonly unknown[], retval: unknown) => unknown;
-
-const ENSURE_PREDICATES: readonly EnsurePredicate[] = [
-${predicateEntries}
-];
-
-const ENSURE_SOURCES: readonly string[] = [
-${sourceEntries}
-];
-
-export function assertEnsures(args: readonly unknown[], retval: unknown): void {
-  ENSURE_PREDICATES.forEach((predicate, index) => {
-    const satisfied = predicate(args, retval);
-    if (!satisfied) {
-      throw new Error(
-        \`ensure contract #\${index + 1} of \\\`${spec.name}\\\` was violated.\\n\` +
-          \`  contract: \${ENSURE_SOURCES[index]}\\n\` +
-          \`  args:     \${describeValue(args)}\\n\` +
-          \`  returned: \${describeValue(retval)}\\n\` +
-          \`  predicate returned: \${describeValue(satisfied)}\`,
-      );
-    }
-  });
-}
-
-function describeValue(value: unknown): string {
-  try {
-    const json = JSON.stringify(value);
-    return json ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-`;
-}
-
-function renderClassEnsureHarness(spec: ImagineSpec, fileName: string): string {
+/** Deterministic executable tests for human-authored ensures; engine-owned. */
+export function renderEnsureHarness(
+  spec: ImagineSpec,
+  fileName: string,
+  allSpecs: readonly ImagineSpec[] = [spec],
+): string {
   const base = realizationBaseName(fileName);
   const contracts = [
-    ...spec.ensures
-      .filter((ensure) => ensure.kind === "predicate")
-      .map((ensure) => ({ member: "constructor", ensure })),
+    ...spec.ensures.map((ensure) => ({ scope: spec.name, ensure })),
     ...spec.members.flatMap((member) =>
-      member.ensures
-        .filter((ensure) => ensure.kind === "predicate")
-        .map((ensure) => ({ member: member.name, ensure })),
+      member.ensures.map((ensure) => ({ scope: `${spec.name}.${member.name}`, ensure })),
     ),
   ];
-  const externalTypes = collectExternalTypeNames(spec);
+  const contractSource = contracts.map(({ ensure }) => ensure.source).join("\n");
+  const importedSymbols = allSpecs
+    .filter((candidate) => candidate.name === spec.name || contractSource.includes(candidate.name))
+    .map((candidate) => candidate.name);
+  const valueImports = contracts.length === 0
+    ? ""
+    : importedSymbols
+        .map((name) => `import { ${name} } from "../implementations/${name}.ts";`)
+        .join("\n") + "\n";
+  const externalTypes = collectExternalTypeNames(spec, new Set(importedSymbols));
   const typeImports = externalTypes.length === 0
     ? ""
-    : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n\n`;
-  const entries = contracts.length === 0
-    ? "  // (no predicate `ensure(...)` contracts were declared for this class)"
-    : contracts.map(({ member, ensure }) =>
-      `  { member: ${JSON.stringify(member)}, predicate: ${ensure.source}, source: ${JSON.stringify(ensure.source)} },`
-    ).join("\n");
+    : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n`;
+  const tests = contracts.length === 0
+    ? "// No executable ensure() contracts were declared for this symbol.\n\nexport {};"
+    : contracts.map(({ scope, ensure }, index) => {
+        const label = ensure.messageSource ?? JSON.stringify(`${scope} ensure #${index + 1}`);
+        const location = `${fileName}:${ensure.line}:${ensure.column}`;
+        if (ensure.kind === "assertion") {
+          const failure = `ensure assertion failed at ${location}\ncondition: ${ensure.source}`;
+          return `it(${label}, () => {
+  assert(
+${indentSource(ensure.source, 4)},
+    ${JSON.stringify(failure)},
+  );
+});`;
+        }
+
+        const failurePrefix = `ensure scenario failed at ${location}: `;
+        const falseResult = `ensure scenario returned false at ${location}`;
+        const argumentsFailure = `ensure scenario at ${location} must not declare parameters`;
+        return `it(${label}, async () => {
+  const scenario: () => unknown | Promise<unknown> = ${ensure.source};
+  if (scenario.length !== 0) {
+    throw new Error(${JSON.stringify(argumentsFailure)});
+  }
+  try {
+    const result = await scenario();
+    if (result === false) throw new Error(${JSON.stringify(falseResult)});
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(${JSON.stringify(failurePrefix)} + detail);
+  }
+});`;
+      }).join("\n\n");
 
   return `/// test_${spec.name}.ensure.ts
-/// AUTO-GENERATED ensure-contract harness — DO NOT EDIT.
+/// AUTO-GENERATED executable ensure tests — DO NOT EDIT.
 /// Generated deterministically by chz-realize from ${base}.chz.ts.
-/// Call assertEnsures("constructor", args, instance) for class contracts and
-/// assertEnsures("methodName", args, retval) for imagined member contracts.
 
-${typeImports}type EnsurePredicate = (args: readonly unknown[], retval: unknown) => unknown;
+${valueImports}${typeImports}${contracts.length === 0 ? "" : `
+declare const it: (name: string, test: () => unknown | Promise<unknown>) => void;
 
-interface MemberEnsure {
-  member: string;
-  predicate: EnsurePredicate;
-  source: string;
+function assert(condition: boolean, message = "ensure assertion failed"): asserts condition {
+  if (!condition) throw new Error(message);
 }
 
-const MEMBER_ENSURES: readonly MemberEnsure[] = [
-${entries}
-];
-
-export function assertEnsures(member: string, args: readonly unknown[], retval: unknown): void {
-  MEMBER_ENSURES.filter((contract) => contract.member === member).forEach((contract, index) => {
-    const satisfied = contract.predicate(args, retval);
-    if (!satisfied) {
-      throw new Error(
-        \`ensure contract #\${index + 1} of ${spec.name}.\${member} was violated.\\n\` +
-          \`  contract: \${contract.source}\\n\` +
-          \`  args:     \${describeValue(args)}\\n\` +
-          \`  returned: \${describeValue(retval)}\\n\` +
-          \`  predicate returned: \${describeValue(satisfied)}\`,
-      );
-    }
-  });
-}
-
-function describeValue(value: unknown): string {
-  try {
-    const json = JSON.stringify(value);
-    return json ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
+`}${tests}
 `;
 }
 
-function collectExternalTypeNames(spec: ImagineSpec): string[] {
+function indentSource(source: string, spaces: number): string {
+  const prefix = " ".repeat(spaces);
+  return source.split(/\r?\n/).map((line) => `${prefix}${line}`).join("\n");
+}
+
+function collectExternalTypeNames(
+  spec: ImagineSpec,
+  valueImports: ReadonlySet<string>,
+): string[] {
   const builtins = new Set([
     "Array",
     "BigInt",
@@ -436,15 +396,47 @@ function collectExternalTypeNames(spec: ImagineSpec): string[] {
   const typeText = [
     spec.parameters,
     spec.returnType,
-    ...spec.ensures.filter((ensure) => ensure.kind === "predicate").map((ensure) => ensure.source),
+    ...spec.ensures.map((ensure) => ensure.source),
     ...spec.members.flatMap((member) => [
       member.parameters,
       member.returnType,
-      ...member.ensures.filter((ensure) => ensure.kind === "predicate").map((ensure) => ensure.source),
+      ...member.ensures.map((ensure) => ensure.source),
     ]),
   ].join("\n");
-  const names = typeText.match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
-  return [...new Set(names.filter((name) => name !== spec.name && !builtins.has(name)))].sort();
+  const names = maskNonCodeText(typeText).match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
+  return [...new Set(names.filter((name) => !valueImports.has(name) && !builtins.has(name)))].sort();
+}
+
+function maskNonCodeText(source: string): string {
+  let result = "";
+  let i = 0;
+  while (i < source.length) {
+    const start = i;
+    if (source[i] === "/" && source[i + 1] === "/") {
+      i += 2;
+      while (i < source.length && source[i] !== "\n") i++;
+    } else if (source[i] === "/" && source[i + 1] === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
+      i = Math.min(source.length, i + 2);
+    } else if (source[i] === "'" || source[i] === '"' || source[i] === "`") {
+      const quote = source[i]!;
+      i++;
+      while (i < source.length) {
+        if (source[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        const ch = source[i++];
+        if (ch === quote) break;
+      }
+    } else {
+      result += source[i++];
+      continue;
+    }
+    result += source.slice(start, i).replace(/[^\r\n]/g, " ");
+  }
+  return result;
 }
 
 export function renderEntryPoint(specs: ImagineSpec[], fileName: string): string {

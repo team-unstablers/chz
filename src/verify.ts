@@ -23,9 +23,10 @@
  * plain `vitest run` would never collect them. We solve this without touching
  * the root config by spawning a *separate* vitest process with a throwaway
  * config whose `test.include` is the explicit absolute paths of just this
- * realization's test files. `passWithNoTests` is enabled because the
- * `.ensure.ts` harness is imported by the autogen tests but declares no suite of
- * its own — vitest would otherwise fail it with "No test suite found".
+ * realization's test files. `globals` lets the engine-owned `.ensure.ts` files
+ * call their locally declared `it` binding without importing a user dependency.
+ * `passWithNoTests` remains enabled because a symbol with no human ensures emits
+ * an intentionally empty `.ensure.ts` module.
  *
  * The child is spawned with its cwd set to the chz project root (where
  * `node_modules/vitest` lives) so that the emitted tests' `import ... from
@@ -181,9 +182,9 @@ export async function runRealizationTests(
   const configSource =
     `export default {\n` +
     `  test: {\n` +
-    `    // The .ensure.ts harness declares no suite of its own; it rides along\n` +
-    `    // as an import of the autogen tests. passWithNoTests keeps that from\n` +
-    `    // being reported as a failure.\n` +
+    `    // Executable human ensures use the injected global test function.\n` +
+    `    globals: true,\n` +
+    `    // Symbols without ensures still emit an intentionally empty module.\n` +
     `    passWithNoTests: true,\n` +
     `    include: ${JSON.stringify(testFiles)},\n` +
     `  },\n` +

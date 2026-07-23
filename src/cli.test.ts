@@ -21,7 +21,7 @@ function makeFixture(name = "demo.chz.ts"): string {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(
     file,
-    "imagine function greet(name: string): string {\n  ensure(`이름을 포함합니다.`);\n}\n",
+    "imagine function greet(name: string): string {\n  ensure(greet('Cheese') === 'Cheese', '이름을 포함합니다.');\n}\n",
     "utf8",
   );
   return file;

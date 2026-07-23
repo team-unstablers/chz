@@ -33,8 +33,10 @@ function fixture(): { root: string; sourceFile: string; outputDir: string; sourc
   const source = [
     "imagine function greet(name: string): string {",
     "  requirements(`인사말을 만듭니다.`);",
-    "  ensure((args, retval) => typeof retval === 'string');",
-    "  ensure(`이름을 포함해야 합니다.`);",
+    "  ensure(greet('Cheese') === 'Hi Cheese', '이름을 포함해야 합니다.');",
+    "  ensure('문자열을 반환합니다.', () => {",
+    "    assert(typeof greet('Cheese') === 'string');",
+    "  });",
     "}",
     "",
   ].join("\n");
@@ -169,17 +171,21 @@ describe("canonical prompt and symbol graph", () => {
   });
 
   it("imports external signature types into the engine-owned ensure harness", () => {
-    const source = "imagine function inspect(value: Widget): Result { ensure((args, retval) => (retval as Result) !== undefined); }\n";
+    const source =
+      "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }\n";
     const spec = extractImagineSpecs(source, "types.chz.ts")[0]!;
     const harness = renderEnsureHarness(spec, "types.chz.ts");
     expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');
   });
 
-  it("turns an imagine class into a class symbol and member-aware ensure harness", () => {
+  it("turns an imagine class into a class symbol and executable ensure tests", () => {
     const source = [
       "imagine class Counter {",
       "  imagine increment(by: number): number {",
-      "    ensure((args, retval) => typeof retval === 'number');",
+      "    ensure('increment는 number를 반환합니다.', () => {",
+      "      const counter = new Counter();",
+      "      assert(typeof counter.increment(1) === 'number');",
+      "    });",
       "  }",
       "}",
     ].join("\n");
@@ -189,14 +195,14 @@ describe("canonical prompt and symbol graph", () => {
 
     expect(symbol.type).toBe("class");
     expect(symbol.definition).toContain("imagine increment");
-    expect(harness).toContain('assertEnsures("methodName", args, retval)');
-    expect(harness).toContain('member: "increment"');
-    expect(harness).toContain("typeof retval === 'number'");
-    expect(harness).not.toContain('import type { Counter }');
+    expect(harness).toContain('import { Counter } from "../implementations/Counter.ts";');
+    expect(harness).toContain("it('increment는 number를 반환합니다.'");
+    expect(harness).toContain("typeof counter.increment(1) === 'number'");
+    expect(harness).not.toContain("assertEnsures");
   });
 
   it("connects prologue, realized symbols, and epilogue in entry-point order", () => {
-    const source = "imagine function greet(): string { ensure(`인사합니다.`); }\n";
+    const source = "imagine function greet(): string { ensure(greet() === '안녕'); }\n";
     const specs = extractImagineSpecs(source, "example.chz.ts");
     const entry = renderEntryPoint(specs, "example.chz.ts");
 
@@ -325,7 +331,7 @@ describe("ChzRealizerBase", () => {
     mkdirSync(dirname(implementation), { recursive: true });
     mkdirSync(dirname(ensure), { recursive: true });
     writeFileSync(implementation, "export function greet(name: string): string { return name; }\n", "utf8");
-    writeFileSync(ensure, "export function assertEnsures(): void {}\n", "utf8");
+    writeFileSync(ensure, "export {};\n", "utf8");
     const realizer = new ScriptedRealizer([
       response([{ id: "finish", name: "Finish", arguments: {} }]),
     ]);
@@ -424,12 +430,10 @@ class CounterClassRealizer implements ChzRealizer {
         "// @ts-expect-error The engine-owned Vitest runner provides this module for the temporary fixture.",
         'import { describe, expect, it } from "vitest";',
         'import { Counter } from "../implementations/Counter.ts";',
-        'import { assertEnsures } from "./test_Counter.ensure.ts";',
         "describe('Counter', () => {",
-        "  it('increments and satisfies the human predicate', () => {",
+        "  it('increments', () => {",
         "    const counter = new Counter();",
         "    const retval = counter.increment(2);",
-        '    assertEnsures("increment", [2], retval);',
         "    expect(retval).toBe(2);",
         "  });",
         "});",
@@ -485,8 +489,11 @@ describe("realize engine", () => {
       "imagine class Counter {",
       "  requirements(`누적 카운터를 구현합니다.`);",
       "  imagine increment(by: number): number {",
-      "    ensure((args, retval) => typeof retval === 'number');",
-      "    ensure(`호출할 때마다 by만큼 누적되어야 합니다.`);",
+      "    ensure('호출할 때마다 by만큼 누적됩니다.', () => {",
+      "      const counter = new Counter();",
+      "      assert(counter.increment(2) === 2);",
+      "      assert(counter.increment(3) === 5);",
+      "    });",
       "  }",
       "}",
       "",

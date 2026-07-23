@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { extractImagineSpecs } from "./preprocessor.ts";
 import {
   realize,
+  renderEnsureHarness,
   type ChzImagineSymbol,
   type ChzImagineSymbolResolution,
   type ChzRealizeContext,
@@ -53,27 +54,25 @@ const SPAWN_TIMEOUT = 60_000;
 
 describe("runRealizationTests", () => {
   it(
-    "reports success and a test count for a green realization (incl. an ensure harness)",
+    "reports success and a test count for green autogen and executable ensure tests",
     async () => {
       const baseDir = join(makeTempDir(), "green");
-      // Mirrors the real emit: an .ensure.ts harness (no suite) imported by the
-      // autogen tests. The harness must NOT be reported as a failure.
+      // Mirrors the real emit: human ensures are an independent executable
+      // suite and do not rely on the model-authored tests importing a helper.
       writeTree(baseDir, {
         "tests/test_x.ensure.ts":
-          "export function assertEnsures(_args, retval) {\n" +
-          '  if (typeof retval !== "number") throw new Error("not a number");\n' +
-          "}\n",
+          "declare const it: (name: string, test: () => unknown) => void;\n" +
+          'it("human contract", () => { if (1 + 1 !== 2) throw new Error("bad math"); });\n',
         "tests/test_x.autogen.ts":
           'import { it, expect } from "vitest";\n' +
-          'import { assertEnsures } from "./test_x.ensure.ts";\n' +
-          'it("a", () => { expect(1).toBe(1); assertEnsures([], 1); });\n' +
-          'it("b", () => { expect(2).toBe(2); assertEnsures([], 2); });\n',
+          'it("a", () => { expect(1).toBe(1); });\n' +
+          'it("b", () => { expect(2).toBe(2); });\n',
       });
 
       const outcome = await runRealizationTests(baseDir);
       expect(outcome.passed).toBe(true);
       expect(outcome.timedOut).toBe(false);
-      expect(outcome.testCount).toBe(2);
+      expect(outcome.testCount).toBe(3);
       expect(outcome.testFiles).toHaveLength(2);
       expect(outcome.output).toContain("passed");
     },
@@ -100,6 +99,31 @@ describe("runRealizationTests", () => {
     SPAWN_TIMEOUT,
   );
 
+  it(
+    "runs a generated human assertion even when the autogen test never imports it",
+    async () => {
+      const baseDir = join(makeTempDir(), "human-assertion");
+      const source =
+        "imagine function answer(): number { ensure(answer() === 42, '정답은 42입니다.'); }\n";
+      const spec = extractImagineSpecs(source, "answer.chz.ts")[0]!;
+
+      writeTree(baseDir, {
+        "implementations/answer.ts": "export function answer(): number { return 41; }\n",
+        "tests/test_answer.ensure.ts": renderEnsureHarness(spec, "answer.chz.ts"),
+        "tests/test_answer.autogen.ts":
+          'import { it, expect } from "vitest";\n' +
+          'it("unrelated autogen check", () => { expect(true).toBe(true); });\n',
+      });
+
+      const outcome = await runRealizationTests(baseDir);
+
+      expect(outcome.passed).toBe(false);
+      expect(outcome.output).toContain("정답은 42입니다.");
+      expect(outcome.output).toContain("ensure assertion failed at answer.chz.ts:1:");
+    },
+    SPAWN_TIMEOUT,
+  );
+
   it("returns a non-passing outcome (no spawn) when there are no test files", async () => {
     const baseDir = join(makeTempDir(), "empty");
     mkdirSync(baseDir, { recursive: true });
@@ -112,7 +136,9 @@ describe("runRealizationTests", () => {
   it("does not treat an ensure harness without an autogen suite as green", async () => {
     const baseDir = join(makeTempDir(), "ensure-only");
     writeTree(baseDir, {
-      "tests/test_x.ensure.ts": "export function assertEnsures(): void {}\n",
+      "tests/test_x.ensure.ts":
+        "declare const it: (name: string, test: () => unknown) => void;\n" +
+        'it("human contract", () => {});\n',
     });
 
     const outcome = await runRealizationTests(baseDir);
@@ -160,8 +186,8 @@ const NAME = "충돌판정_2D";
 const SOURCE = [
   `imagine function ${NAME}(ax: number, ay: number, bx: number, by: number): boolean {`,
   "  requirements(`두 점이 같은 위치인지 판정합니다.`);",
-  "  ensure((args, retval) => typeof retval === 'boolean');",
-  "  ensure(`같은 좌표가 주어지면 반드시 true 를 반환해야 합니다.`);",
+  `  ensure(${NAME}(0, 0, 0, 0) === true, '같은 좌표는 true입니다.');`,
+  `  ensure('반환값은 boolean입니다.', () => { assert(typeof ${NAME}(0, 0, 1, 1) === 'boolean'); });`,
   "}",
   "",
 ].join("\n");

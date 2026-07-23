@@ -89,8 +89,11 @@ Realized code targets auditability, not just correctness:
   \`__epilogue__\` symbols — verification reports that as an error.
 - Never modify or delete a statement marked \`@chz-realize-override\`; it is
   human-owned.
-- Develop unit tests together with the implementation in verified increments,
-  including autogen tests for every natural-language \`ensure\` contract.
+- Treat every \`ensure\` as a human-owned executable acceptance test. The
+  engine emits and runs those tests independently; never modify an
+  \`.ensure.ts\` file.
+- Develop additional autogen unit tests from the requirements together with
+  the implementation in verified increments.
 - Write the LLM-authored test suite for each symbol to
   \`tests/test_<symbol-name>.autogen.ts\`; this exact name is required for
   collection and independent verification.

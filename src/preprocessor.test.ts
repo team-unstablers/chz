@@ -21,12 +21,21 @@ describe("extractImagineSpecs", () => {
     expect(specs[0]!.members.every((member) => member.modifiers.includes("async"))).toBe(true);
   });
 
-  it("① extracts a Korean-named function with mixed predicate/natural ensures", () => {
+  it("parses every official example with the current ensure grammar", () => {
+    for (const name of ["collision", "todo-list", "gomoku"]) {
+      const source = readFileSync(new URL(`../examples/${name}.chz.ts`, import.meta.url), "utf8");
+      expect(() => extractImagineSpecs(source, `examples/${name}.chz.ts`)).not.toThrow();
+    }
+  });
+
+  it("① extracts assertion and scenario ensures", () => {
     const source = [
       "imagine function 충돌판정_2D(ax: number, ay: number, bx: number, by: number): boolean {",
       "  requirements(`두 도형 간 충돌 판정을 수행합니다.`);",
-      "  ensure((args, retval) => typeof retval === 'boolean');",
-      "  ensure(`겹치는 두 도형에 대해서는 true 를 반환해야 합니다.`);",
+      "  ensure(충돌판정_2D(0, 0, 0, 0) === true, '같은 점은 충돌합니다.');",
+      "  ensure('반환값은 boolean입니다.', () => {",
+      "    assert(typeof 충돌판정_2D(0, 0, 1, 1) === 'boolean');",
+      "  });",
       "}",
     ].join("\n");
 
@@ -40,9 +49,17 @@ describe("extractImagineSpecs", () => {
     expect(spec.parameters).toBe("ax: number, ay: number, bx: number, by: number");
     expect(spec.returnType).toBe("boolean");
     expect(spec.requirements).toBe("두 도형 간 충돌 판정을 수행합니다.");
-    expect(spec.ensures).toEqual([
-      { kind: "predicate", source: "(args, retval) => typeof retval === 'boolean'" },
-      { kind: "natural", source: "`겹치는 두 도형에 대해서는 true 를 반환해야 합니다.`" },
+    expect(spec.ensures).toMatchObject([
+      {
+        kind: "assertion",
+        source: "충돌판정_2D(0, 0, 0, 0) === true",
+        messageSource: "'같은 점은 충돌합니다.'",
+      },
+      {
+        kind: "scenario",
+        source: "() => {\n    assert(typeof 충돌판정_2D(0, 0, 1, 1) === 'boolean');\n  }",
+        messageSource: "'반환값은 boolean입니다.'",
+      },
     ]);
     expect(spec.originalText.startsWith("imagine function 충돌판정_2D")).toBe(true);
     expect(spec.originalText.endsWith("}")).toBe(true);
@@ -50,13 +67,13 @@ describe("extractImagineSpecs", () => {
   });
 
   it("② handles an imagine function without requirements", () => {
-    const source = "imagine function ping(): void {\n  ensure((a, r) => r === undefined);\n}\n";
+    const source = "imagine function ping(): void {\n  ensure(ping() === undefined);\n}\n";
     const specs = extractImagineSpecs(source, "ping.chz.ts");
     expect(specs).toHaveLength(1);
     expect(specs[0]!.requirements).toBeNull();
     expect(specs[0]!.returnType).toBe("void");
     expect(specs[0]!.ensures).toHaveLength(1);
-    expect(specs[0]!.ensures[0]!.kind).toBe("predicate");
+    expect(specs[0]!.ensures[0]!.kind).toBe("assertion");
   });
 
   it("③ returns no specs for a file without imagine blocks", () => {
@@ -79,13 +96,14 @@ describe("extractImagineSpecs", () => {
     expect(specs).toEqual([]);
   });
 
-  it("⑤ balances nested braces inside a predicate body", () => {
+  it("⑤ balances nested braces inside a scenario body", () => {
     const source = [
       "imagine function classify(x: number): string {",
-      "  ensure((args, retval) => {",
-      "    if (retval === 'a') { return true; }",
+      "  ensure('분류 결과를 검사합니다.', () => {",
+      "    const retval = classify(1);",
+      "    if (retval === 'a') { return; }",
       "    const map = { k: { deep: [1, 2, 3] } };",
-      "    return typeof retval === 'string' && Object.keys(map).length > 0;",
+      "    assert(typeof retval === 'string' && Object.keys(map).length > 0);",
       "  });",
       "}",
     ].join("\n");
@@ -93,7 +111,7 @@ describe("extractImagineSpecs", () => {
     expect(specs).toHaveLength(1);
     const spec = specs[0]!;
     expect(spec.ensures).toHaveLength(1);
-    expect(spec.ensures[0]!.kind).toBe("predicate");
+    expect(spec.ensures[0]!.kind).toBe("scenario");
     // The whole arrow function, nested braces and all, is captured as one arg.
     expect(spec.ensures[0]!.source).toContain("{ k: { deep: [1, 2, 3] } }");
     expect(spec.requirements).toBeNull();
@@ -104,7 +122,7 @@ describe("extractImagineSpecs", () => {
       "const before = 1;",
       "imagine function first(): number { requirements(`첫 번째`); }",
       "const between = 2;",
-      "imagine function second(a: string): string { ensure(`두 번째`); }",
+      "imagine function second(a: string): string { ensure(second('x') === 'x'); }",
       "const after = 3;",
     ].join("\n");
     const specs = extractImagineSpecs(source, "multi.chz.ts");
@@ -124,7 +142,10 @@ describe("extractImagineSpecs", () => {
       "    requirements(`현재 점수입니다.`);",
       "  }",
       "  imagine static async create(name: string): Promise<GameSession> {",
-      "    ensure((args, retval) => retval !== undefined);",
+      "    ensure('생성 결과가 존재합니다.', async () => {",
+      "      const session = await GameSession.create('player');",
+      "      assert(session !== undefined);",
+      "    });",
       "  }",
       "  imagine async cleanup() {",
       "    requirements(`리소스를 정리합니다.`);",
@@ -158,8 +179,11 @@ describe("extractImagineSpecs", () => {
       { type: "method", name: "cleanup", modifiers: ["async"], parameters: "", returnType: "" },
     ]);
     expect(spec!.members[0]!.requirements).toBe("현재 점수입니다.");
-    expect(spec!.members[1]!.ensures).toEqual([
-      { kind: "predicate", source: "(args, retval) => retval !== undefined" },
+    expect(spec!.members[1]!.ensures).toMatchObject([
+      {
+        kind: "scenario",
+        messageSource: "'생성 결과가 존재합니다.'",
+      },
     ]);
     expect(spec!.members[2]!.requirements).toBe("리소스를 정리합니다.");
   });
@@ -171,11 +195,11 @@ describe("transformToPlainTs", () => {
       "const header = 1;",
       "imagine function 충돌판정_2D(a: number, b: number): boolean {",
       "  requirements(`판정`);",
-      "  ensure((args, retval) => typeof retval === 'boolean');",
+      "  ensure(typeof 충돌판정_2D(0, 0) === 'boolean');",
       "}",
       "const middle = 2;",
       "imagine function greet(name: string): string {",
-      "  ensure(`인사`);",
+      "  ensure(greet('치즈') === '치즈');",
       "}",
       "const footer = 3;",
       "",
@@ -259,6 +283,29 @@ describe("error handling", () => {
   it("throws for an unterminated imagine block", () => {
     const source = "imagine function oops(): void {\n  requirements(`x`);\n";
     expect(() => extractImagineSpecs(source, "oops.chz.ts")).toThrow(ChzSyntaxError);
+  });
+
+  it("rejects legacy predicate and natural-language ensures", () => {
+    const predicate =
+      "imagine function old(): boolean { ensure((args, retval) => retval === true); }\n";
+    const natural = "imagine function old(): boolean { ensure(`항상 참이어야 합니다.`); }\n";
+
+    expect(() => extractImagineSpecs(predicate, "predicate.chz.ts"))
+      .toThrow(/predicate ensure.*no longer supported/);
+    expect(() => extractImagineSpecs(natural, "natural.chz.ts"))
+      .toThrow(/natural-language ensure.*no longer supported/);
+  });
+
+  it("rejects malformed executable ensure signatures", () => {
+    const dynamicMessage =
+      "imagine function bad(): boolean { ensure(bad(), String('message')); }\n";
+    const missingScenario =
+      "imagine function bad(): boolean { ensure('message', bad()); }\n";
+
+    expect(() => extractImagineSpecs(dynamicMessage, "dynamic.chz.ts"))
+      .toThrow(/static string/);
+    expect(() => extractImagineSpecs(missingScenario, "scenario.chz.ts"))
+      .toThrow(/scenario ensure/);
   });
 
   it("keeps imagine resource explicitly deferred at top level and inside classes", () => {

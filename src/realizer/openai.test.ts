@@ -20,7 +20,7 @@ describe("ChzOpenAIRealizer", () => {
     const root = mkdtempSync(join(tmpdir(), "chz-openai-realizer-"));
     roots.push(root);
     const sourceFile = join(root, "demo.chz.ts");
-    const source = "imagine function answer(): number { ensure(`42를 반환합니다.`); }\n";
+    const source = "imagine function answer(): number { ensure(answer() === 42, '42를 반환합니다.'); }\n";
     writeFileSync(sourceFile, source, "utf8");
     const symbol = imagineSpecToSymbol(extractImagineSpecs(source, sourceFile)[0]!, source, sourceFile);
     const outputDir = join(root, "chz", "realization", "demo");

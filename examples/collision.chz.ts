@@ -48,28 +48,51 @@ imagine function 충돌판정_2D(a: Shape, b: Shape): boolean {
       사각형의 변이 정확히 접하는 경우)도 '겹침'으로 간주하여 true를 반환합니다.
   `);
 
-  // 기계 검증 계약(predicate): 반환값은 반드시 boolean 이어야 합니다.
-  // 이 계약은 엔진이 자동으로 테스트에 연결하므로 구현에서 다시 검증할 필요는 없습니다.
-  ensure((args, retval) => typeof retval === "boolean");
+  // 짧은 계약은 assert처럼 boolean 식으로 직접 작성합니다.
+  ensure(
+    충돌판정_2D(
+      { kind: "circle", center: { x: 0, y: 0 }, radius: 5 },
+      { kind: "circle", center: { x: 0, y: 0 }, radius: 5 },
+    ) === true,
+    "완전히 동일한 두 원은 충돌해야 합니다.",
+  );
 
-  // 기계 검증 계약(predicate): 겹침의 기본 성질 — 완전히 동일한 두 원(같은 중심,
-  // 같은 반지름)은 반드시 서로 충돌해야 합니다. 그 외 조합에 대해서는 이 계약이
-  // 판단하지 않고 통과시킵니다(공허하게 참).
-  ensure((args, retval) => {
-    const [a, b] = args as [Shape, Shape];
-    const 동일한원 =
-      a.kind === "circle" &&
-      b.kind === "circle" &&
-      a.center.x === b.center.x &&
-      a.center.y === b.center.y &&
-      a.radius === b.radius;
-    return 동일한원 ? retval === true : true;
+  // 준비 과정이나 여러 assertion이 필요한 계약은 실행 가능한 scenario로 작성합니다.
+  ensure("멀리 떨어진 두 도형은 충돌하지 않습니다.", () => {
+    const 원: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 1 };
+    const 사각형: Shape = {
+      kind: "rectangle",
+      origin: { x: 10, y: 10 },
+      width: 2,
+      height: 2,
+    };
+
+    assert(충돌판정_2D(원, 사각형) === false);
   });
 
-  // 자연어 계약: LLM은 아래 문장들을 각각 하나 이상의 autogen 테스트로 변환해야 합니다.
-  ensure(`서로 멀리 떨어져 한 점도 공유하지 않는 두 도형은 충돌하지 않아야 합니다(false).`);
-  ensure(`충돌 판정은 인자 순서에 대해 대칭이어야 합니다: 충돌판정_2D(a, b)와 충돌판정_2D(b, a)의 결과는 항상 같아야 합니다.`);
-  ensure(`원과 사각형이 경계에서 정확히 한 점으로만 맞닿는 경우에도 충돌(true)로 판정해야 합니다.`);
+  ensure("충돌 판정은 인자 순서에 대해 대칭입니다.", () => {
+    const 원: Shape = { kind: "circle", center: { x: 2, y: 2 }, radius: 2 };
+    const 사각형: Shape = {
+      kind: "rectangle",
+      origin: { x: 3, y: 1 },
+      width: 3,
+      height: 3,
+    };
+
+    assert(충돌판정_2D(원, 사각형) === 충돌판정_2D(사각형, 원));
+  });
+
+  ensure("원과 사각형이 한 점에서 맞닿으면 충돌입니다.", () => {
+    const 원: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 2 };
+    const 사각형: Shape = {
+      kind: "rectangle",
+      origin: { x: 2, y: -1 },
+      width: 2,
+      height: 2,
+    };
+
+    assert(충돌판정_2D(원, 사각형) === true);
+  });
 }
 
 // --- 최소 배선 코드: realize된 함수를 호출하여 결과를 콘솔에 출력합니다. ---

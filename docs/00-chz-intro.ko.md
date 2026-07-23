@@ -27,16 +27,21 @@ imagine function greetLikePirate(name: string): string {
   // 꼭 필요하진 않지만, 요구사항을 명시하면 LLM이 더 정확하게 구현할 수 있습니다.
   requirements(`해적 말투로 인사하는 함수를 작성하십시오.`);
   
-  // ensure()를 통해 함수의 결과가 만족해야 하는 계약을 명시할 수 있습니다.
-  // 함수를 전달하면 '기계 검증 계약'이 되며, realize 단계에서 LLM이 구현한 함수를 테스트하는 데 사용됩니다.
-  ensure((args, retval) => {
-    // 반환값이 "Ahoy, <name>!" 형식인지 확인합니다.
-    return typeof retval === 'string' && retval.startsWith('Ahoy, ');
+  // ensure()에는 사람이 고른 구체 입력과 기대 결과를 assertion으로 적습니다.
+  // 엔진은 이 식을 모델과 무관한 테스트로 변환하여 반드시 한 번 실행합니다.
+  ensure(
+    greetLikePirate("Cheese") === "Ahoy, Cheese!",
+    "이름 Cheese를 해적 말투로 인사해야 합니다.",
+  );
+
+  // 준비 과정이나 검사가 여러 개인 계약은 실행 가능한 scenario로 작성합니다.
+  // scenario 안에서는 엔진이 제공하는 assert()를 사용할 수 있습니다.
+  ensure("반환값은 Ahoy로 시작하고 이름을 포함합니다.", () => {
+    const greeting = greetLikePirate("Ren");
+
+    assert(greeting.startsWith("Ahoy, "));
+    assert(greeting.includes("Ren"));
   });
-  
-  // 문자열을 전달하면 '자연어 계약'이 됩니다.
-  // LLM은 자연어 계약을 반드시 테스트 코드로 변환하여 (autogen 테스트) 검증해야 합니다.
-  ensure(`반환값은 반드시 "Ahoy, <name>!" 형식이어야 합니다.`);
 }
 
 // 'imagine' 키워드는, 함수 뿐만이 아니라 클래스에도 적용할 수 있습니다!
@@ -166,4 +171,3 @@ $ chz realize example.chz.ts
 [60 문서](60-realize-intro.ko.md)를 참조하십시오.
 
 realize에 대한 자세한 명세는 60 문서에서 확인할 수 있습니다.
-

@@ -44,13 +44,13 @@ exempt from those rules, and docs `63`–`64` are deliberately exempt as well
   symbol of an `imagine` class/module (e.g. `game.start()`) places a
   compile-time obligation on the LLM to implement it. Can also be declared
   explicitly via `required imagine func/var`.
-- **`ensure`** — human-written contracts placed next to `requirements`,
-  overloaded by argument type: `ensure((args, retval) => ...)` is a
-  machine-checked predicate run as tests against the realized code, and
-  `` ensure(`natural language`) `` is a natural-language contract the LLM
-  must convert into generated (autogen) tests. Verification thus reflects
-  human intent rather than only the LLM's own interpretation of the
-  requirements. The `precondition` keyword is reserved for future input
+- **`ensure`** — human-written executable acceptance tests placed next to
+  `requirements`. `ensure(condition, message?)` is an assertion over concrete
+  calls, while `ensure(message, () => { assert(...) })` is a self-contained
+  synchronous or asynchronous scenario. The engine deterministically emits
+  and runs these as `*.ensure.ts`; they never depend on model-authored tests
+  to supply inputs or invoke a contract. Natural-language intent belongs in
+  `requirements`. The `precondition` keyword is reserved for future input
   constraints.
 - **`imagine resource`** — generative assets (images, audio, …) requested
   from generative AI. Declarative properties (`width = 64`,
