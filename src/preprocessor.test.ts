@@ -17,8 +17,19 @@ describe("extractImagineSpecs", () => {
 
     expect(specs).toHaveLength(1);
     expect(specs[0]).toMatchObject({ type: "class", name: "GomokuGame" });
-    expect(specs[0]!.members.map((member) => member.name)).toEqual(["start", "cleanup"]);
-    expect(specs[0]!.members.every((member) => member.modifiers.includes("async"))).toBe(true);
+    expect(specs[0]!.members.map((member) => [member.name, member.ensures.length])).toEqual([
+      ["placeStone", 1],
+      ["stoneAt", 1],
+      ["winner", 3],
+      ["chooseCpuMove", 3],
+      ["start", 0],
+      ["cleanup", 0],
+    ]);
+    expect(
+      specs[0]!.members
+        .filter((member) => member.modifiers.includes("async"))
+        .map((member) => member.name),
+    ).toEqual(["start", "cleanup"]);
   });
 
   it("parses every official example with the current ensure grammar", () => {
