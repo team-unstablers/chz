@@ -134,7 +134,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 0;
   }
   if (specs.length === 0) {
-    io.out(`${parsed.file}: no imagine functions to realize`);
+    io.out(`${parsed.file}: no imagine symbols to realize`);
     return 0;
   }
 

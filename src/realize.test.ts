@@ -121,6 +121,26 @@ describe("canonical prompt and symbol graph", () => {
     expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');
   });
 
+  it("turns an imagine class into a class symbol and member-aware ensure harness", () => {
+    const source = [
+      "imagine class Counter {",
+      "  imagine increment(by: number): number {",
+      "    ensure((args, retval) => typeof retval === 'number');",
+      "  }",
+      "}",
+    ].join("\n");
+    const spec = extractImagineSpecs(source, "counter.chz.ts")[0]!;
+    const symbol = imagineSpecToSymbol(spec, source, "counter.chz.ts");
+    const harness = renderEnsureHarness(spec, "counter.chz.ts");
+
+    expect(symbol.type).toBe("class");
+    expect(symbol.definition).toContain("imagine increment");
+    expect(harness).toContain('assertEnsures("methodName", args, retval)');
+    expect(harness).toContain('member: "increment"');
+    expect(harness).toContain("typeof retval === 'number'");
+    expect(harness).not.toContain('import type { Counter }');
+  });
+
   it("connects prologue, realized symbols, and epilogue in entry-point order", () => {
     const source = "imagine function greet(): string { ensure(`인사합니다.`); }\n";
     const specs = extractImagineSpecs(source, "example.chz.ts");
@@ -321,6 +341,59 @@ class RetryingEngineRealizer implements ChzRealizer {
   }
 }
 
+class CounterClassRealizer implements ChzRealizer {
+  readonly name = "CounterClassRealizer";
+  readonly supportedSymbolTypes = ["class"] as const;
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(
+      implementation,
+      [
+        "export class Counter {",
+        "  private value = 0;",
+        "  increment(by: number): number { this.value += by; return this.value; }",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      test,
+      [
+        "// @ts-expect-error The engine-owned Vitest runner provides this module for the temporary fixture.",
+        'import { describe, expect, it } from "vitest";',
+        'import { Counter } from "../implementations/Counter.ts";',
+        'import { assertEnsures } from "./test_Counter.ensure.ts";',
+        "describe('Counter', () => {",
+        "  it('increments and satisfies the human predicate', () => {",
+        "    const counter = new Counter();",
+        "    const retval = counter.increment(2);",
+        '    assertEnsures("increment", [2], retval);',
+        "    expect(retval).toBe(2);",
+        "  });",
+        "});",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date(),
+      resolvedBy: "counter-test-model",
+    };
+  }
+}
+
 describe("realize engine", () => {
   it("feeds independent verification failures into bounded retry sessions", async () => {
     const data = fixture();
@@ -348,5 +421,36 @@ describe("realize engine", () => {
     expect(readFileSync(join(result.baseDir, "implementations", "greet.ts"), "utf8")).toContain(
       "realized by engine-model",
     );
+  });
+
+  it("realizes and independently verifies a class as one symbol", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-class-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "counter.chz.ts");
+    const source = [
+      "imagine class Counter {",
+      "  requirements(`누적 카운터를 구현합니다.`);",
+      "  imagine increment(by: number): number {",
+      "    ensure((args, retval) => typeof retval === 'number');",
+      "    ensure(`호출할 때마다 by만큼 누적되어야 합니다.`);",
+      "  }",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const result = await realize(source, sourceFile, {
+      realizers: [new CounterClassRealizer()],
+      projectRoot: root,
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    expect(result.symbols).toHaveLength(1);
+    expect(result.symbols[0]!.symbol.type).toBe("class");
+    expect(readFileSync(join(result.baseDir, "implementations", "Counter.ts"), "utf8"))
+      .toContain("realization of `imagine class Counter`");
+    expect(readFileSync(join(result.baseDir, "implementation.ts"), "utf8"))
+      .toContain('export { Counter } from "./implementations/Counter.ts";');
   });
 });

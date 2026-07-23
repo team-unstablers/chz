@@ -129,7 +129,7 @@ function replaceImagineDeclarations(source: string, specs: readonly ImagineSpec[
   let result = "";
   let cursor = 0;
   for (const spec of specs) {
-    const declaration = `declare function ${spec.name}(${spec.parameters})${spec.returnType === "" ? "" : `: ${spec.returnType}`};`;
+    const declaration = renderImaginePlaceholder(spec);
     if (declaration.length > spec.originalText.length) {
       throw new Error(`Could not create a parser placeholder for imagine symbol '${spec.name}'.`);
     }
@@ -139,6 +139,26 @@ function replaceImagineDeclarations(source: string, specs: readonly ImagineSpec[
     cursor = spec.end;
   }
   return result + source.slice(cursor);
+}
+
+function renderImaginePlaceholder(spec: ImagineSpec): string {
+  if (spec.type === "function") {
+    return `declare function ${spec.name}(${spec.parameters})${spec.returnType === "" ? "" : `: ${spec.returnType}`};`;
+  }
+
+  const members = spec.members.map((member) => {
+    const staticModifier = member.modifiers.includes("static") ? "static " : "";
+    if (member.type === "property") {
+      const readonlyModifier = member.modifiers.includes("readonly") ? "readonly " : "";
+      return `  ${staticModifier}${readonlyModifier}${member.name}: ${member.returnType};`;
+    }
+    const returnType = member.returnType || (member.modifiers.includes("async") ? "Promise<void>" : "void");
+    if (member.name === "constructor") return `  constructor(${member.parameters});`;
+    return `  ${staticModifier}${member.name}(${member.parameters}): ${returnType};`;
+  });
+  return members.length === 0
+    ? `declare class ${spec.name} {}`
+    : `declare class ${spec.name} {\n${members.join("\n")}\n}`;
 }
 
 function collectIdentifiers(root: Node): Identifier[] {
@@ -158,7 +178,11 @@ function collectImagineSymbolIds(
 ): Set<number> {
   const identifiers = statements.flatMap((statement) => {
     const spec = specs.get(statement);
-    return isFunctionDeclaration(statement) && statement.name !== undefined && statement.name.text === spec?.name
+    return (
+      (isFunctionDeclaration(statement) || isClassDeclaration(statement)) &&
+      statement.name !== undefined &&
+      statement.name.text === spec?.name
+    )
       ? [statement.name]
       : [];
   });

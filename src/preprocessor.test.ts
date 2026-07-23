@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,6 +11,16 @@ import {
 } from "./preprocessor.ts";
 
 describe("extractImagineSpecs", () => {
+  it("parses the Gomoku class example as one class realization", () => {
+    const source = readFileSync(new URL("../examples/gomoku.chz.ts", import.meta.url), "utf8");
+    const specs = extractImagineSpecs(source, "examples/gomoku.chz.ts");
+
+    expect(specs).toHaveLength(1);
+    expect(specs[0]).toMatchObject({ type: "class", name: "GomokuGame" });
+    expect(specs[0]!.members.map((member) => member.name)).toEqual(["start", "cleanup"]);
+    expect(specs[0]!.members.every((member) => member.modifiers.includes("async"))).toBe(true);
+  });
+
   it("① extracts a Korean-named function with mixed predicate/natural ensures", () => {
     const source = [
       "imagine function 충돌판정_2D(ax: number, ay: number, bx: number, by: number): boolean {",
@@ -22,6 +34,8 @@ describe("extractImagineSpecs", () => {
     expect(specs).toHaveLength(1);
 
     const spec = specs[0]!;
+    expect(spec.type).toBe("function");
+    expect(spec.members).toEqual([]);
     expect(spec.name).toBe("충돌판정_2D");
     expect(spec.parameters).toBe("ax: number, ay: number, bx: number, by: number");
     expect(spec.returnType).toBe("boolean");
@@ -101,6 +115,54 @@ describe("extractImagineSpecs", () => {
     const source = "const imagine = 1;\nobj.imagine.function;\nlet x = imagine + 2;\n";
     expect(extractImagineSpecs(source, "ident.chz.ts")).toEqual([]);
   });
+
+  it("extracts an imagine class and its imagined async methods and properties", () => {
+    const source = [
+      "imagine class GameSession {",
+      "  requirements(`게임 세션을 관리합니다.`);",
+      "  imagine readonly score: number {",
+      "    requirements(`현재 점수입니다.`);",
+      "  }",
+      "  imagine static async create(name: string): Promise<GameSession> {",
+      "    ensure((args, retval) => retval !== undefined);",
+      "  }",
+      "  imagine async cleanup() {",
+      "    requirements(`리소스를 정리합니다.`);",
+      "  }",
+      "}",
+    ].join("\n");
+
+    const [spec] = extractImagineSpecs(source, "game.chz.ts");
+    expect(spec).toMatchObject({
+      type: "class",
+      name: "GameSession",
+      parameters: "",
+      returnType: "",
+      requirements: "게임 세션을 관리합니다.",
+    });
+    expect(spec!.members.map((member) => ({
+      type: member.type,
+      name: member.name,
+      modifiers: member.modifiers,
+      parameters: member.parameters,
+      returnType: member.returnType,
+    }))).toEqual([
+      { type: "property", name: "score", modifiers: ["readonly"], parameters: "", returnType: "number" },
+      {
+        type: "method",
+        name: "create",
+        modifiers: ["static", "async"],
+        parameters: "name: string",
+        returnType: "Promise<GameSession>",
+      },
+      { type: "method", name: "cleanup", modifiers: ["async"], parameters: "", returnType: "" },
+    ]);
+    expect(spec!.members[0]!.requirements).toBe("현재 점수입니다.");
+    expect(spec!.members[1]!.ensures).toEqual([
+      { kind: "predicate", source: "(args, retval) => retval !== undefined" },
+    ]);
+    expect(spec!.members[2]!.requirements).toBe("리소스를 정리합니다.");
+  });
 });
 
 describe("transformToPlainTs", () => {
@@ -152,6 +214,24 @@ describe("transformToPlainTs", () => {
     expect(code).toContain("const tail = 0;");
     expect(code).not.toContain("imagine");
   });
+
+  it("replaces an imagine class with a realization import", () => {
+    const source = [
+      "imagine class Counter {",
+      "  imagine increment(): number { requirements(`증가합니다.`); }",
+      "}",
+      "const counter = new Counter();",
+      "counter.increment();",
+      "",
+    ].join("\n");
+
+    const output = transformToPlainTs(source, "counter.chz.ts");
+    expect(output).toContain(
+      'import { Counter } from "./chz/realization/counter/implementation.ts";',
+    );
+    expect(output).not.toContain("imagine class");
+    expect(output).toContain("const counter = new Counter();");
+  });
 });
 
 describe("error handling", () => {
@@ -181,8 +261,14 @@ describe("error handling", () => {
     expect(() => extractImagineSpecs(source, "oops.chz.ts")).toThrow(ChzSyntaxError);
   });
 
-  it("throws for an unsupported imagine class", () => {
-    const source = "imagine class Game {\n  requirements(`game`);\n}\n";
-    expect(() => extractImagineSpecs(source, "game.chz.ts")).toThrow(/not supported in v0/);
+  it("keeps imagine resource explicitly deferred at top level and inside classes", () => {
+    const topLevel = "imagine resource sprite: ImageAsset { requirements(`sprite`); }\n";
+    const member = [
+      "imagine class Game {",
+      "  imagine resource sprite: ImageAsset { requirements(`sprite`); }",
+      "}",
+    ].join("\n");
+    expect(() => extractImagineSpecs(topLevel, "sprite.chz.ts")).toThrow(/intentionally deferred/);
+    expect(() => extractImagineSpecs(member, "game.chz.ts")).toThrow(/intentionally deferred/);
   });
 });

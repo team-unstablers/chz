@@ -87,4 +87,28 @@ describe("splitHumanCode", () => {
       "// Human-owned source documentation.\n\nexport {};\n",
     );
   });
+
+  it("moves construction and imagined class method calls into the epilogue", () => {
+    const source = [
+      'const label = "counter";',
+      "imagine class Counter {",
+      "  imagine async increment(by: number): Promise<number> {",
+      "    requirements(`값을 증가시킵니다.`);",
+      "  }",
+      "}",
+      "const counter = new Counter();",
+      "void counter.increment(2);",
+      "console.log(label, counter);",
+      "",
+    ].join("\n");
+
+    const result = split(source);
+
+    expect(result.prologue).toContain('const label = "counter";');
+    expect(result.prologue).not.toContain("new Counter");
+    expect(result.epilogue).toContain('import { Counter } from "./Counter.ts";');
+    expect(result.epilogue).toContain("const counter = new Counter();");
+    expect(result.epilogue).toContain("void counter.increment(2);");
+    expect(result.epilogue).not.toContain("imagine class");
+  });
 });

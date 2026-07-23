@@ -90,7 +90,7 @@ export function imagineSpecToSymbol(
   const lines = before.split(/\r?\n/);
   return {
     name: spec.name,
-    type: "function",
+    type: spec.type,
     definition: spec.originalText,
     file: resolve(fileName),
     posLine: lines.length,
@@ -290,6 +290,8 @@ export async function realize(
 
 /** Deterministic human ensure harness; this file is engine-owned. */
 export function renderEnsureHarness(spec: ImagineSpec, fileName: string): string {
+  if (spec.type === "class") return renderClassEnsureHarness(spec, fileName);
+
   const base = realizationBaseName(fileName);
   const predicates = spec.ensures.filter((ensure) => ensure.kind === "predicate");
   const externalTypes = collectExternalTypeNames(spec);
@@ -342,6 +344,72 @@ function describeValue(value: unknown): string {
 `;
 }
 
+function renderClassEnsureHarness(spec: ImagineSpec, fileName: string): string {
+  const base = realizationBaseName(fileName);
+  const contracts = [
+    ...spec.ensures
+      .filter((ensure) => ensure.kind === "predicate")
+      .map((ensure) => ({ member: "constructor", ensure })),
+    ...spec.members.flatMap((member) =>
+      member.ensures
+        .filter((ensure) => ensure.kind === "predicate")
+        .map((ensure) => ({ member: member.name, ensure })),
+    ),
+  ];
+  const externalTypes = collectExternalTypeNames(spec);
+  const typeImports = externalTypes.length === 0
+    ? ""
+    : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n\n`;
+  const entries = contracts.length === 0
+    ? "  // (no predicate `ensure(...)` contracts were declared for this class)"
+    : contracts.map(({ member, ensure }) =>
+      `  { member: ${JSON.stringify(member)}, predicate: ${ensure.source}, source: ${JSON.stringify(ensure.source)} },`
+    ).join("\n");
+
+  return `/// test_${spec.name}.ensure.ts
+/// AUTO-GENERATED ensure-contract harness — DO NOT EDIT.
+/// Generated deterministically by chz-realize from ${base}.chz.ts.
+/// Call assertEnsures("constructor", args, instance) for class contracts and
+/// assertEnsures("methodName", args, retval) for imagined member contracts.
+
+${typeImports}type EnsurePredicate = (args: readonly unknown[], retval: unknown) => unknown;
+
+interface MemberEnsure {
+  member: string;
+  predicate: EnsurePredicate;
+  source: string;
+}
+
+const MEMBER_ENSURES: readonly MemberEnsure[] = [
+${entries}
+];
+
+export function assertEnsures(member: string, args: readonly unknown[], retval: unknown): void {
+  MEMBER_ENSURES.filter((contract) => contract.member === member).forEach((contract, index) => {
+    const satisfied = contract.predicate(args, retval);
+    if (!satisfied) {
+      throw new Error(
+        \`ensure contract #\${index + 1} of ${spec.name}.\${member} was violated.\\n\` +
+          \`  contract: \${contract.source}\\n\` +
+          \`  args:     \${describeValue(args)}\\n\` +
+          \`  returned: \${describeValue(retval)}\\n\` +
+          \`  predicate returned: \${describeValue(satisfied)}\`,
+      );
+    }
+  });
+}
+
+function describeValue(value: unknown): string {
+  try {
+    const json = JSON.stringify(value);
+    return json ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+`;
+}
+
 function collectExternalTypeNames(spec: ImagineSpec): string[] {
   const builtins = new Set([
     "Array",
@@ -369,9 +437,14 @@ function collectExternalTypeNames(spec: ImagineSpec): string[] {
     spec.parameters,
     spec.returnType,
     ...spec.ensures.filter((ensure) => ensure.kind === "predicate").map((ensure) => ensure.source),
+    ...spec.members.flatMap((member) => [
+      member.parameters,
+      member.returnType,
+      ...member.ensures.filter((ensure) => ensure.kind === "predicate").map((ensure) => ensure.source),
+    ]),
   ].join("\n");
   const names = typeText.match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
-  return [...new Set(names.filter((name) => !builtins.has(name)))].sort();
+  return [...new Set(names.filter((name) => name !== spec.name && !builtins.has(name)))].sort();
 }
 
 export function renderEntryPoint(specs: ImagineSpec[], fileName: string): string {
@@ -393,10 +466,12 @@ import "./implementations/__epilogue__.ts";
 function attachProvenance(spec: ImagineSpec, resolution: ChzResolutionResolved, now: Date): void {
   const implementation = readFileSync(resolution.resolvedFile, "utf8");
   if (!implementation.includes("AUTO-GENERATED CODE - DO NOT EDIT")) {
-    const parameters = `${spec.name}(${spec.parameters})${spec.returnType ? `: ${spec.returnType}` : ""}`;
+    const declaration = spec.type === "function"
+      ? `imagine function ${spec.name}(${spec.parameters})${spec.returnType ? `: ${spec.returnType}` : ""}`
+      : `imagine class ${spec.name}`;
     writeFileSync(
       resolution.resolvedFile,
-      `/// ${spec.name}.ts\n/// realization of \`imagine function ${parameters}\`\n/// realized by ${resolution.resolvedBy} (via chz-realize) on ${now.toISOString()}\n///\n/// AUTO-GENERATED CODE - DO NOT EDIT (manual edits must be marked with @chz-realize-override)\n\n${implementation.trim()}\n\n/// END OF AUTO-GENERATED CODE\n`,
+      `/// ${spec.name}.ts\n/// realization of \`${declaration}\`\n/// realized by ${resolution.resolvedBy} (via chz-realize) on ${now.toISOString()}\n///\n/// AUTO-GENERATED CODE - DO NOT EDIT (manual edits must be marked with @chz-realize-override)\n\n${implementation.trim()}\n\n/// END OF AUTO-GENERATED CODE\n`,
       "utf8",
     );
   }
@@ -405,7 +480,7 @@ function attachProvenance(spec: ImagineSpec, resolution: ChzResolutionResolved, 
     if (test.includes("AUTO-GENERATED tests")) continue;
     writeFileSync(
       testFile,
-      `/// ${relative(dirname(testFile), testFile)}\n/// AUTO-GENERATED tests for \`imagine function ${spec.name}\`, authored by ${resolution.resolvedBy}\n/// (via chz-realize) on ${now.toISOString()}.\n\n${test.trim()}\n`,
+      `/// ${relative(dirname(testFile), testFile)}\n/// AUTO-GENERATED tests for \`imagine ${spec.type} ${spec.name}\`, authored by ${resolution.resolvedBy}\n/// (via chz-realize) on ${now.toISOString()}.\n\n${test.trim()}\n`,
       "utf8",
     );
   }

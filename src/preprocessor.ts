@@ -12,10 +12,12 @@
  * and never touches the TypeScript compiler API. It handles exactly the v0
  * grammar and nothing else:
  *
- *   imagine function <name>(<params>): <returnType> {
- *     requirements(`...`);           // 0..1
- *     ensure((args, retval) => ...); // 0..n  -> "predicate"
- *     ensure(`...`);                 // 0..n  -> "natural"
+ *   imagine function <name>(<params>): <returnType> { ... }
+ *
+ *   imagine class <name> {
+ *     requirements(`...`);
+ *     imagine [static] [async] <method>(<params>): <returnType> { ... }
+ *     imagine [static] <property>: <type> { ... }
  *   }
  *
  * Known limitations of the scanner (out of scope for v0), see the exported
@@ -47,14 +49,34 @@ export interface EnsureContract {
   source: string;
 }
 
-/** The extracted specification of one top-level `imagine function`. */
-export interface ImagineSpec {
-  /** Function name; may be a Unicode identifier (e.g. `충돌판정_2D`). */
+export type ImagineDeclarationType = "function" | "class";
+
+/** A required method or property declared inside an `imagine class`. */
+export interface ImagineClassMemberSpec {
+  type: "method" | "property";
   name: string;
-  /** Parameter list text between the parentheses, trimmed. `""` when empty. */
+  modifiers: string[];
   parameters: string;
-  /** Return-type text after the `:`, trimmed. `""` when there is no annotation. */
   returnType: string;
+  requirements: string | null;
+  ensures: EnsureContract[];
+  originalText: string;
+  start: number;
+  end: number;
+}
+
+/** The extracted specification of one top-level `imagine` declaration. */
+export interface ImagineSpec {
+  /** Declaration kind. Resources are deliberately not part of this union. */
+  type: ImagineDeclarationType;
+  /** Symbol name; may be a Unicode identifier (e.g. `충돌판정_2D`). */
+  name: string;
+  /** Function parameter list. Empty for classes. */
+  parameters: string;
+  /** Function return type. Empty for classes or an omitted annotation. */
+  returnType: string;
+  /** Required class members in source order. Empty for functions. */
+  members: ImagineClassMemberSpec[];
   /** The `requirements(...)` content string, or `null` when absent. */
   requirements: string | null;
   /** The `ensure(...)` contracts, in source order. */
@@ -99,7 +121,7 @@ export class ChzSyntaxError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Find every top-level `imagine function` declaration in `source` and lift it
+ * Find every top-level `imagine function` or `imagine class` declaration and lift it
  * into an {@link ImagineSpec}. `fileName` is used only for error messages.
  *
  * Only declarations at statement top level (brace/paren/bracket depth 0) are
@@ -107,7 +129,7 @@ export class ChzSyntaxError extends Error {
  * strings, comments or template literals are ignored.
  *
  * @throws {ChzSyntaxError} on malformed input (unclosed block, a second
- *   `requirements(...)`, an unsupported `imagine class/var/resource`, etc.).
+ *   `requirements(...)`, an unsupported `imagine var/resource`, etc.).
  */
 export function extractImagineSpecs(source: string, fileName: string): ImagineSpec[] {
   const specs: ImagineSpec[] = [];
@@ -231,10 +253,9 @@ export function realizationImportSpecifier(fileName: string): string {
 
 /**
  * Called with `declStart` at the `imagine` keyword and `afterImagine` just past
- * it. Returns the parsed spec when this is an `imagine function`, or `null`
+ * it. Returns the parsed spec when this is an `imagine function/class`, or `null`
  * when `imagine` is merely an ordinary identifier here (so the caller keeps
- * scanning). Throws for the recognised-but-unsupported `imagine class/var/
- * resource` forms.
+ * scanning). Throws for recognised-but-unsupported forms.
  */
 function tryParseImagine(
   source: string,
@@ -245,14 +266,23 @@ function tryParseImagine(
   const kw = readIdentifier(source, skipTrivia(source, afterImagine, fileName));
   if (kw === null) return null;
 
-  if (kw.value === "class" || kw.value === "var" || kw.value === "resource") {
+  if (kw.value === "resource") {
     throw syntaxError(
       fileName,
       source,
       declStart,
-      `'imagine ${kw.value}' is not supported in v0 (only 'imagine function')`,
+      "'imagine resource' is intentionally deferred to a future language version",
     );
   }
+  if (kw.value === "var") {
+    throw syntaxError(
+      fileName,
+      source,
+      declStart,
+      "'imagine var' is not supported (use an imagined property inside 'imagine class')",
+    );
+  }
+  if (kw.value === "class") return parseImagineClass(source, declStart, kw.end, fileName);
   if (kw.value !== "function") return null;
 
   return parseImagineFunction(source, declStart, kw.end, fileName);
@@ -288,11 +318,238 @@ function parseImagineFunction(
   const originalText = source.slice(declStart, bodyEnd);
   const { requirements, ensures } = parseImagineBody(source, bodyOpen, bodyEnd, fileName);
 
-  return { name, parameters, returnType, requirements, ensures, originalText, start: declStart, end: bodyEnd };
+  return {
+    type: "function",
+    name,
+    parameters,
+    returnType,
+    members: [],
+    requirements,
+    ensures,
+    originalText,
+    start: declStart,
+    end: bodyEnd,
+  };
+}
+
+/** Parse an `imagine class` as one realizable symbol with nested member contracts. */
+function parseImagineClass(
+  source: string,
+  declStart: number,
+  afterClass: number,
+  fileName: string,
+): ImagineSpec {
+  let p = skipTrivia(source, afterClass, fileName);
+  const nameTok = readIdentifier(source, p);
+  if (nameTok === null) {
+    throw syntaxError(fileName, source, p, "expected a class name after 'imagine class'");
+  }
+  const name = nameTok.value;
+  const bodyOpen = findDeclarationBodyBrace(source, nameTok.end, `imagine class '${name}'`, fileName);
+  const bodyEnd = skipBalanced(source, bodyOpen, fileName);
+  const originalText = source.slice(declStart, bodyEnd);
+  const { requirements, ensures } = parseImagineBody(
+    source,
+    bodyOpen,
+    bodyEnd,
+    fileName,
+    `imagine class '${name}'`,
+  );
+  const members = parseImagineClassMembers(source, bodyOpen, bodyEnd, name, fileName);
+
+  return {
+    type: "class",
+    name,
+    parameters: "",
+    returnType: "",
+    members,
+    requirements,
+    ensures,
+    originalText,
+    start: declStart,
+    end: bodyEnd,
+  };
+}
+
+/** Collect `imagine` method/property declarations at direct class-body depth. */
+function parseImagineClassMembers(
+  source: string,
+  bodyOpen: number,
+  bodyEnd: number,
+  className: string,
+  fileName: string,
+): ImagineClassMemberSpec[] {
+  const members: ImagineClassMemberSpec[] = [];
+  let i = bodyOpen + 1;
+  const end = bodyEnd - 1;
+  let depth = 0;
+  let prev = "";
+
+  while (i < end) {
+    const ch = source[i]!;
+    if (ch === "/" && source[i + 1] === "/") {
+      i = skipLineComment(source, i);
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      i = skipBlockComment(source, i, fileName);
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      i = skipString(source, i, ch, fileName);
+      prev = ch;
+      continue;
+    }
+    if (ch === "`") {
+      i = skipTemplate(source, i, fileName);
+      prev = "`";
+      continue;
+    }
+    if (ch === "{" || ch === "(" || ch === "[") {
+      depth++;
+      i++;
+      prev = ch;
+      continue;
+    }
+    if (ch === "}" || ch === ")" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+      i++;
+      prev = ch;
+      continue;
+    }
+    if (isIdentifierStart(ch)) {
+      const id = readIdentifier(source, i)!;
+      if (depth === 0 && prev !== "." && id.value === "imagine") {
+        const member = parseImagineClassMember(source, i, id.end, className, fileName);
+        members.push(member);
+        i = member.end;
+        prev = "}";
+        continue;
+      }
+      i = id.end;
+      prev = source[id.end - 1]!;
+      continue;
+    }
+    if (!isWhitespace(ch)) prev = ch;
+    i++;
+  }
+
+  return members;
+}
+
+function parseImagineClassMember(
+  source: string,
+  declStart: number,
+  afterImagine: number,
+  className: string,
+  fileName: string,
+): ImagineClassMemberSpec {
+  let p = skipTrivia(source, afterImagine, fileName);
+  const modifiers: string[] = [];
+  let token = readIdentifier(source, p);
+  while (token !== null && ["async", "static", "readonly"].includes(token.value)) {
+    if (!modifiers.includes(token.value)) modifiers.push(token.value);
+    p = skipTrivia(source, token.end, fileName);
+    token = readIdentifier(source, p);
+  }
+  if (token === null) {
+    throw syntaxError(fileName, source, p, `expected a member name in imagine class '${className}'`);
+  }
+  if (token.value === "resource") {
+    throw syntaxError(
+      fileName,
+      source,
+      token.end,
+      "'imagine resource' is intentionally deferred to a future language version",
+    );
+  }
+  const name = token.value;
+  p = skipTrivia(source, token.end, fileName);
+
+  if (source[p] === "(") {
+    const paramsEnd = skipBalanced(source, p, fileName);
+    const parameters = source.slice(p + 1, paramsEnd - 1).trim();
+    const bodyOpen = findDeclarationBodyBrace(
+      source,
+      paramsEnd,
+      `imagined method '${className}.${name}'`,
+      fileName,
+    );
+    const returnRegion = source.slice(paramsEnd, bodyOpen).trim();
+    const returnType = returnRegion.startsWith(":") ? returnRegion.slice(1).trim() : returnRegion;
+    const bodyEnd = skipBalanced(source, bodyOpen, fileName);
+    const { requirements, ensures } = parseImagineBody(
+      source,
+      bodyOpen,
+      bodyEnd,
+      fileName,
+      `imagined method '${className}.${name}'`,
+    );
+    return {
+      type: "method",
+      name,
+      modifiers,
+      parameters,
+      returnType,
+      requirements,
+      ensures,
+      originalText: source.slice(declStart, bodyEnd),
+      start: declStart,
+      end: bodyEnd,
+    };
+  }
+
+  if (source[p] !== ":") {
+    throw syntaxError(
+      fileName,
+      source,
+      p,
+      `expected '(' or ':' after imagined class member '${className}.${name}'`,
+    );
+  }
+  const bodyOpen = findDeclarationBodyBrace(
+    source,
+    p + 1,
+    `imagined property '${className}.${name}'`,
+    fileName,
+  );
+  const returnType = source.slice(p + 1, bodyOpen).trim();
+  if (returnType === "") {
+    throw syntaxError(fileName, source, p + 1, `expected a type for imagined property '${className}.${name}'`);
+  }
+  const bodyEnd = skipBalanced(source, bodyOpen, fileName);
+  const { requirements, ensures } = parseImagineBody(
+    source,
+    bodyOpen,
+    bodyEnd,
+    fileName,
+    `imagined property '${className}.${name}'`,
+  );
+  return {
+    type: "property",
+    name,
+    modifiers,
+    parameters: "",
+    returnType,
+    requirements,
+    ensures,
+    originalText: source.slice(declStart, bodyEnd),
+    start: declStart,
+    end: bodyEnd,
+  };
 }
 
 /** Locate the `{` that opens the function body, scanning past the return type. */
 function findBodyBrace(source: string, from: number, name: string, fileName: string): number {
+  return findDeclarationBodyBrace(source, from, `imagine function '${name}'`, fileName);
+}
+
+function findDeclarationBodyBrace(
+  source: string,
+  from: number,
+  declaration: string,
+  fileName: string,
+): number {
   let i = from;
   while (i < source.length) {
     const ch = source[i]!;
@@ -314,11 +571,11 @@ function findBodyBrace(source: string, from: number, name: string, fileName: str
     }
     if (ch === "{") return i;
     if (ch === ";") {
-      throw syntaxError(fileName, source, i, `imagine function '${name}' must have a body`);
+      throw syntaxError(fileName, source, i, `${declaration} must have a body`);
     }
     i++;
   }
-  throw syntaxError(fileName, source, from, `unterminated imagine function '${name}': missing '{'`);
+  throw syntaxError(fileName, source, from, `unterminated ${declaration}: missing '{'`);
 }
 
 /**
@@ -331,6 +588,7 @@ function parseImagineBody(
   bodyOpen: number,
   bodyEnd: number,
   fileName: string,
+  declaration = "imagine function",
 ): { requirements: string | null; ensures: EnsureContract[] } {
   let requirements: string | null = null;
   let requirementsCount = 0;
@@ -389,7 +647,7 @@ function parseImagineBody(
                 fileName,
                 source,
                 i,
-                "requirements() may appear at most once in an imagine function",
+                `requirements() may appear at most once in ${declaration}`,
               );
             }
             requirements = literalContent(call.firstArg);

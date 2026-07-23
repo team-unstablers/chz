@@ -27,6 +27,26 @@ function makeFixture(name = "demo.chz.ts"): string {
   return file;
 }
 
+function makeClassFixture(name = "game.chz.ts"): string {
+  const root = mkdtempSync(join(tmpdir(), "chz-cli-class-"));
+  roots.push(root);
+  const file = join(root, name);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    [
+      "imagine class Game {",
+      "  requirements(`테스트 가능한 게임을 구현합니다.`);",
+      "  imagine async start() {}",
+      "  imagine async cleanup() { requirements(`리소스를 정리합니다.`); }",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return file;
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -72,6 +92,37 @@ class TestRunningCliRealizer extends CliRealizer {
       await context.harness?.runTests?.(resolution.resolvedTestFiles);
     }
     return resolution;
+  }
+}
+
+class ClassCliRealizer implements ChzRealizer {
+  readonly name = "ClassCliRealizer";
+  readonly supportedSymbolTypes = ["class"] as const;
+  calls = 0;
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    this.calls++;
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dirname(implementation), { recursive: true });
+    await mkdir(dirname(test), { recursive: true });
+    await writeFile(
+      implementation,
+      `export class ${symbol.name} { async start(): Promise<void> {} async cleanup(): Promise<void> {} }\n`,
+    );
+    await writeFile(test, "export {};\n");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date(),
+      resolvedBy: "class-cli-test-model",
+    };
   }
 }
 
@@ -139,6 +190,32 @@ describe("realize command", () => {
     expect(cache.chzVersion).toBe("9.9.9");
     expect(cache.symbols.greet.model).toBe("cli-test-model");
     expect(out.join("\n")).toContain("1 tests passed");
+  });
+
+  it("realizes an imagine class through the CLI as a class symbol", async () => {
+    const file = makeClassFixture();
+    const realizer = new ClassCliRealizer();
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const code = await run(
+      ["realize", file],
+      { out: (message) => out.push(message), err: (message) => err.push(message) },
+      {
+        config: { realizers: [realizer] },
+        projectRoot: dirname(file),
+        runTests: greenTests,
+        now: () => new Date("2026-07-23T00:00:00.000Z"),
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(err).toEqual([]);
+    expect(realizer.calls).toBe(1);
+    const baseDir = join(dirname(file), "chz", "realization", "game");
+    expect(readFileSync(join(baseDir, "implementations", "Game.ts"), "utf8"))
+      .toContain("realization of `imagine class Game`");
+    expect(out.join("\n")).toContain("realized 1 symbol");
   });
 
   it("routes provider reasoning diagnostics to stderr", async () => {
