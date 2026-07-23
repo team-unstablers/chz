@@ -47,6 +47,15 @@ export interface ChzDependencyGraph {
 export interface BuildDependencyGraphOptions {
   /** Maximum symbols one cycle may contain. Default {@link DEFAULT_MAX_CYCLE_SIZE}. */
   maxCycleSize?: number;
+  /**
+   * Confirmed edges from a previous run's `realization-cache.json` (docs/62
+   * stage 3), keyed by symbol name. They are united with the estimated
+   * mention-scan edges: a dependency the model chose during realization must
+   * keep constraining the order even when the spec text never names it.
+   * Callers must only pass edges of symbols whose spec is unchanged — a
+   * changed spec invalidates its old implementation's imports.
+   */
+  confirmedEdges?: ReadonlyMap<string, readonly string[]>;
 }
 
 /** A dependency cycle exceeded the configured size cap. */
@@ -184,6 +193,9 @@ export function buildDependencyGraph(
   const names = symbols.map((symbol) => symbol.name);
   for (const symbol of symbols) {
     const mentioned = new Set(mentionedSymbols(symbol.definition, names));
+    for (const confirmed of options.confirmedEdges?.get(symbol.name) ?? []) {
+      mentioned.add(confirmed);
+    }
     symbol.dependencies = symbols.filter(
       (candidate) => candidate !== symbol && mentioned.has(candidate.name),
     );

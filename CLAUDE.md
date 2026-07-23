@@ -15,10 +15,15 @@ verification loop (symbol-scoped, plus a final whole-realization pass), the
 prologue/epilogue emission, and the symbol-level dependency graph
 (`src/graph.ts`: SCC cycles realized as one session, configurable cycle size
 cap, confirmed-edge + public-surface recording into `realization-cache.json`,
-failures skipping only dependents) are implemented; broader syntax,
-incremental realization (cache consumption and invalidation propagation), and
-drift/override handling remain future work. When code and docs disagree, the
-docs are more current.
+failures skipping only dependents) are implemented. Incremental re-runs work
+per docs/62: unchanged green symbols are reused straight from the cache,
+invalidation propagates per-hop on public-surface changes, internal-only
+changes trigger the dependents' no-LLM test-re-run safety net, a drifted
+artifact falls back to re-realization, an edited CONTEXTS.md discards the
+cache, and a changed human layer (prologue/epilogue) routes every reused
+symbol through the retest net. Broader syntax, override
+(`@chz-realize-override`) preservation, and cross-file graphs remain future
+work. When code and docs disagree, the docs are more current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,

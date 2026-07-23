@@ -10,9 +10,9 @@
  *      range"; the realized code is the "lockfile". `realization-cache.json`
  *      pins the exact spec + emitted-file hashes plus provenance (model,
  *      timestamp), so a later `chz` run can tell whether the committed code
- *      still matches what was realized — the basis for drift detection
- *      (milestone 2). This module only *records* the cache; it never skips work
- *      based on it.
+ *      still matches what was realized. The realize engine consumes it for
+ *      re-runs (docs/62): unchanged, undrifted, green symbols are reused
+ *      without a session.
  *   2. The build never calls an LLM. Verification is a plain child-process
  *      vitest run over committed files, so it is reproducible and offline.
  *
@@ -54,6 +54,15 @@ import type { RealizeResult } from "./realize.ts";
 /** Lower-case sha256 hex digest of a UTF-8 string. Used for every cache hash. */
 export function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * The cache hash of the split human layers. Each layer is hashed separately
+ * and the pair re-hashed, so the combination is unambiguous without any
+ * separator byte; the engine and the cache builder must agree byte-for-byte.
+ */
+export function humanCodeHash(prologue: string, epilogue: string): string {
+  return sha256(sha256(prologue) + sha256(epilogue));
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +321,17 @@ export interface RealizationCache {
   sourceFileName: string;
   /** sha256 of the entire original source, before preprocessing. */
   sourceHash: string;
+  /**
+   * sha256 of `CONTEXTS.md` at cache time (empty-string hash when absent).
+   * Recorded human decisions join the invalidation hash (docs/63): an edited
+   * answer discards the whole cache on the next run.
+   */
+  contextsHash: string;
+  /**
+   * {@link humanCodeHash} of the emitted prologue/epilogue. A changed human
+   * layer routes every reused symbol through the retest safety net.
+   */
+  humanCodeHash: string;
   /** True when tests were explicitly skipped (`--skip-tests`) rather than run. */
   testsSkipped: boolean;
   /** One entry per realized symbol, keyed by name, in source order. */
@@ -334,11 +354,37 @@ export interface BuildRealizationCacheInput {
   testsPassed: boolean;
   /** Whether tests were skipped rather than run (implies `testsPassed: false`). */
   testsSkipped?: boolean;
+  /**
+   * Content of `CONTEXTS.md` at cache time. {@link writeRealizationCache}
+   * reads it from `baseDir` when omitted; the pure builder defaults to "".
+   */
+  contexts?: string;
 }
 
 /** Absolute path of a realization's cache file. */
 export function realizationCachePath(baseDir: string): string {
   return join(baseDir, "realization-cache.json");
+}
+
+/**
+ * Load a previous run's cache, or `null` when it is absent, unreadable, or
+ * structurally not a cache. A broken cache must never fail realize — the
+ * engine simply falls back to realizing everything from scratch.
+ */
+export function readRealizationCache(baseDir: string): RealizationCache | null {
+  const path = realizationCachePath(baseDir);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const cache = parsed as Partial<RealizationCache>;
+    if (typeof cache.chzVersion !== "string" || typeof cache.sourceHash !== "string") return null;
+    if (typeof cache.contextsHash !== "string" || typeof cache.humanCodeHash !== "string") return null;
+    if (typeof cache.symbols !== "object" || cache.symbols === null) return null;
+    return cache as RealizationCache;
+  } catch {
+    return null;
+  }
 }
 
 /** Locate an emitted file's content within a symbol by its relative path. */
@@ -372,15 +418,24 @@ export function buildRealizationCache(input: BuildRealizationCacheInput): Realiz
       ensureTestHash: sha256(emittedContent(result, symbol.name, `tests/test_${symbol.name}.ensure.ts`)),
       dependencies: extractConfirmedDependencies(implementation, symbol.name, knownSymbolNames),
       model: symbol.resolution.resolvedBy ?? input.modelLabel ?? "unknown-realizer",
-      realizedAt,
-      testsPassed,
+      // A reused symbol keeps its original provenance so re-writing the cache
+      // stays byte-stable across no-op runs (docs/62; field report §4.7).
+      realizedAt: symbol.reused ? symbol.resolution.resolvedAt.toISOString() : realizedAt,
+      testsPassed: symbol.reused ? true : testsPassed,
     };
   }
 
+  const humanLayer = (relPath: string): string =>
+    result.files.find((file) => file.relPath === relPath)?.content ?? "";
   return {
     chzVersion,
     sourceFileName: basename(result.fileName),
     sourceHash: sha256(source),
+    contextsHash: sha256(input.contexts ?? ""),
+    humanCodeHash: humanCodeHash(
+      humanLayer("implementations/__prologue__.ts"),
+      humanLayer("implementations/__epilogue__.ts"),
+    ),
     testsSkipped,
     symbols,
   };
@@ -391,7 +446,10 @@ export function buildRealizationCache(input: BuildRealizationCacheInput): Realiz
  * trailing newline. Returns the absolute path written.
  */
 export function writeRealizationCache(input: BuildRealizationCacheInput): string {
-  const cache = buildRealizationCache(input);
+  const contextsPath = join(input.result.baseDir, "CONTEXTS.md");
+  const contexts = input.contexts ??
+    (existsSync(contextsPath) ? readFileSync(contextsPath, "utf8") : "");
+  const cache = buildRealizationCache({ ...input, contexts });
   const path = realizationCachePath(input.result.baseDir);
   writeFileSync(path, `${JSON.stringify(cache, null, 2)}\n`, "utf8");
   return path;

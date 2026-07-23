@@ -12,8 +12,11 @@ import {
 
 describe("extractImagineSpecs", () => {
   it("parses the Gomoku class example as one class realization", () => {
-    const source = readFileSync(new URL("../examples/gomoku.chz.ts", import.meta.url), "utf8");
-    const specs = extractImagineSpecs(source, "examples/gomoku.chz.ts");
+    const source = readFileSync(
+      new URL("../examples/simple-cases/gomoku.chz.ts", import.meta.url),
+      "utf8",
+    );
+    const specs = extractImagineSpecs(source, "examples/simple-cases/gomoku.chz.ts");
 
     expect(specs).toHaveLength(1);
     expect(specs[0]).toMatchObject({ type: "class", name: "GomokuGame" });
@@ -34,8 +37,11 @@ describe("extractImagineSpecs", () => {
 
   it("parses every official example with the current ensure grammar", () => {
     for (const name of ["collision", "todo-list", "gomoku"]) {
-      const source = readFileSync(new URL(`../examples/${name}.chz.ts`, import.meta.url), "utf8");
-      expect(() => extractImagineSpecs(source, `examples/${name}.chz.ts`)).not.toThrow();
+      const source = readFileSync(
+        new URL(`../examples/simple-cases/${name}.chz.ts`, import.meta.url),
+        "utf8",
+      );
+      expect(() => extractImagineSpecs(source, `examples/simple-cases/${name}.chz.ts`)).not.toThrow();
     }
   });
 

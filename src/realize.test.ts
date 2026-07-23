@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { extractImagineSpecs } from "./preprocessor.ts";
+import { buildRealizationCache, writeRealizationCache } from "./verify.ts";
 import {
   CHZ_HARNESS_TOOLS,
   CHZ_REALIZER_SYSTEM,
@@ -168,6 +169,19 @@ describe("canonical prompt and symbol graph", () => {
     const order = buildEstimatedRealizeOrder(extractImagineSpecs(source, "graph.chz.ts"), source, "graph.chz.ts");
     expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parent"]);
     expect(order[1]!.dependencies.map((symbol) => symbol.name)).toEqual(["leaf"]);
+  });
+
+  it("renders ensure harnesses independent of file position and checkout path", () => {
+    const data = fixture();
+    const shifted = `// a comment moving every symbol down one line\n\n${data.source}`;
+    const specAtOrigin = extractImagineSpecs(data.source, data.sourceFile)[0]!;
+    const specShifted = extractImagineSpecs(shifted, "/entirely/other/path/sample.chz.ts")[0]!;
+
+    expect(specShifted.ensures[0]!.line).not.toBe(specAtOrigin.ensures[0]!.line);
+    // Identical harness bytes: cache reuse must not break when an edit
+    // elsewhere shifts the block, or when the repo lives at another path.
+    expect(renderEnsureHarness(specShifted, "/entirely/other/path/sample.chz.ts", [specShifted]))
+      .toBe(renderEnsureHarness(specAtOrigin, data.sourceFile, [specAtOrigin]));
   });
 
   it("imports external signature types into the engine-owned ensure harness", () => {
@@ -886,5 +900,428 @@ describe("realize engine", () => {
     expect(result.outcome).toBe("failed");
     expect(result.reason).toContain("maximum cycle size");
     expect(calls).toEqual([]);
+  });
+});
+
+/** Two-symbol re-run fixture: buildUniqueSlugs depends on slugify. */
+function makeSlugSource(slugifyRequirements: string, slugifyEnsure: string): string {
+  return [
+    "imagine function slugify(input: string): string {",
+    `  requirements(\`${slugifyRequirements}\`);`,
+    `  ${slugifyEnsure}`,
+    "}",
+    "",
+    "imagine function buildUniqueSlugs(titles: readonly string[]): string[] {",
+    "  requirements(`slugify를 사용합니다.`);",
+    "}",
+    "",
+  ].join("\n");
+}
+
+class CountingSlugRealizer implements ChzRealizer {
+  readonly name = "CountingSlugRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+  readonly calls: string[] = [];
+  readonly feedbacks: Array<string | undefined> = [];
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    this.calls.push(symbol.name);
+    this.feedbacks.push(context.verificationFeedback);
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(
+      implementation,
+      symbol.name === "slugify"
+        ? "export function slugify(input: string): string { return input.toLowerCase(); }\n"
+        : [
+            'import { slugify } from "./slugify.ts";',
+            "",
+            "export function buildUniqueSlugs(titles: readonly string[]): string[] {",
+            "  return titles.map((title) => slugify(title));",
+            "}",
+            "",
+          ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(test, "export {};\n", "utf8");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date("2026-07-23T00:00:00.000Z"),
+      resolvedBy: "counting-model",
+    };
+  }
+}
+
+describe("realize re-runs (docs/62)", () => {
+  const CHZ_VERSION = "test-version";
+  const green = async () => ({ passed: true, output: "green" });
+
+  async function firstRun(source: string, root: string, sourceFile: string) {
+    const realizer = new CountingSlugRealizer();
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    writeRealizationCache({
+      result,
+      source,
+      chzVersion: CHZ_VERSION,
+      realizedAt: "2026-07-23T00:00:00.000Z",
+      testsPassed: true,
+    });
+    return result;
+  }
+
+  function fixtureRoot(): { root: string; sourceFile: string } {
+    const root = mkdtempSync(join(tmpdir(), "chz-rerun-"));
+    roots.push(root);
+    return { root, sourceFile: join(root, "slugs.chz.ts") };
+  }
+
+  it("reuses every unchanged symbol without a session and keeps the cache byte-stable", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    const first = await firstRun(source, root, sourceFile);
+    const firstCache = readFileSync(join(first.baseDir, "realization-cache.json"), "utf8");
+
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual([]);
+    expect(retests).toEqual([]);
+    expect(second.symbols.map((symbol) => [symbol.name, symbol.reused])).toEqual([
+      ["slugify", true],
+      ["buildUniqueSlugs", true],
+    ]);
+    // Re-writing the cache changes nothing: provenance is preserved.
+    const rewritten = buildRealizationCache({
+      result: second,
+      source,
+      chzVersion: CHZ_VERSION,
+      realizedAt: "2026-07-24T00:00:00.000Z",
+      testsPassed: true,
+    });
+    expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(firstCache);
+  });
+
+  it("re-realizes only an internally-changed symbol and retests its dependents", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const ensureLine = "ensure(slugify('AB') === 'ab', '소문자.');";
+    const source = makeSlugSource("소문자로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    // Same signature, same ensure — only the requirements prose changes.
+    const edited = makeSlugSource("소문자 슬러그로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, edited, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(edited, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify"]);
+    expect(retests).toEqual([["buildUniqueSlugs"]]);
+    expect(second.symbols.map((symbol) => [symbol.name, symbol.reused])).toEqual([
+      ["slugify", false],
+      ["buildUniqueSlugs", true],
+    ]);
+  });
+
+  it("invalidates dependents when a public surface changes", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    // The ensure contract is part of the public surface (docs/62).
+    const edited = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('A-B') === 'a-b', '하이픈 보존.');");
+    writeFileSync(sourceFile, edited, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(edited, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify", "buildUniqueSlugs"]);
+    expect(retests).toEqual([]);
+  });
+
+  it("re-realizes a dependent whose safety-net tests go red, feeding the red output back", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const ensureLine = "ensure(slugify('AB') === 'ab', '소문자.');";
+    const source = makeSlugSource("소문자로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    const edited = makeSlugSource("소문자 슬러그로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, edited, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const second = await realize(edited, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async () => ({ passed: false, output: "RETEST-RED: my-post now collides" }),
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify", "buildUniqueSlugs"]);
+    // The dependent's session starts from the red safety-net output.
+    expect(realizer.feedbacks[1]).toContain("RETEST-RED");
+    expect(second.symbols.every((symbol) => !symbol.reused)).toBe(true);
+  });
+
+  it("still reuses everything when an edit above the symbols shifts every line", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    // A leading comment keeps every specHash intact but shifts every ensure
+    // to a new line; position-independent harnesses must keep reuse alive.
+    // (The comment is also a human-layer change, so the retest net fires —
+    // that is expected and must still end in reuse, not in a session.)
+    const shifted = `// 상단 주석 한 줄 추가\n${source}`;
+    writeFileSync(sourceFile, shifted, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(shifted, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual([]);
+    expect(retests).toEqual([["slugify"], ["buildUniqueSlugs"]]);
+    expect(second.symbols.every((symbol) => symbol.reused)).toBe(true);
+  });
+
+  it("discards the whole cache when CONTEXTS.md was edited", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    const first = await firstRun(source, root, sourceFile);
+
+    // Recorded decisions join the invalidation hash (docs/63): every cached
+    // symbol may have been realized under answers that no longer hold.
+    writeFileSync(
+      join(first.baseDir, "CONTEXTS.md"),
+      "## slugify\n\n- **Q**: 하이픈 정책?\n- **A**: 유지 (2026-07-24)\n",
+      "utf8",
+    );
+    const realizer = new CountingSlugRealizer();
+    const second = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify", "buildUniqueSlugs"]);
+    expect(second.symbols.some((symbol) => symbol.reused)).toBe(false);
+  });
+
+  it("routes every reused symbol through the retest net when human code changed", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const humanLine = 'console.log(buildUniqueSlugs(["Hello"]));';
+    const base = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    const source = `${base}\n${humanLine}\n`;
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    const edited = `${base}\nconsole.log(buildUniqueSlugs(["Hello", "World"]));\n`;
+    writeFileSync(sourceFile, edited, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(edited, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual([]);
+    expect(retests).toEqual([["slugify"], ["buildUniqueSlugs"]]);
+    expect(second.symbols.every((symbol) => symbol.reused)).toBe(true);
+  });
+
+  it("skips the retest safety net under --skip-tests", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const ensureLine = "ensure(slugify('AB') === 'ab', '소문자.');";
+    const source = makeSlugSource("소문자로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    const edited = makeSlugSource("소문자 슬러그로 만듭니다.", ensureLine);
+    writeFileSync(sourceFile, edited, "utf8");
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(edited, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      skipVerification: true,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: false, output: "must not run" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify"]);
+    expect(retests).toEqual([]);
+    expect(second.symbols.map((symbol) => [symbol.name, symbol.reused])).toEqual([
+      ["slugify", false],
+      ["buildUniqueSlugs", true],
+    ]);
+  });
+
+  it("degrades a corrupted cache entry to a fresh realization instead of crashing", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    const first = await firstRun(source, root, sourceFile);
+
+    const cachePath = join(first.baseDir, "realization-cache.json");
+    const cache = JSON.parse(readFileSync(cachePath, "utf8")) as {
+      symbols: Record<string, { realizedAt: string }>;
+    };
+    cache.symbols["slugify"]!.realizedAt = "not-a-timestamp";
+    writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}\n`, "utf8");
+
+    const realizer = new CountingSlugRealizer();
+    const second = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async () => ({ passed: true, output: "green" }),
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify"]);
+  });
+
+  it("ignores a cache written by a different chz version", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    const realizer = new CountingSlugRealizer();
+    const second = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: "another-version",
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify", "buildUniqueSlugs"]);
+  });
+
+  it("re-realizes a symbol whose committed artifact drifted from the cache", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    const first = await firstRun(source, root, sourceFile);
+
+    // Unauthorized manual edit of a realized file.
+    const drifted = join(first.baseDir, "implementations", "slugify.ts");
+    writeFileSync(drifted, `${readFileSync(drifted, "utf8")}// tampered\n`, "utf8");
+
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    // The drifted symbol is rebuilt; its spec (and surface) is unchanged, so
+    // the dependent goes through the retest safety net and is then reused.
+    expect(realizer.calls).toEqual(["slugify"]);
+    expect(retests).toEqual([["buildUniqueSlugs"]]);
   });
 });

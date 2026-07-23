@@ -119,7 +119,7 @@ describe("runRealizationTests", () => {
 
       expect(outcome.passed).toBe(false);
       expect(outcome.output).toContain("정답은 42입니다.");
-      expect(outcome.output).toContain("ensure assertion failed at answer.chz.ts:1:");
+      expect(outcome.output).toContain("ensure assertion failed (answer.chz.ts › answer › ensure #1)");
     },
     SPAWN_TIMEOUT,
   );

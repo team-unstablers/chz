@@ -18,10 +18,18 @@ import {
 import { splitHumanCode } from "./human-code.ts";
 import {
   extractImagineSpecs,
+  publicSurfaceText,
   realizationBaseName,
   type ImagineSpec,
 } from "./preprocessor.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
+import {
+  humanCodeHash,
+  readChzVersion,
+  readRealizationCache,
+  sha256,
+  type RealizationCacheSymbol,
+} from "./verify.ts";
 import type {
   ChzAskUserAnswer,
   ChzAskUserQuestion,
@@ -48,6 +56,12 @@ export interface RealizedSymbol {
   symbol: ChzImagineSymbol;
   resolution: ChzResolutionResolved;
   files: EmittedFile[];
+  /**
+   * True when the committed realization was reused from the cache without a
+   * session (docs/62 re-run). The resolution then carries the original
+   * provenance so re-writing the cache stays byte-stable.
+   */
+  reused: boolean;
 }
 
 export interface RealizeResult {
@@ -97,6 +111,13 @@ export interface RealizeOptions {
   skipVerification?: boolean;
   /** Maximum symbols one dependency cycle may contain (docs/62). */
   maxCycleSize?: number;
+  /**
+   * Safety-net test re-run (no LLM) for a cached symbol whose dependencies
+   * changed internally (docs/62). Defaults to the engine's scoped RunTests.
+   */
+  retest?: (input: { baseDir: string; scope: ChzRealizationScope }) => Promise<ChzVerificationResult>;
+  /** chz tool version gating cache reuse. Defaults to the packaged version. */
+  chzVersion?: string;
 }
 
 export function realizationBaseDir(fileName: string): string {
@@ -136,14 +157,62 @@ export async function realize(
    */
   const unrealized = new Map<string, "failed" | "blocked">();
 
+  // docs/62 re-run: an unchanged, undrifted, green cache entry is reused
+  // without a session. A version mismatch discards the whole cache — the
+  // engine's deterministic outputs (ensure harness, entry point) may differ
+  // across chz versions, so old hashes stop being trustworthy.
+  const chzVersion = options.chzVersion ?? readChzVersion();
+  const previousCache = readRealizationCache(baseDir);
+  // Recorded human decisions are part of the invalidation hash (docs/63): an
+  // edited CONTEXTS.md discards the whole cache, because every cached symbol
+  // may have been realized under answers that no longer hold.
+  const cacheUsable =
+    previousCache !== null &&
+    previousCache.chzVersion === chzVersion &&
+    previousCache.contextsHash === sha256(readContexts(baseDir));
+  const cachedSymbols: Record<string, RealizationCacheSymbol> = cacheUsable
+    ? previousCache.symbols
+    : {};
+  // A changed human layer (prologue/epilogue) cannot invalidate per symbol in
+  // v0 — instead every reuse candidate goes through the retest safety net.
+  const humanCodeChanged =
+    cacheUsable &&
+    previousCache.humanCodeHash !== humanCodeHash(humanCode.prologue, humanCode.epilogue);
+  const specHashes = new Map(specs.map((spec) => [spec.name, sha256(spec.originalText)]));
+  const specNames = new Set(specs.map((spec) => spec.name));
+  // Confirmed edges outrank estimates from re-runs on (docs/62 stage 3) —
+  // but only for unchanged specs; a changed spec disowns its old imports.
+  const confirmedEdges = new Map<string, readonly string[]>();
+  for (const spec of specs) {
+    const entry = cachedSymbols[spec.name];
+    if (
+      entry !== undefined &&
+      entry.specHash === specHashes.get(spec.name) &&
+      Array.isArray(entry.dependencies)
+    ) {
+      confirmedEdges.set(spec.name, entry.dependencies.filter((name) => specNames.has(name)));
+    }
+  }
+
   let graph: ChzDependencyGraph;
   try {
-    graph = buildDependencyGraph(specs, source, fileName, { maxCycleSize: options.maxCycleSize });
+    graph = buildDependencyGraph(specs, source, fileName, {
+      maxCycleSize: options.maxCycleSize,
+      confirmedEdges,
+    });
   } catch (error) {
     if (error instanceof ChzCycleError) return resultWithFailure("failed", error.message);
     throw error;
   }
-  for (const warning of graph.warnings) options.harness?.onEvent?.(`[chz-realize] ${warning}`);
+  const emitEvent = (message: string): void => options.harness?.onEvent?.(`[chz-realize] ${message}`);
+  for (const warning of graph.warnings) emitEvent(warning);
+
+  // Symbols re-realized in this run, split by whether their public surface
+  // (signature + ensure) differs from the cached one. Surface changes
+  // invalidate dependents; internal-only changes send dependents through the
+  // test re-run safety net instead (docs/62, per-hop rule).
+  const changedSurface = new Set<string>();
+  const changedInternal = new Set<string>();
 
   for (const group of graph.groups) {
     const members = group.symbols;
@@ -177,16 +246,106 @@ export async function realize(
       continue;
     }
 
+    const renderedEnsures = new Map(
+      members.map((member) => [
+        member.name,
+        renderEnsureHarness(specByName.get(member.name)!, fileName, specs),
+      ]),
+    );
     const writeEnsures = (): void => {
-      for (const member of members) {
-        writeFileSync(
-          join(baseDir, "tests", `test_${member.name}.ensure.ts`),
-          renderEnsureHarness(specByName.get(member.name)!, fileName, specs),
-          "utf8",
-        );
+      for (const [name, content] of renderedEnsures) {
+        writeFileSync(join(baseDir, "tests", `test_${name}.ensure.ts`), content, "utf8");
       }
     };
     writeEnsures();
+
+    const representative = members[0]!;
+    const scope: ChzRealizationScope = { symbolNames: members.map((member) => member.name) };
+    const groupLabel = members.map((member) => `'${member.name}'`).join(", ");
+
+    // Reuse decision (docs/62). A member is reusable when its cache entry is
+    // green, its spec is unchanged, and every committed artifact still hashes
+    // to the recorded value (drift falls back to re-realizing). A cycle
+    // reuses only as a whole — it was realized as one session.
+    const memberReuseEntry = (member: ChzImagineSymbol): RealizationCacheSymbol | null => {
+      const entry = cachedSymbols[member.name];
+      if (entry === undefined || entry.testsPassed !== true) return null;
+      // The cache is on-disk JSON: a hand-edited or corrupted entry must
+      // degrade to a fresh realization, never crash a later engine step
+      // (the reused provenance is written back verbatim at cache time).
+      if (typeof entry.model !== "string") return null;
+      if (typeof entry.realizedAt !== "string" || Number.isNaN(Date.parse(entry.realizedAt))) {
+        return null;
+      }
+      if (entry.specHash !== specHashes.get(member.name)) return null;
+      if (sha256(renderedEnsures.get(member.name)!) !== entry.ensureTestHash) return null;
+      const implementation = join(baseDir, "implementations", `${member.name}.ts`);
+      const autogen = join(baseDir, "tests", `test_${member.name}.autogen.ts`);
+      if (!existsSync(implementation) || sha256(readFileSync(implementation, "utf8")) !== entry.implementationHash) return null;
+      if (!existsSync(autogen) || sha256(readFileSync(autogen, "utf8")) !== entry.autogenTestHash) return null;
+      return entry;
+    };
+    const reuseEntries = new Map<string, RealizationCacheSymbol>();
+    for (const member of members) {
+      const entry = memberReuseEntry(member);
+      if (entry === null) break;
+      reuseEntries.set(member.name, entry);
+    }
+    const outsideDependencies = members
+      .flatMap((member) => member.dependencies)
+      .filter((dependency) => !memberNames.has(dependency.name));
+    const surfaceInvalidated = outsideDependencies.some((dependency) =>
+      changedSurface.has(dependency.name),
+    );
+    let retestFeedback: string | undefined;
+    if (reuseEntries.size === members.length && !surfaceInvalidated) {
+      let reusable = true;
+      const needsRetest =
+        humanCodeChanged ||
+        outsideDependencies.some((dependency) => changedInternal.has(dependency.name));
+      // --skip-tests skips every engine verification, including this safety
+      // net — reuse then proceeds unchecked, exactly like a fresh session.
+      if (needsRetest && !options.skipVerification) {
+        // A dependency (or the human layer) changed internally: contracts
+        // stand, but behavior may have drifted. Re-run this group's tests
+        // (no LLM); green stops the propagation, red invalidates the group.
+        emitEvent(`${groupLabel}: dependencies changed internally — re-running tests`);
+        const retested = options.retest === undefined
+          ? await runScopedTests(baseDir, scope, projectRoot, activeProfile, maxTurns, maxRetries, options.harness)
+          : await options.retest({ baseDir, scope });
+        if (!retested.passed) {
+          reusable = false;
+          retestFeedback = boundVerificationFeedback(retested.output);
+          emitEvent(`${groupLabel}: tests went red under changed dependencies — re-realizing`);
+        }
+      }
+      if (reusable) {
+        for (const member of members) {
+          const entry = reuseEntries.get(member.name)!;
+          const spec = specByName.get(member.name)!;
+          const resolution: ChzResolutionResolved = {
+            outcome: "resolved",
+            symbol: member,
+            resolvedFile: join(baseDir, "implementations", `${member.name}.ts`),
+            resolvedTestFiles: [join(baseDir, "tests", `test_${member.name}.autogen.ts`)],
+            resolvedAt: new Date(entry.realizedAt),
+            resolvedBy: entry.model,
+          };
+          resolutions.push(resolution);
+          resolvedByName.set(member.name, resolution);
+          realizedSymbols.push({
+            name: member.name,
+            spec,
+            symbol: member,
+            resolution,
+            files: collectSymbolFiles(baseDir, spec, resolution),
+            reused: true,
+          });
+        }
+        emitEvent(`${groupLabel}: unchanged — reused the cached realization`);
+        continue;
+      }
+    }
 
     // A cycle is one session, so one Realizer must support every member type.
     const realizer = options.realizers.find((candidate) =>
@@ -206,8 +365,6 @@ export async function realize(
       continue;
     }
 
-    const representative = members[0]!;
-    const scope: ChzRealizationScope = { symbolNames: members.map((member) => member.name) };
     const memberResolution = (
       member: ChzImagineSymbol,
       resolution: ChzResolutionResolved,
@@ -225,7 +382,7 @@ export async function realize(
         resolvedBy: resolution.resolvedBy,
       };
 
-    let feedback: string | undefined;
+    let feedback: string | undefined = retestFeedback;
     let groupResolution: ChzImagineSymbolResolution | undefined;
     for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       const baseContexts = readContexts(baseDir);
@@ -340,7 +497,17 @@ export async function realize(
           symbol: member,
           resolution,
           files: collectSymbolFiles(baseDir, spec, resolution),
+          reused: false,
         });
+        // Classify the re-realization for downstream propagation: an
+        // unchanged public surface sends dependents through the retest
+        // safety net; a changed (or first-seen) surface invalidates them.
+        const cached = cachedSymbols[member.name];
+        if (cached !== undefined && cached.publicSurfaceHash === sha256(publicSurfaceText(spec))) {
+          changedInternal.add(member.name);
+        } else {
+          changedSurface.add(member.name);
+        }
       }
     } else {
       for (const member of members) {
@@ -460,9 +627,13 @@ export function renderEnsureHarness(
     ? "// No executable ensure() contracts were declared for this symbol.\n\nexport {};"
     : contracts.map(({ scope, ensure }, index) => {
         const label = ensure.messageSource ?? JSON.stringify(`${scope} ensure #${index + 1}`);
-        const location = `${fileName}:${ensure.line}:${ensure.column}`;
+        // The identifier is deliberately position- and path-independent: the
+        // harness content must depend only on the imagine block itself, so an
+        // edit elsewhere in the file (or a different checkout path) never
+        // changes the emitted harness and never defeats cache reuse (docs/62).
+        const contractId = `${base}.chz.ts › ${scope} › ensure #${index + 1}`;
         if (ensure.kind === "assertion") {
-          const failure = `ensure assertion failed at ${location}\ncondition: ${ensure.source}`;
+          const failure = `ensure assertion failed (${contractId})\ncondition: ${ensure.source}`;
           return `it(${label}, () => {
   assert(
 ${indentSource(ensure.source, 4)},
@@ -471,9 +642,9 @@ ${indentSource(ensure.source, 4)},
 });`;
         }
 
-        const failurePrefix = `ensure scenario failed at ${location}: `;
-        const falseResult = `ensure scenario returned false at ${location}`;
-        const argumentsFailure = `ensure scenario at ${location} must not declare parameters`;
+        const failurePrefix = `ensure scenario failed (${contractId}): `;
+        const falseResult = `ensure scenario returned false (${contractId})`;
+        const argumentsFailure = `ensure scenario (${contractId}) must not declare parameters`;
         return `it(${label}, async () => {
   const scenario: () => unknown | Promise<unknown> = ${ensure.source};
   if (scenario.length !== 0) {
@@ -669,6 +840,41 @@ function boundVerificationFeedback(output: string): string {
     bounded = Buffer.from(bounded, "utf8").subarray(0, 51_000).toString("utf8") + "\n... output truncated ...";
   }
   return bounded;
+}
+
+/**
+ * The docs/62 safety net: run one group's tests (autogen + ensure) with no
+ * LLM involved, through the same fixed RunTests runner the sessions use.
+ */
+async function runScopedTests(
+  baseDir: string,
+  scope: ChzRealizationScope,
+  projectRoot: string,
+  activeProfile: string,
+  maxTurns: number,
+  maxRetries: number,
+  harness: ChzHarnessServices | undefined,
+): Promise<ChzVerificationResult> {
+  const context = {
+    projectRoot,
+    outputDir: baseDir,
+    activeProfile,
+    scope,
+    resolvedDependencies: [],
+    maxTurns,
+    maxRetries,
+    baseContexts: "",
+    harness,
+  };
+  const runtime = new ChzVerificationToolRuntime(context, (path) => resolve(projectRoot, path));
+  const rendered = await runtime.execute("RunTests", { testFiles: [] });
+  if (rendered === null) return { passed: false, output: "The RunTests runner was unavailable." };
+  try {
+    const parsed = JSON.parse(rendered) as { passed?: boolean; output?: string };
+    return { passed: parsed.passed === true, output: parsed.output ?? rendered };
+  } catch {
+    return { passed: false, output: rendered };
+  }
 }
 
 async function runDefaultVerification(

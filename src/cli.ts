@@ -254,6 +254,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       maxTurns: configured.config.maxTurns,
       maxRetries: configured.config.maxRetries,
       maxCycleSize: configured.config.maxCycleSize,
+      chzVersion: deps.chzVersion,
       askUser: deps.askUser ?? (process.stdin.isTTY && process.stdout.isTTY ? interactiveAskUser(io) : undefined),
       now: deps.now,
       skipVerification: parsed.skipTests,
@@ -292,7 +293,9 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
   }
 
   const count = result.symbols.length;
-  io.out(`${parsed.file}: realized ${count} symbol${count === 1 ? "" : "s"}`);
+  const reusedCount = result.symbols.filter((symbol) => symbol.reused).length;
+  const reuseNote = reusedCount === 0 ? "" : ` (${reusedCount} reused from cache)`;
+  io.out(`${parsed.file}: realized ${count} symbol${count === 1 ? "" : "s"}${reuseNote}`);
   io.out(`  output: ${result.baseDir}`);
   for (const file of result.files) io.out(`  + ${file.relPath}`);
 
