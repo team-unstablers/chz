@@ -1,1 +1,3 @@
 chz/
+.env
+!chz.config.js
