@@ -7,6 +7,8 @@ imagine class GomokuGame {
         - CPU의 알고리즘은 적당히 멍청해야 합니다.
 
         - 게임 도중 SIGINT로 종료하면, '비겁한 놈!' 이라는 메시지가 출력되어야 합니다.
+
+        - process.stdin / process.stdout을 직접 사용하십시오. 외부 터미널 모듈은 사용하지 않습니다.
     `);
 
     imagine async start() {}
