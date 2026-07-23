@@ -159,6 +159,15 @@ export async function runRealizationTests(
       testCount: 0,
     };
   }
+  if (!testFiles.some((file) => file.endsWith(".autogen.ts"))) {
+    return {
+      passed: false,
+      timedOut: false,
+      output: `no autogen test file (tests/test_*.autogen.ts) found under ${baseDir}`,
+      testFiles,
+      testCount: 0,
+    };
+  }
 
   const { binPath, projectRoot } = locateVitest();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS;
@@ -219,18 +228,23 @@ export async function runRealizationTests(
         child.kill("SIGKILL");
       }, timeoutMs);
 
-      const finish = (passed: boolean, extra = "") => {
+      const finish = (processPassed: boolean, extra = "") => {
         clearTimeout(timer);
         const truncation = captureTruncated
           ? "\n[output capture truncated at the in-memory safety limit]\n"
           : "";
-        const output = combined + truncation + extra;
+        const capturedOutput = combined + truncation + extra;
+        const testCount = parseVitestTestCount(capturedOutput);
+        const noTestsExecuted = processPassed && (testCount === null || testCount === 0);
+        const output = noTestsExecuted
+          ? `${capturedOutput}\nvitest completed without executing any tests.\n`
+          : capturedOutput;
         resolvePromise({
-          passed,
+          passed: processPassed && !noTestsExecuted,
           timedOut,
           output,
           testFiles,
-          testCount: parseVitestTestCount(output),
+          testCount,
         });
       };
 

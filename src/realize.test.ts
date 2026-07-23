@@ -263,7 +263,34 @@ describe("ChzRealizerBase", () => {
 
     expect(result).toMatchObject({ outcome: "failed" });
     if (result.outcome !== "failed") throw new Error("expected failed");
-    expect(result.reason).toContain("no test files were found");
+    expect(result.reason).toContain("required autogen test file");
+  });
+
+  it("does not accept an arbitrarily named test that independent verification will ignore", async () => {
+    const data = fixture();
+    const symbol = buildEstimatedRealizeOrder(
+      extractImagineSpecs(data.source, data.sourceFile),
+      data.source,
+      data.sourceFile,
+    )[0]!;
+    const implementation = join(data.outputDir, "implementations", "greet.ts");
+    const noncanonicalTest = join(data.outputDir, "tests", "greet.test.ts");
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(noncanonicalTest), { recursive: true });
+    writeFileSync(implementation, "export function greet(name: string): string { return name; }\n", "utf8");
+    writeFileSync(noncanonicalTest, "export {};\n", "utf8");
+    const realizer = new ScriptedRealizer([
+      response([{ id: "finish", name: "Finish", arguments: {} }]),
+    ]);
+
+    const result = await realizer.realize(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      maxTurns: 1,
+    });
+
+    expect(result).toMatchObject({ outcome: "failed" });
+    if (result.outcome !== "failed") throw new Error("expected failed");
+    expect(result.reason).toContain("tests/test_greet.autogen.ts");
   });
 });
 

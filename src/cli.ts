@@ -21,10 +21,12 @@ import {
 import { findChzConfig, loadChzConfig, selectRealizer } from "./realizer/config.ts";
 import { ChzOpenAIRealizer } from "./realizer/openai.ts";
 import { buildSystemParts } from "./realizer/prompt.ts";
-import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
+import {
+  ChzVerificationToolRuntime,
+  runSelectedTests,
+} from "./realizer/tools/verification.ts";
 import {
   readChzVersion,
-  runRealizationTests,
   writeRealizationCache,
   type RealizationTestOutcome,
 } from "./verify.ts";
@@ -40,7 +42,10 @@ export interface CliDeps {
   projectRoot?: string;
   makeDefaultRealizer?: (options: { model: string; baseURL?: string }) => ChzRealizer;
   now?: () => Date;
-  runTests?: (baseDir: string) => Promise<RealizationTestOutcome>;
+  runTests?: (
+    baseDir: string,
+    testFiles: readonly string[],
+  ) => Promise<RealizationTestOutcome>;
   askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
   chzVersion?: string;
 }
@@ -173,7 +178,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
 
   if (configured.path !== undefined) io.out(`config: ${configured.path}`);
   let lastTestOutcome: RealizationTestOutcome | undefined;
-  const runTests = deps.runTests ?? ((baseDir: string) => runRealizationTests(baseDir));
+  const runTests = deps.runTests ?? runSelectedTests;
   const verify = async (input: IndependentVerificationInput) => {
     const verificationContext = {
       projectRoot: configured.projectRoot,
@@ -184,8 +189,8 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       maxRetries: configured.config.maxRetries ?? 2,
       baseContexts: "",
       harness: {
-        runTests: async () => {
-          lastTestOutcome = await runTests(input.baseDir);
+        runTests: async (testFiles: string[]) => {
+          lastTestOutcome = await runTests(input.baseDir, testFiles);
           return {
             passed: lastTestOutcome.passed,
             output: lastTestOutcome.output,
@@ -233,8 +238,8 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       skipVerification: parsed.skipTests,
       verify,
       harness: {
-        runTests: async () => {
-          const outcome = await runTests(realizationBaseDir(sourceFile));
+        runTests: async (testFiles) => {
+          const outcome = await runTests(realizationBaseDir(sourceFile), testFiles);
           return {
             passed: outcome.passed,
             output: outcome.output,

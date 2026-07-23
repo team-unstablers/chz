@@ -651,17 +651,17 @@ function collectResolution(
     );
   }
 
-  const resolvedTestFiles = allFiles.filter(
-    (file) =>
-      file.endsWith(".ts") &&
-      !file.endsWith(".ensure.ts") &&
-      (file.includes(`${join(context.outputDir, "tests")}`) || /\.(test|spec)\.ts$/.test(file)),
+  const expectedTestFile = join(
+    context.outputDir,
+    "tests",
+    `test_${symbol.name}.autogen.ts`,
   );
-  if (resolvedTestFiles.length === 0) {
+  if (!existsSync(expectedTestFile)) {
     throw new Error(
-      `Finish called, but no test files were found. Write tests for '${symbol.name}' inside the realization output directory and finish again.`,
+      `Finish called, but the required autogen test file for '${symbol.name}' was not found. Write tests/test_${symbol.name}.autogen.ts and finish again.`,
     );
   }
+  const resolvedTestFiles = [expectedTestFile];
 
   const lineCount = readFileSync(resolvedFile, "utf8").split(/\r?\n/).length;
   const assumptionsReport = allFiles.find((file) => /^ASSUMPTIONS(?:\..+)?$/i.test(basename(file)));

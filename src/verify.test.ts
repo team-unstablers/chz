@@ -109,6 +109,36 @@ describe("runRealizationTests", () => {
     expect(outcome.output).toContain("no test files");
   });
 
+  it("does not treat an ensure harness without an autogen suite as green", async () => {
+    const baseDir = join(makeTempDir(), "ensure-only");
+    writeTree(baseDir, {
+      "tests/test_x.ensure.ts": "export function assertEnsures(): void {}\n",
+    });
+
+    const outcome = await runRealizationTests(baseDir);
+
+    expect(outcome.passed).toBe(false);
+    expect(outcome.testCount).toBe(0);
+    expect(outcome.output).toContain("no autogen test file");
+  });
+
+  it(
+    "does not report an empty autogen suite as green",
+    async () => {
+      const baseDir = join(makeTempDir(), "empty-autogen");
+      writeTree(baseDir, {
+        "tests/test_x.autogen.ts": "export {};\n",
+      });
+
+      const outcome = await runRealizationTests(baseDir);
+
+      expect(outcome.passed).toBe(false);
+      expect(outcome.testCount).toBeNull();
+      expect(outcome.output).toContain("without executing any tests");
+    },
+    SPAWN_TIMEOUT,
+  );
+
   it("finds only test_*.autogen.ts / test_*.ensure.ts files", () => {
     const baseDir = join(makeTempDir(), "glob");
     writeTree(baseDir, {

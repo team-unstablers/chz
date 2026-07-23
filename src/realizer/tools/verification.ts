@@ -7,8 +7,9 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { extname, join, relative, sep } from "node:path";
+import { dirname, extname, join, relative, sep } from "node:path";
 
 import {
   SyntaxKind,
@@ -129,8 +130,19 @@ function createCompilerConfig(
     strict: true,
     target: "ES2022",
   };
-  const typeRoots = join(projectRoot, "node_modules", "@types");
-  if (existsSync(typeRoots)) compilerOptions.typeRoots = [typeRoots];
+  const typeRoots: string[] = [];
+  const projectTypeRoots = join(projectRoot, "node_modules", "@types");
+  if (existsSync(projectTypeRoots)) typeRoots.push(projectTypeRoots);
+
+  // The realization checker is engine-owned, so Node globals must not depend
+  // on whether the user's project happens to install its own @types/node.
+  // `console` is part of the console profile and is emitted legitimately in
+  // human-owned epilogues.
+  const require = createRequire(import.meta.url);
+  const engineTypeRoots = dirname(dirname(require.resolve("@types/node/package.json")));
+  if (!typeRoots.includes(engineTypeRoots)) typeRoots.push(engineTypeRoots);
+  compilerOptions.typeRoots = typeRoots;
+  compilerOptions.types = ["node"];
   writeFileSync(configPath, `${JSON.stringify({ compilerOptions, files: rootFiles }, null, 2)}\n`, "utf8");
 }
 
@@ -401,7 +413,7 @@ function runDefaultLinter(context: ChzRealizeContext): VerificationOutput {
   });
 }
 
-async function runSelectedTests(
+export async function runSelectedTests(
   outputDir: string,
   selectedTestFiles: readonly string[],
 ): Promise<ChzVerificationResult & { testFiles: string[]; testCount: number | null; timedOut: boolean }> {

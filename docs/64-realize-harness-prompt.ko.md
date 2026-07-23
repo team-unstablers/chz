@@ -136,6 +136,9 @@ Realized code targets auditability, not just correctness:
   human-owned.
 - Emit unit tests alongside the implementation, including autogen tests for
   every natural-language `ensure` contract.
+- Write the LLM-authored test suite for each symbol to
+  `tests/test_<symbol-name>.autogen.ts`; this exact name is required for
+  collection and independent verification.
 
 # Working in this harness
 

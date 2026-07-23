@@ -177,6 +177,19 @@ describe("ChzVerificationToolRuntime default type checker", () => {
       diagnostics: [],
     });
   });
+
+  it("loads Node globals for the console profile", async () => {
+    const { context, resolveOutputPath } = makeContext();
+    writeTree(context.outputDir, {
+      "implementations/__epilogue__.ts": 'console.log("ready");\n',
+    });
+    const runtime = new ChzVerificationToolRuntime(context, resolveOutputPath);
+
+    expect(parseOutput(await runtime.execute("RunTypeCheck", {}))).toEqual({
+      passed: true,
+      diagnostics: [],
+    });
+  });
 });
 
 describe("ChzVerificationToolRuntime default restricted-subset linter", () => {

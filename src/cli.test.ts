@@ -62,6 +62,19 @@ class CliRealizer implements ChzRealizer {
   }
 }
 
+class TestRunningCliRealizer extends CliRealizer {
+  override async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    const resolution = await super.realize(symbol, context);
+    if (resolution.outcome === "resolved") {
+      await context.harness?.runTests?.(resolution.resolvedTestFiles);
+    }
+    return resolution;
+  }
+}
+
 const greenTests = (): Promise<RealizationTestOutcome> =>
   Promise.resolve({
     passed: true,
@@ -147,6 +160,44 @@ describe("realize command", () => {
     expect(code).toBe(0);
     expect(err).toContain("[CliRealizer] reasoning turn 1/1\nprivate reasoning");
     expect(out.join("\n")).not.toContain("private reasoning");
+  });
+
+  it("forwards selected test files from the Realizer and uses an empty list for final verification", async () => {
+    const file = makeFixture();
+    const calls: Array<{ baseDir: string; testFiles: readonly string[] }> = [];
+    const runTests = async (
+      baseDir: string,
+      testFiles: readonly string[],
+    ): Promise<RealizationTestOutcome> => {
+      calls.push({ baseDir, testFiles: [...testFiles] });
+      return {
+        passed: true,
+        timedOut: false,
+        output: "Tests  1 passed (1)",
+        testFiles: [...testFiles],
+        testCount: 1,
+      };
+    };
+
+    const code = await run(
+      ["realize", file],
+      { out: () => {}, err: () => {} },
+      {
+        config: { realizers: [new TestRunningCliRealizer()] },
+        projectRoot: dirname(file),
+        runTests,
+      },
+    );
+
+    const baseDir = join(dirname(file), "chz", "realization", "demo");
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      {
+        baseDir,
+        testFiles: [join(baseDir, "tests", "test_greet.autogen.ts")],
+      },
+      { baseDir, testFiles: [] },
+    ]);
   });
 
   it("loads chz.config.js and selects its Realizer", async () => {
