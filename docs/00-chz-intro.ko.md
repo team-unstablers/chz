@@ -68,19 +68,19 @@ imagine class ShootingGame {
   }
   
   // **요구하기**: imagine 키워드를 사용하면 LLM에게 '이 함수/변수는 꼭 필요해요!' 하고 계약을 걸 수 있습니다.
-  imagine var score: number {
+  imagine score: number {
     requirements(`게임 점수를 저장하는 변수가 필요합니다. 게임 오버인 경우 0으로 초기화되어야 합니다.`);
   }
   
-  imagine function initialize(attachToSelector: string): void {
+  imagine initialize(attachToSelector: string): void {
     requirements(`게임을 초기화하고, 지정된 CSS 선택자에 게임 캔버스를 붙이는 함수를 구현하십시오.`);
   }
   
-  imagine function startGame(): void {
+  imagine startGame(): void {
     requirements(`게임을 시작하는 함수를 구현하십시오. 게임 루프를 시작하고, 외계인 적을 화면에 나타나게 해야 합니다.`);
   }
   
-  imagine function playSound(sound: Chz.AudioAsset): void {
+  imagine playSound(sound: Chz.AudioAsset): void {
     requirements(`주어진 오디오 자원을 재생하는 함수를 구현하십시오. Web Audio API를 사용해야 합니다.`);
   }
   
