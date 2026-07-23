@@ -75,6 +75,7 @@ describe("ChzOpenAIRealizer", () => {
     expect(result.outcome).toBe("resolved");
     expect(requests).toHaveLength(2);
     expect(requests[0]!.model).toBe("compatible-model");
+    expect(requests.every((request) => request.temperature === 0.2)).toBe(true);
     const messages = requests[0]!.messages as Array<{ role: string; content: string }>;
     expect(messages.slice(0, 2).map((message) => message.role)).toEqual(["system", "system"]);
     const tools = requests[0]!.tools as Array<{ function: { name: string; strict?: boolean } }>;

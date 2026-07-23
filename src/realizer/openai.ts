@@ -52,6 +52,7 @@ export class ChzOpenAIRealizer extends ChzRealizerBase {
   ): Promise<ChzChatResponse> {
     const response = await this.client.chat.completions.create({
       model: this.options.model,
+      temperature: 0.2,
       messages: messages.map(toOpenAIMessage),
       tools: tools.map(toOpenAITool),
       tool_choice: "auto",
