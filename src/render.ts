@@ -165,6 +165,9 @@ interface LiveEntry {
   total?: number;
   label: string;
   note: string;
+  /** Session turn counter, shown as a prefix so it never evicts the note. */
+  turn?: number;
+  maxTurns?: number;
 }
 
 class LiveRenderer implements ChzRenderer {
@@ -200,7 +203,9 @@ class LiveRenderer implements ChzRenderer {
         this.#permanent(this.#endLine(event));
         break;
       case "turn":
-        this.#note(event, event.turn === undefined ? event.text : `turn ${event.turn}/${event.maxTurns ?? "?"}`);
+        // The turn counter has its own slot in the line prefix; overwriting
+        // the note here would wipe the last reasoning/tool glimpse instantly.
+        this.#turn(event);
         break;
       case "tool":
         this.#note(
@@ -255,6 +260,19 @@ class LiveRenderer implements ChzRenderer {
     const entry = this.#active.get(event.group);
     if (entry === undefined) return;
     entry.note = note.replace(/\s+/g, " ").trim();
+    if (event.turn !== undefined) {
+      entry.turn = event.turn;
+      if (event.maxTurns !== undefined) entry.maxTurns = event.maxTurns;
+    }
+    this.#repaint();
+  }
+
+  #turn(event: ChzHarnessEvent): void {
+    if (event.group === undefined || event.turn === undefined) return;
+    const entry = this.#active.get(event.group);
+    if (entry === undefined) return;
+    entry.turn = event.turn;
+    if (event.maxTurns !== undefined) entry.maxTurns = event.maxTurns;
     this.#repaint();
   }
 
@@ -294,10 +312,11 @@ class LiveRenderer implements ChzRenderer {
   #liveLine(entry: LiveEntry, width: number): string {
     const c = this.#c;
     const counter = entry.index === undefined ? "" : `[${entry.index}/${entry.total ?? "?"}] `;
+    const turns = entry.turn === undefined ? "" : `[${entry.turn}/${entry.maxTurns ?? "?"}] `;
     const label = truncateToWidth(entry.label, 40);
-    const plainPrefix = `${counter}[ .. ] ${label}: `;
+    const plainPrefix = `${counter}[ .. ] ${turns}${label}: `;
     const note = truncateToWidth(entry.note, Math.max(0, width - 1 - displayWidth(plainPrefix)));
-    return `${counter}${c.cyan("[ .. ]")} ${c.bold(label)}: ${c.dim(note)}`;
+    return `${counter}${c.cyan("[ .. ]")} ${turns === "" ? "" : c.dim(turns)}${c.bold(label)}: ${c.dim(note)}`;
   }
 }
 

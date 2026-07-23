@@ -133,6 +133,19 @@ describe("live renderer (TTY)", () => {
     renderer.close();
   });
 
+  it("keeps the turn counter in the prefix without evicting the note", () => {
+    const { chunks, renderer } = make();
+    renderer.event(groupStart("greet", 1, 1));
+    renderer.event({ kind: "tool", group: "greet", tool: "ReadFile", outcome: "ok", text: "t" });
+    renderer.event({ kind: "turn", group: "greet", realizer: "R", turn: 2, maxTurns: 24, text: "[R] turn 2/24" });
+    // The turn tick advances the [turn/max] slot; the last tool note survives.
+    expect(chunks.at(-1)).toBe("\x1b[1A\r\x1b[0J[1/1] [ .. ] [2/24] greet: ⚒ ReadFile\n");
+
+    renderer.event({ kind: "reasoning", group: "greet", realizer: "R", turn: 3, maxTurns: 24, text: "생각" });
+    expect(chunks.at(-1)).toBe("\x1b[1A\r\x1b[0J[1/1] [ .. ] [3/24] greet: 💭 생각\n");
+    renderer.close();
+  });
+
   it("interleaves multiple running groups as separate lines", () => {
     const { chunks, renderer } = make();
     renderer.event(groupStart("a", 1, 2));
