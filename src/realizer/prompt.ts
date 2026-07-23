@@ -7,7 +7,14 @@ import type {
   ChzResolutionResolved,
 } from "./types.ts";
 
-/** Canonical fixed prompt from docs/64-realize-harness-prompt.ko.md. */
+/**
+ * Canonical fixed prompt from docs/64-realize-harness-prompt.ko.md.
+ * NOTE: temporarily diverges from the doc for prompt-tuning experiments
+ * (the "Your context is pre-assembled" section, the WriteFile hint in
+ * triage, the import-not-redeclare prologue rule, and a "Human-written
+ * prologue" section injected into the session baseline); the
+ * byte-identical test against docs/64 fails until the doc is updated.
+ */
 export const CHZ_REALIZER_SYSTEM = `You are the Cheese Realizer, the implementation engine of the Cheese
 language.
 
@@ -23,11 +30,21 @@ implement is yours to decide; what to build, and any decision that reshapes
 the artifact's structure, belongs to the human. When a decision is the
 human's, escalate it — never bury it in an assumption.
 
+# Your context is pre-assembled
+
+The session context below already carries what realization usually needs:
+the symbol specification, the public surfaces of resolved dependencies, and
+the decisions recorded in previous sessions. You rarely need to explore the
+project to get oriented — when the supplied context covers the task, extra
+survey turns are wasted turns. Reach for ReadFile, ReadDir, Glob, or Grep
+when a specific fact is missing from the context, not as an opening move.
+
 # Quick triage, then code
 
 Triage from the supplied session context. Unless one of the conditions below
-applies, begin the first implementation increment in the first turn. Do not
-spend turns surveying the codebase or only describing a plan.
+applies, begin the first implementation increment in the first turn,
+normally starting with a WriteFile rather than a read. Do not spend turns
+surveying the codebase or only describing a plan.
 
 - Impossible in principle, or inappropriate to fulfill: call Abort now.
 - Materially better with a structural decision only the human can approve
@@ -85,7 +102,10 @@ Realized code targets auditability, not just correctness:
 - Mark every interpretive leap with an \`ASSUMPTION:\` comment.
 - Stay inside the restricted subset: no \`eval\`, no \`any\`, no APIs outside
   the active profile shown in <env>.
-- Import human-written code only from \`__prologue__\`. Never reference
+- Import human-written code only from \`__prologue__\`. When the prologue
+  already provides a type or value your implementation needs, import it from
+  \`./__prologue__.ts\` — never re-declare it in realized code, or the copy
+  will silently drift from the human-owned original. Never reference
   \`__epilogue__\` symbols — verification reports that as an error.
 - Never modify or delete a statement marked \`@chz-realize-override\`; it is
   human-owned.
@@ -124,6 +144,30 @@ End the session now by calling exactly one of:
   remains, and why it cannot proceed in \`reason\`.
 
 Do not attempt any other tool call; it will fail.`;
+
+/**
+ * Kickoff user turn appended after the two system parts.
+ * NOTE: experimental prompt tuning; docs/64 describes the session as
+ * [system, system] and does not include this turn yet.
+ */
+export function buildKickoffPrompt(symbol: ChzImagineSymbol, context: ChzRealizeContext): string {
+  const members = [symbol, ...symbol.circularDependencies]
+    .filter((candidate, index, all) => all.findIndex((item) => item.name === candidate.name) === index)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const names = members.map((member) => `\`${member.name}\``).join(", ");
+  const stem = members.length === 1 ? members[0]!.name : "<symbol-name>";
+  if (context.verificationFeedback?.trim()) {
+    return `Fix the failed verification of ${names} now. Start from the
+verification feedback above and the artifacts already in the output
+directory.`;
+  }
+  return `Realize ${names} now.
+
+Do not open with ReadFile, ReadDir, Glob, or Grep unless realizing ${names} requires a specific fact that the supplied context does not contain.
+Save each symbol implementation to
+${context.outputDir}/implementations/${stem}.ts and its test suite to
+${context.outputDir}/tests/test_${stem}.autogen.ts.`;
+}
 
 function absoluteFrom(root: string, path: string): string {
   return isAbsolute(path) ? path : resolve(root, path);
@@ -235,6 +279,28 @@ ${cycle.map(symbolBlock).join("\n\n")}`,
     sections.push(`# Symbol to realize
 
 ${symbolBlock(symbol)}`);
+  }
+
+  const prologuePath = resolve(
+    absoluteFrom(context.projectRoot, context.outputDir),
+    "implementations",
+    "__prologue__.ts",
+  );
+  if (existsSync(prologuePath)) {
+    const prologue = requireProjectFile(
+      context.projectRoot,
+      prologuePath,
+      "human-written prologue",
+    );
+    sections.push(`# Human-written prologue
+
+Human-written code your implementation may import. When the prologue already
+provides a type or value you need, import it from \`./__prologue__.ts\` —
+never re-declare it in your implementation.
+
+<prologue file="implementations/__prologue__.ts">
+${prologue.trim()}
+</prologue>`);
   }
 
   if (context.resolvedDependencies.length > 0) {
