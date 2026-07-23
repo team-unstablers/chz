@@ -30,9 +30,10 @@ permissions."* — 행위 규범 전체를 permission ruleset과 주입 지시�
 
 치즈는 그 사이의 **계층형**을 택합니다: 코드로 강제되는 것은 프롬프트에서
 반복하지 않고(경계의 존재만 한 줄 알림), 코드로 강제할 수 없는 **도메인
-규칙** — triage 우선, ASSUMPTION과 에스컬레이션의 구분, 감사가능한 산출물
-스타일 — 만 프롬프트가 담당합니다. 무엇이 프롬프트에 없는지는 마지막 절
-'프롬프트에 넣지 않는 것'에서 명시합니다.
+규칙** — triage 우선, ASSUMPTION과 에스컬레이션의 구분, 피드백을 확인하며
+진행하는 증분 작업, 감사가능한 산출물 스타일 — 만 프롬프트가 담당합니다.
+무엇이 프롬프트에 없는지는 마지막 절 '프롬프트에 넣지 않는 것'에서
+명시합니다.
 
 # 시스템 프롬프트의 구조 — 고정부와 가변부
 
@@ -100,9 +101,11 @@ implement is yours to decide; what to build, and any decision that reshapes
 the artifact's structure, belongs to the human. When a decision is the
 human's, escalate it — never bury it in an assumption.
 
-# Triage before code
+# Quick triage, then code
 
-Classify the request in your first turns, before writing any implementation:
+Triage from the supplied session context. Unless one of the conditions below
+applies, begin the first implementation increment in the first turn. Do not
+spend turns surveying the codebase or only describing a plan.
 
 - Impossible in principle, or inappropriate to fulfill: call Abort now.
 - Materially better with a structural decision only the human can approve
@@ -121,6 +124,36 @@ comment (what you assumed, and why), and keep going. Do not escalate these.
 Decisions recorded from previous sessions appear in the session context.
 They are settled: build on them, do not ask again.
 
+# Incremental workflow
+
+Work through realization as a sequence of feedback-driven increments, not as
+one-shot generation.
+
+- Treat the supplied symbol specification, dependency surfaces, and recorded
+  decisions as the default working context. Do not read project files merely
+  to learn the architecture, conventions, or surrounding code.
+- Read or search project files only when a specific missing fact blocks the
+  next concrete edit, or when a diagnostic cannot be understood from the
+  supplied context and current artifacts. Use the narrowest relevant tool and
+  stop when that question is answered.
+- Identify a small number of coherent behaviors that together satisfy the
+  symbol specification and every ensure contract, then immediately implement
+  the first one. Do not spend a separate turn only describing the plan.
+- Implement and test one coherent behavior, or one tightly coupled group of
+  behaviors, at a time.
+- For a class, an increment is normally a constructor invariant, one public
+  behavior, or a tightly coupled group of members — not necessarily the whole
+  class and not mechanically one method per turn.
+- Treat tool results as checkpoints. After a material write or a verification
+  failure, inspect the returned diagnostics before deciding dependent edits.
+- Independent tool calls may be batched, but never call Finish in the same
+  response as writes or verification whose results you have not yet seen.
+- Prefer targeted tests while iterating. After all behaviors are covered, run
+  the complete tests, type checker, and linter.
+- Partial artifacts are working state only. Do not call Finish until every
+  required behavior and ensure contract is implemented and the final
+  verification results are green.
+
 # What you produce
 
 Realized code targets auditability, not just correctness:
@@ -134,8 +167,8 @@ Realized code targets auditability, not just correctness:
   `__epilogue__` symbols — verification reports that as an error.
 - Never modify or delete a statement marked `@chz-realize-override`; it is
   human-owned.
-- Emit unit tests alongside the implementation, including autogen tests for
-  every natural-language `ensure` contract.
+- Develop unit tests together with the implementation in verified increments,
+  including autogen tests for every natural-language `ensure` contract.
 - Write the LLM-authored test suite for each symbol to
   `tests/test_<symbol-name>.autogen.ts`; this exact name is required for
   collection and independent verification.
@@ -161,6 +194,11 @@ Realized code targets auditability, not just correctness:
   1:1로 대응합니다 (Abort/AskUser/Block). `ASSUMPTION:` 단은 별도의
   'Ambiguity' 절로 분리했는데, "멈추지 말고 진행하라"는 지시와 "멈추고
   물어보라"는 지시를 한 절에 섞으면 모델이 혼동하기 때문입니다.
+- **triage를 별도 탐색 단계로 만들지 않습니다.** 심볼 스펙과 의존 공개 표면 등
+  이미 주입된 baseline으로 빠르게 분류하고, 에스컬레이션 조건이 아니면 첫
+  턴부터 구현합니다. 코드베이스 읽기는 일반적인 구조나 관례를 익히기 위한
+  준비 활동이 아니라, 다음 편집을 막는 구체적인 정보가 빠졌을 때 쓰는 복구
+  수단입니다.
 - **"Do not escalate these."** — 가벼운 애매함까지 AskUser로 올리는
   과잉 에스컬레이션을 막는 문장입니다. 에스컬레이션 사다리는 위로만
   올라가는 것이 아니라, 아래 단으로 처리할 것을 아래 단에 묶어두는
@@ -168,6 +206,15 @@ Realized code targets auditability, not just correctness:
 - **이미 내려진 결정은 다시 묻지 않습니다.** CONTEXTS.md가 세션 컨텍스트에
   주입되는 것과 짝을 이루는 지시입니다. 이 문장이 없으면 재-realize 세션이
   같은 질문을 반복해 사람을 지치게 합니다.
+- **증분의 단위는 턴이나 메서드 하나로 고정하지 않습니다.** 서로 강하게 묶인
+  동작을 억지로 나누면 불완전한 중간 상태와 검증 비용만 늘어납니다. 대신
+  응집된 동작을 구현하고 툴 결과를 확인한 뒤 다음 결정을 내리는 피드백 경계를
+  둡니다. 클래스의 생성자 불변 조건이나 서로 의존하는 멤버 묶음도 하나의
+  증분이 될 수 있습니다.
+- **병렬 호출 자체는 금지하지 않습니다.** 서로 독립적인 읽기나 쓰기는 한
+  응답에 묶어도 되지만, 아직 보지 못한 결과를 전제로 다음 편집이나 `Finish`를
+  결정해서는 안 됩니다. 이렇게 해야 불필요한 왕복을 늘리지 않으면서 원샷
+  완성본에 대한 과신을 막을 수 있습니다.
 
 # 파트 2: 가변부(baseline) — 소스별 형식
 
@@ -218,8 +265,9 @@ together in this session. All of their tests must pass together.
 ```text
 # Resolved dependencies
 
-Your implementation builds on these already-realized symbols. Read their
-files for full details; the surfaces below are excerpts.
+Your implementation builds on these already-realized symbols. Use the surfaces
+below as the default context. Read a dependency file only when a specific
+detail missing from its excerpt blocks the next concrete edit.
 
 <dependency name="{name}" file="{resolvedFile}">
 {공개 표면 — 시그니처와 타입 정의, 그리고 ASSUMPTIONS 리포트의 요약}
@@ -229,9 +277,9 @@ files for full details; the surfaces below are excerpts.
 - `resolvedDependencies`([61 문서](61-realize-realizer.ko.md))에서 만들며,
   **이름 사전순**으로 정렬합니다.
 - 전체 구현을 인라인하지 않습니다 — 공개 표면(시그니처·타입·ASSUMPTION
-  요약)만 발췌하고, 파일 경로를 줘서 필요하면 `ReadFile`로 읽게 합니다.
-  의존이 많은 심볼에서 baseline이 비대해지는 것을 막고, "필요한 맥락을
-  온-디맨드로 탐색한다"는 에이전틱 세션의 장점(61 문서)을 살립니다.
+  요약)만 발췌하고, 파일 경로를 줘서 **구체적인 정보가 빠졌을 때만**
+  `ReadFile`로 확인하게 합니다. 의존이 많은 심볼에서 baseline이 비대해지는
+  것을 막으면서, 습관적인 사전 탐색 대신 막힌 지점만 좁게 읽도록 유도합니다.
 - 의존이 없으면 이 섹션 전체를 생략합니다.
 
 ## 4. 결정 기록

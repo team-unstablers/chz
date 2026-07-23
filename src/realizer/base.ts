@@ -77,7 +77,7 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "WriteFile",
     description:
-      "Create or replace one complete non-sensitive file inside the realization output directory. Existing files must first be read with ReadFile. Parent directories are created automatically and inline diagnostics are returned.",
+      "Create or replace the complete contents of one non-sensitive file for the current increment inside the realization output directory. The file may be revised in later turns. Existing files must first be read with ReadFile. Parent directories are created automatically and inline diagnostics are returned.",
     inputSchema: objectSchema({ path: pathProperty, content: { type: "string" } }, ["path", "content"]),
   },
   {

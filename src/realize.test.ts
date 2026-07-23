@@ -97,11 +97,65 @@ describe("canonical prompt and symbol graph", () => {
     const second = buildSessionBaseline(symbol, context, "gpt-test");
 
     expect(CHZ_REALIZER_SYSTEM).toContain("You are the Cheese Realizer");
+    expect(CHZ_REALIZER_SYSTEM).toContain("a sequence of feedback-driven increments");
+    expect(CHZ_REALIZER_SYSTEM).toContain("begin the first implementation increment in the first turn");
+    expect(CHZ_REALIZER_SYSTEM).toContain("Do not read project files merely");
+    expect(CHZ_REALIZER_SYSTEM).toContain("not mechanically one method per turn");
+    expect(CHZ_REALIZER_SYSTEM).not.toContain("Before the first write, inspect");
     expect(CHZ_REALIZER_SYSTEM).toContain("Every session ends with exactly one of Finish, Block, or Abort.");
     expect(first).toBe(second);
     expect(first).toContain("Project root (read boundary)");
     expect(first).toContain(spec.originalText);
     expect(first).toContain("Today's date: 2026-07-23");
+  });
+
+  it("uses dependency surfaces before falling back to dependency file reads", () => {
+    const data = fixture();
+    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
+    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const dependencyFile = join(data.root, "chz", "realization", "dependency.ts");
+    const dependencySymbol: ChzImagineSymbol = {
+      ...symbol,
+      name: "dependency",
+      definition: "imagine function dependency(): number",
+    };
+    mkdirSync(dirname(dependencyFile), { recursive: true });
+    writeFileSync(dependencyFile, "export function dependency(): number { return 1; }\n", "utf8");
+
+    const baseline = buildSessionBaseline(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      resolvedDependencies: [{
+        outcome: "resolved",
+        symbol: dependencySymbol,
+        resolvedFile: dependencyFile,
+        resolvedTestFiles: [],
+        resolvedAt: new Date("2026-07-23T00:00:00.000Z"),
+        resolvedBy: "test",
+      }],
+    }, "gpt-test");
+
+    expect(baseline).toContain("Use the surfaces\nbelow as the default context");
+    expect(baseline).toContain("only when a specific\ndetail missing from its excerpt blocks");
+    expect(baseline).not.toContain("Read their\nfiles for full details");
+  });
+
+  it("keeps the implemented fixed prompt byte-identical to the canonical document", () => {
+    const document = readFileSync(
+      new URL("../docs/64-realize-harness-prompt.ko.md", import.meta.url),
+      "utf8",
+    );
+    const canonical = document.match(
+      /# 파트 1: 고정부 — 정본 전문\n\n```text\n([\s\S]*?)\n```/,
+    )?.[1];
+
+    expect(canonical).toBe(CHZ_REALIZER_SYSTEM);
+  });
+
+  it("describes WriteFile as revisable incremental state", () => {
+    const writeFile = CHZ_HARNESS_TOOLS.find((tool) => tool.name === "WriteFile");
+
+    expect(writeFile?.description).toContain("for the current increment");
+    expect(writeFile?.description).toContain("may be revised in later turns");
   });
 
   it("orders mentioned dependencies before dependents", () => {

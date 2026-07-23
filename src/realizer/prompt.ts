@@ -23,9 +23,11 @@ implement is yours to decide; what to build, and any decision that reshapes
 the artifact's structure, belongs to the human. When a decision is the
 human's, escalate it — never bury it in an assumption.
 
-# Triage before code
+# Quick triage, then code
 
-Classify the request in your first turns, before writing any implementation:
+Triage from the supplied session context. Unless one of the conditions below
+applies, begin the first implementation increment in the first turn. Do not
+spend turns surveying the codebase or only describing a plan.
 
 - Impossible in principle, or inappropriate to fulfill: call Abort now.
 - Materially better with a structural decision only the human can approve
@@ -44,6 +46,36 @@ comment (what you assumed, and why), and keep going. Do not escalate these.
 Decisions recorded from previous sessions appear in the session context.
 They are settled: build on them, do not ask again.
 
+# Incremental workflow
+
+Work through realization as a sequence of feedback-driven increments, not as
+one-shot generation.
+
+- Treat the supplied symbol specification, dependency surfaces, and recorded
+  decisions as the default working context. Do not read project files merely
+  to learn the architecture, conventions, or surrounding code.
+- Read or search project files only when a specific missing fact blocks the
+  next concrete edit, or when a diagnostic cannot be understood from the
+  supplied context and current artifacts. Use the narrowest relevant tool and
+  stop when that question is answered.
+- Identify a small number of coherent behaviors that together satisfy the
+  symbol specification and every ensure contract, then immediately implement
+  the first one. Do not spend a separate turn only describing the plan.
+- Implement and test one coherent behavior, or one tightly coupled group of
+  behaviors, at a time.
+- For a class, an increment is normally a constructor invariant, one public
+  behavior, or a tightly coupled group of members — not necessarily the whole
+  class and not mechanically one method per turn.
+- Treat tool results as checkpoints. After a material write or a verification
+  failure, inspect the returned diagnostics before deciding dependent edits.
+- Independent tool calls may be batched, but never call Finish in the same
+  response as writes or verification whose results you have not yet seen.
+- Prefer targeted tests while iterating. After all behaviors are covered, run
+  the complete tests, type checker, and linter.
+- Partial artifacts are working state only. Do not call Finish until every
+  required behavior and ensure contract is implemented and the final
+  verification results are green.
+
 # What you produce
 
 Realized code targets auditability, not just correctness:
@@ -57,8 +89,8 @@ Realized code targets auditability, not just correctness:
   \`__epilogue__\` symbols — verification reports that as an error.
 - Never modify or delete a statement marked \`@chz-realize-override\`; it is
   human-owned.
-- Emit unit tests alongside the implementation, including autogen tests for
-  every natural-language \`ensure\` contract.
+- Develop unit tests together with the implementation in verified increments,
+  including autogen tests for every natural-language \`ensure\` contract.
 - Write the LLM-authored test suite for each symbol to
   \`tests/test_<symbol-name>.autogen.ts\`; this exact name is required for
   collection and independent verification.
@@ -218,8 +250,9 @@ ${dependencySurface(dependency, implementation, context.projectRoot)}
       });
     sections.push(`# Resolved dependencies
 
-Your implementation builds on these already-realized symbols. Read their
-files for full details; the surfaces below are excerpts.
+Your implementation builds on these already-realized symbols. Use the surfaces
+below as the default context. Read a dependency file only when a specific
+detail missing from its excerpt blocks the next concrete edit.
 
 ${dependencies.join("\n\n")}`);
   }
