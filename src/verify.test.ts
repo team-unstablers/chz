@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { extractImagineSpecs } from "./preprocessor.ts";
+import { extractImagineSpecs, publicSurfaceText } from "./preprocessor.ts";
 import {
   realize,
   renderEnsureHarness,
@@ -193,6 +193,44 @@ const SOURCE = [
 ].join("\n");
 const FILE = "collide.chz.ts";
 
+class ImportingSlugRealizer implements ChzRealizer {
+  readonly name = "ImportingSlugRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(
+      implementation,
+      symbol.name === "slugify"
+        ? "export function slugify(input: string): string { return input.toLowerCase(); }\n"
+        : [
+            'import { slugify } from "./slugify.ts";',
+            "",
+            "export function buildUniqueSlugs(titles: readonly string[]): string[] {",
+            "  return titles.map((title) => slugify(title));",
+            "}",
+            "",
+          ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(test, "export {};\n", "utf8");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date("2026-07-23T12:34:56.000Z"),
+      resolvedBy: "fake-model",
+    };
+  }
+}
+
 class FixtureRealizer implements ChzRealizer {
   readonly name = "FixtureRealizer";
   readonly supportedSymbolTypes = ["function"] as const;
@@ -261,10 +299,67 @@ describe("buildRealizationCache", () => {
       expect(h).toMatch(/^[0-9a-f]{64}$/);
     }
     expect(sym.specHash).toBe(sha256(spec.originalText));
+    expect(sym.publicSurfaceHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(sym.publicSurfaceHash).toBe(sha256(publicSurfaceText(spec)));
     const implContent = result.files.find((f) => f.relPath === `implementations/${NAME}.ts`)!.content;
     expect(sym.implementationHash).toBe(sha256(implContent));
     const autogenContent = result.files.find((f) => f.relPath === `tests/test_${NAME}.autogen.ts`)!.content;
     expect(sym.autogenTestHash).toBe(sha256(autogenContent));
+    // No imports in the fixture implementation: no confirmed edges.
+    expect(sym.dependencies).toEqual([]);
+  });
+
+  it("keeps the public-surface hash stable across requirements-only edits", async () => {
+    const result = await realizeFixture();
+    const cache = buildRealizationCache({
+      result,
+      source: SOURCE,
+      chzVersion: "1.2.3",
+      realizedAt: "2026-07-23T12:34:56.000Z",
+      testsPassed: true,
+    });
+
+    const editedSource = SOURCE.replace(
+      "두 점이 같은 위치인지 판정합니다.",
+      "두 점이 완전히 동일한 좌표인지 판정합니다.",
+    );
+    const editedSpec = extractImagineSpecs(editedSource, FILE)[0]!;
+    expect(editedSpec.originalText).not.toBe(extractImagineSpecs(SOURCE, FILE)[0]!.originalText);
+    // The spec hash moves with the edit, the public surface does not — this
+    // is the docs/62 distinction that stops invalidation from propagating.
+    expect(sha256(editedSpec.originalText)).not.toBe(cache.symbols[NAME]!.specHash);
+    expect(sha256(publicSurfaceText(editedSpec))).toBe(cache.symbols[NAME]!.publicSurfaceHash);
+  });
+
+  it("records confirmed dependency edges from the realized imports", async () => {
+    const source = [
+      "imagine function slugify(input: string): string {",
+      "  requirements(`슬러그를 만듭니다.`);",
+      "}",
+      "",
+      "imagine function buildUniqueSlugs(titles: readonly string[]): string[] {",
+      "  requirements(`slugify를 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    const file = join(makeTempDir(), "slugs.chz.ts");
+    writeFileSync(file, source, "utf8");
+    const result = await realize(source, file, {
+      realizers: [new ImportingSlugRealizer()],
+      now: () => new Date("2026-07-23T12:34:56.000Z"),
+      skipVerification: true,
+    });
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+
+    const cache = buildRealizationCache({
+      result,
+      source,
+      chzVersion: "1.2.3",
+      realizedAt: "2026-07-23T12:34:56.000Z",
+      testsPassed: true,
+    });
+    expect(cache.symbols["slugify"]!.dependencies).toEqual([]);
+    expect(cache.symbols["buildUniqueSlugs"]!.dependencies).toEqual(["slugify"]);
   });
 
   it("marks testsSkipped and testsPassed:false when tests were skipped", async () => {

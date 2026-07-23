@@ -97,7 +97,7 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "RunTests",
     description:
-      "Run the engine-fixed vitest runner. Pass output-directory test files, or an empty array to run every test in this session's scope (this symbol's autogen and ensure tests). This is useful feedback; Finish still triggers independent verification.",
+      "Run the engine-fixed vitest runner. Pass output-directory test files, or an empty array to run every test in this session's scope (the autogen and ensure tests of every symbol this session realizes, including all cycle members). This is useful feedback; Finish still triggers independent verification.",
     inputSchema: objectSchema({ testFiles: { type: "array", items: { type: "string" } } }, ["testFiles"]),
   },
   {
@@ -663,6 +663,21 @@ function collectResolution(
     );
   }
   const resolvedTestFiles = [expectedTestFile];
+
+  // A dependency cycle is realized as one session (docs/62): every member
+  // must have its implementation and autogen tests before Finish is accepted.
+  for (const member of symbol.circularDependencies) {
+    if (!existsSync(join(context.outputDir, "implementations", `${member.name}.ts`))) {
+      throw new Error(
+        `Finish called, but cycle member '${member.name}' has no implementation. Write implementations/${member.name}.ts and finish again.`,
+      );
+    }
+    if (!existsSync(join(context.outputDir, "tests", `test_${member.name}.autogen.ts`))) {
+      throw new Error(
+        `Finish called, but cycle member '${member.name}' has no autogen tests. Write tests/test_${member.name}.autogen.ts and finish again.`,
+      );
+    }
+  }
 
   const lineCount = readFileSync(resolvedFile, "utf8").split(/\r?\n/).length;
   const assumptionsReport = allFiles.find((file) => /^ASSUMPTIONS(?:\..+)?$/i.test(basename(file)));

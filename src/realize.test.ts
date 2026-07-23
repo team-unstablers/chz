@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -606,4 +606,285 @@ describe("realize engine", () => {
     },
     120_000,
   );
+
+  it("realizes a dependency cycle as one warned session covering every member", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-cycle-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "parity.chz.ts");
+    const source = [
+      "imagine function isEven(n: number): boolean {",
+      "  requirements(`0이면 참, 아니면 isOdd(n - 1)을 반환합니다.`);",
+      "}",
+      "",
+      "imagine function isOdd(n: number): boolean {",
+      "  requirements(`0이면 거짓, 아니면 isEven(n - 1)을 반환합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const sessions: Array<{ symbol: string; scope: readonly string[]; cycle: string[] }> = [];
+    const realizer: ChzRealizer = {
+      name: "CycleRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        sessions.push({
+          symbol: symbol.name,
+          scope: context.scope?.symbolNames ?? [],
+          cycle: symbol.circularDependencies.map((member) => member.name),
+        });
+        for (const member of ["isEven", "isOdd"]) {
+          const implementation = join(context.outputDir, "implementations", `${member}.ts`);
+          mkdirSync(dirname(implementation), { recursive: true });
+          mkdirSync(join(context.outputDir, "tests"), { recursive: true });
+          writeFileSync(implementation, `export function ${member}(n: number): boolean { return n >= 0; }\n`, "utf8");
+          writeFileSync(join(context.outputDir, "tests", `test_${member}.autogen.ts`), "export {};\n", "utf8");
+        }
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`)],
+          resolvedAt: new Date("2026-07-23T00:00:00.000Z"),
+          resolvedBy: "cycle-model",
+        };
+      },
+    };
+
+    const warnings: string[] = [];
+    const verifiedScopes: string[][] = [];
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      verify: async (input) => {
+        verifiedScopes.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      verifyRealization: async () => ({ passed: true, output: "green" }),
+      harness: { onEvent: (message) => warnings.push(message) },
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    // One session realized the whole cycle.
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.symbol).toBe("isEven");
+    expect(sessions[0]!.scope).toEqual(["isEven", "isOdd"]);
+    expect(sessions[0]!.cycle).toEqual(["isOdd"]);
+    // Custom verifiers receive the whole group as their scope (docs/62:
+    // the group is complete only when every member's tests are green).
+    expect(verifiedScopes).toEqual([["isEven", "isOdd"]]);
+    expect(warnings.some((message) => message.includes("Dependency cycle detected"))).toBe(true);
+    // Both members resolved, with provenance stamped on each implementation.
+    expect(result.symbols.map((symbol) => symbol.name)).toEqual(["isEven", "isOdd"]);
+    for (const member of ["isEven", "isOdd"]) {
+      expect(readFileSync(join(result.baseDir, "implementations", `${member}.ts`), "utf8"))
+        .toContain("realized by cycle-model");
+    }
+  });
+
+  it("continues independent symbols after a failure and skips only dependents", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-partial-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "trio.chz.ts");
+    const source = [
+      "imagine function alpha(input: string): string {",
+      "  requirements(`알파를 계산합니다.`);",
+      "}",
+      "",
+      "imagine function beta(input: string): string {",
+      "  requirements(`베타를 계산합니다.`);",
+      "}",
+      "",
+      "imagine function gamma(input: string): string {",
+      "  requirements(`alpha를 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const calls: string[] = [];
+    const realizer: ChzRealizer = {
+      name: "PartialRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        calls.push(symbol.name);
+        if (symbol.name === "alpha") {
+          return { outcome: "failed", symbol, reason: "synthetic alpha failure" };
+        }
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+        mkdirSync(dirname(implementation), { recursive: true });
+        mkdirSync(dirname(test), { recursive: true });
+        writeFileSync(implementation, `export function ${symbol.name}(input: string): string { return input; }\n`, "utf8");
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date("2026-07-23T00:00:00.000Z"),
+          resolvedBy: "partial-model",
+        };
+      },
+    };
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      verify: async () => ({ passed: true, output: "green" }),
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    expect(result.outcome).toBe("failed");
+    // gamma depends on the failed alpha and must never start a session.
+    expect(calls).toEqual(["alpha", "beta"]);
+    expect(result.symbols.map((symbol) => symbol.name)).toEqual(["beta"]);
+    expect(result.resolutions.map((resolution) => resolution.outcome)).toEqual([
+      "failed",
+      "resolved",
+      "failed",
+    ]);
+    expect(result.reason).toContain("synthetic alpha failure");
+    expect(result.reason).toContain("Skipped 'gamma'");
+    // A partial realization must not pretend to have a complete entry point.
+    expect(existsSync(join(result.baseDir, "implementation.ts"))).toBe(false);
+  });
+
+  it("keeps a blocked root cause blocked across skipped dependents", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-blocked-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "blocked.chz.ts");
+    const source = [
+      "imagine function alpha(input: string): string {",
+      "  requirements(`알파를 계산합니다.`);",
+      "}",
+      "",
+      "imagine function beta(input: string): string {",
+      "  requirements(`alpha를 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const realizer: ChzRealizer = {
+      name: "BlockingRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol) {
+        return {
+          outcome: "blocked",
+          symbol,
+          reason: "User input is required.",
+          todo: "Answer the encoding question, then rerun chz realize.",
+        };
+      },
+    };
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    // A blocked root must keep the run blocked — the human needs the TODO,
+    // and nothing here is a defect a spec change could fix.
+    expect(result.outcome).toBe("blocked");
+    expect(result.resolutions.map((resolution) => resolution.outcome)).toEqual([
+      "blocked",
+      "blocked",
+    ]);
+    expect(result.todo).toContain("Answer the encoding question");
+    expect(result.reason).toContain("Skipped 'beta'");
+  });
+
+  it("turns a missing cycle-member test file into a structured failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-missing-member-"));
+    roots.push(root);
+    const sourceFile = join(root, "parity.chz.ts");
+    const source = [
+      "imagine function isEven(n: number): boolean {",
+      "  requirements(`isOdd를 사용합니다.`);",
+      "}",
+      "",
+      "imagine function isOdd(n: number): boolean {",
+      "  requirements(`isEven을 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    // Writes both implementations but forgets isOdd's autogen tests — a
+    // custom Realizer bug that must fail the group, not crash realize().
+    const realizer: ChzRealizer = {
+      name: "ForgetfulRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        mkdirSync(join(context.outputDir, "implementations"), { recursive: true });
+        mkdirSync(join(context.outputDir, "tests"), { recursive: true });
+        for (const member of ["isEven", "isOdd"]) {
+          writeFileSync(
+            join(context.outputDir, "implementations", `${member}.ts`),
+            `export function ${member}(n: number): boolean { return n >= 0; }\n`,
+            "utf8",
+          );
+        }
+        const test = join(context.outputDir, "tests", "test_isEven.autogen.ts");
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: join(context.outputDir, "implementations", `${symbol.name}.ts`),
+          resolvedTestFiles: [test],
+          resolvedAt: new Date("2026-07-23T00:00:00.000Z"),
+          resolvedBy: "forgetful-model",
+        };
+      },
+    };
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.reason).toContain("test_isOdd.autogen.ts");
+  });
+
+  it("fails fast when a cycle exceeds the configured size cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-cap-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "ring.chz.ts");
+    const names = ["ringA", "ringB", "ringC", "ringD"];
+    const source = names
+      .map((name, index) => [
+        `imagine function ${name}(input: string): string {`,
+        `  requirements(\`${names[(index + 1) % names.length]}를 사용합니다.\`);`,
+        "}",
+        "",
+      ].join("\n"))
+      .join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const calls: string[] = [];
+    const realizer: ChzRealizer = {
+      name: "NeverRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol) {
+        calls.push(symbol.name);
+        return { outcome: "failed", symbol, reason: "must not be called" };
+      },
+    };
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.reason).toContain("maximum cycle size");
+    expect(calls).toEqual([]);
+  });
 });

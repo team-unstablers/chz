@@ -11,10 +11,14 @@ enforced by the language grammar and the compiler, not left to convention.
 **Current status: early v0.** The pipeline runs end-to-end for one example
 (`examples/collision.chz.ts`). The shared Realizer harness, fixed tool surface,
 OpenAI-compatible transport, `chz.config.js` injection, independent
-verification loop, and prologue/epilogue emission are implemented; broader
-syntax, incremental realization, drift/override handling, and several graph
-rules remain future work. When code and docs disagree, the docs are more
-current.
+verification loop (symbol-scoped, plus a final whole-realization pass), the
+prologue/epilogue emission, and the symbol-level dependency graph
+(`src/graph.ts`: SCC cycles realized as one session, configurable cycle size
+cap, confirmed-edge + public-surface recording into `realization-cache.json`,
+failures skipping only dependents) are implemented; broader syntax,
+incremental realization (cache consumption and invalidation propagation), and
+drift/override handling remain future work. When code and docs disagree, the
+docs are more current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,

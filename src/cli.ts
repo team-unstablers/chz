@@ -8,17 +8,18 @@ import { pathToFileURL } from "node:url";
 
 import { ChzSyntaxError, extractImagineSpecs, type ImagineSpec } from "./preprocessor.ts";
 import {
-  buildEstimatedRealizeOrder,
+  buildDependencyGraph,
   realize,
   realizationBaseDir,
   type ChzAskUserAnswer,
   type ChzAskUserQuestion,
+  type ChzDependencyGraph,
   type ChzProjectConfig,
   type ChzRealizationScope,
   type ChzRealizer,
   type RealizeResult,
 } from "./realize.ts";
-import { findChzConfig, loadChzConfig, selectRealizer } from "./realizer/config.ts";
+import { findChzConfig, loadChzConfig } from "./realizer/config.ts";
 import { ChzOpenAIRealizer } from "./realizer/openai.ts";
 import { buildSystemParts } from "./realizer/prompt.ts";
 import {
@@ -146,14 +147,31 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 1;
   }
 
-  const symbols = buildEstimatedRealizeOrder(specs, source, sourceFile);
   if (parsed.dryRun) {
-    for (const symbol of symbols) {
-      const realizer = selectRealizer(configured.config.realizers, symbol);
-      if (realizer === null) {
-        io.err(`${BIN_NAME} realize: no Realizer supports '${symbol.name}' (${symbol.type})`);
+    let graph: ChzDependencyGraph;
+    try {
+      graph = buildDependencyGraph(specs, source, sourceFile, {
+        maxCycleSize: configured.config.maxCycleSize,
+      });
+    } catch (error) {
+      io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
+      return 1;
+    }
+    for (const warning of graph.warnings) io.err(`${BIN_NAME} realize: warning: ${warning}`);
+    for (const group of graph.groups) {
+      // Mirror the engine: a cycle is one session, so one Realizer must
+      // support every member type.
+      const realizer = configured.config.realizers.find((candidate) =>
+        group.symbols.every((member) => candidate.supportedSymbolTypes.includes(member.type)),
+      );
+      if (realizer === undefined) {
+        const label = group.symbols
+          .map((member) => `'${member.name}' (${member.type})`)
+          .join(", ");
+        io.err(`${BIN_NAME} realize: no Realizer supports ${label}`);
         return 1;
       }
+      const representative = group.symbols[0]!;
       const model = "modelLabel" in realizer && typeof realizer.modelLabel === "string"
         ? realizer.modelLabel
         : realizer.name;
@@ -167,8 +185,9 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
         baseContexts: "",
         now: deps.now,
       };
-      const [fixed, baseline] = buildSystemParts(symbol, context, model);
-      io.out(`===== Realizer system prompt: ${symbol.name} (${realizer.name}) =====`);
+      const [fixed, baseline] = buildSystemParts(representative, context, model);
+      const sessionLabel = group.symbols.map((member) => member.name).join(" ↔ ");
+      io.out(`===== Realizer system prompt: ${sessionLabel} (${realizer.name}) =====`);
       io.out(fixed);
       io.out("");
       io.out(baseline);
@@ -234,10 +253,14 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       activeProfile: configured.config.profile,
       maxTurns: configured.config.maxTurns,
       maxRetries: configured.config.maxRetries,
+      maxCycleSize: configured.config.maxCycleSize,
       askUser: deps.askUser ?? (process.stdin.isTTY && process.stdout.isTTY ? interactiveAskUser(io) : undefined),
       now: deps.now,
       skipVerification: parsed.skipTests,
-      verify: (input) => runVerificationChecks(input.baseDir, { symbolNames: [input.symbol.name] }),
+      // input.scope covers every session symbol — for a cycle group, scoping
+      // to input.symbol alone would verify only the representative (docs/62
+      // completes a group only when the whole group is green).
+      verify: (input) => runVerificationChecks(input.baseDir, input.scope),
       verifyRealization: (baseDir) => runVerificationChecks(baseDir),
       harness: {
         runTests: async (testFiles) => {

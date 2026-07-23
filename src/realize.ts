@@ -9,13 +9,18 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
+import {
+  ChzCycleError,
+  buildDependencyGraph,
+  mentionedSymbols,
+  type ChzDependencyGraph,
+} from "./graph.ts";
 import { splitHumanCode } from "./human-code.ts";
 import {
   extractImagineSpecs,
   realizationBaseName,
   type ImagineSpec,
 } from "./preprocessor.ts";
-import { selectRealizer } from "./realizer/config.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import type {
   ChzAskUserAnswer,
@@ -29,6 +34,7 @@ import type {
   ChzVerificationResult,
 } from "./realizer/types.ts";
 
+export * from "./graph.ts";
 export * from "./realizer/index.ts";
 
 export interface EmittedFile {
@@ -58,9 +64,17 @@ export interface RealizeResult {
 
 export interface IndependentVerificationInput {
   baseDir: string;
+  /** The session's representative symbol (a cycle group has one session). */
   symbol: ChzImagineSymbol;
   resolution: ChzResolutionResolved;
   attempt: number;
+  /**
+   * The full verification scope: every symbol the session realized. For a
+   * cycle group this covers all members — docs/62 completes a group only
+   * when the whole group's tests are green, so custom verifiers must use
+   * this scope rather than `symbol` alone.
+   */
+  scope: ChzRealizationScope;
 }
 
 export interface RealizeOptions {
@@ -81,69 +95,12 @@ export interface RealizeOptions {
   verifyRealization?: (baseDir: string) => Promise<ChzVerificationResult>;
   /** Explicit escape hatch used by --skip-tests. */
   skipVerification?: boolean;
+  /** Maximum symbols one dependency cycle may contain (docs/62). */
+  maxCycleSize?: number;
 }
 
 export function realizationBaseDir(fileName: string): string {
   return resolve(dirname(fileName), "chz", "realization", realizationBaseName(fileName));
-}
-
-export function imagineSpecToSymbol(
-  spec: ImagineSpec,
-  source: string,
-  fileName: string,
-): ChzImagineSymbol {
-  const before = source.slice(0, spec.start);
-  const lines = before.split(/\r?\n/);
-  return {
-    name: spec.name,
-    type: spec.type,
-    definition: spec.originalText,
-    file: resolve(fileName),
-    posLine: lines.length,
-    posCol: (lines.at(-1)?.length ?? 0) + 1,
-    dependencies: [],
-    circularDependencies: [],
-  };
-}
-
-/**
- * Build the v0 estimated graph from explicit symbol-name mentions, then return
- * dependencies before dependents. Actual-use graph refinement remains an
- * engine concern and does not leak into Realizer transports.
- */
-export function buildEstimatedRealizeOrder(
-  specs: ImagineSpec[],
-  source: string,
-  fileName: string,
-): ChzImagineSymbol[] {
-  const symbols = specs.map((spec) => imagineSpecToSymbol(spec, source, fileName));
-  for (const symbol of symbols) {
-    symbol.dependencies = symbols.filter(
-      (candidate) => candidate !== symbol && symbol.definition.includes(candidate.name),
-    );
-  }
-
-  const ordered: ChzImagineSymbol[] = [];
-  const permanent = new Set<ChzImagineSymbol>();
-  const active: ChzImagineSymbol[] = [];
-  const visit = (symbol: ChzImagineSymbol): void => {
-    if (permanent.has(symbol)) return;
-    const cycleAt = active.indexOf(symbol);
-    if (cycleAt >= 0) {
-      const cycle = active.slice(cycleAt);
-      for (const member of cycle) {
-        member.circularDependencies = cycle.filter((candidate) => candidate !== member);
-      }
-      return;
-    }
-    active.push(symbol);
-    for (const dependency of symbol.dependencies) visit(dependency);
-    active.pop();
-    permanent.add(symbol);
-    ordered.push(symbol);
-  };
-  for (const symbol of symbols) visit(symbol);
-  return ordered;
 }
 
 /** Realize every imagine symbol, selecting the first configured compatible Realizer. */
@@ -169,40 +126,127 @@ export async function realize(
   };
   writeHumanCode();
 
-  const order = buildEstimatedRealizeOrder(specs, source, fileName);
   const resolutions: ChzImagineSymbolResolution[] = [];
   const resolvedByName = new Map<string, ChzResolutionResolved>();
   const realizedSymbols: RealizedSymbol[] = [];
+  /**
+   * Members of groups that did not resolve, with the root cause. Dependents
+   * are skipped either way, but a blocked root keeps the run's outcome
+   * "blocked" so the human still sees the todo (docs/63).
+   */
+  const unrealized = new Map<string, "failed" | "blocked">();
 
-  for (const symbol of order) {
-    const spec = specByName.get(symbol.name)!;
-    const ensurePath = join(baseDir, "tests", `test_${symbol.name}.ensure.ts`);
-    writeFileSync(ensurePath, renderEnsureHarness(spec, fileName, specs), "utf8");
+  let graph: ChzDependencyGraph;
+  try {
+    graph = buildDependencyGraph(specs, source, fileName, { maxCycleSize: options.maxCycleSize });
+  } catch (error) {
+    if (error instanceof ChzCycleError) return resultWithFailure("failed", error.message);
+    throw error;
+  }
+  for (const warning of graph.warnings) options.harness?.onEvent?.(`[chz-realize] ${warning}`);
 
-    const realizer = selectRealizer(options.realizers, symbol);
-    if (realizer === null) {
-      const resolution: ChzImagineSymbolResolution = {
-        outcome: "failed",
-        symbol,
-        reason: `No realizer found for symbol '${symbol.name}' (type: ${symbol.type}).`,
-      };
-      resolutions.push(resolution);
-      return resultWithFailure("failed", resolution.reason);
+  for (const group of graph.groups) {
+    const members = group.symbols;
+    const memberNames = new Set(members.map((member) => member.name));
+
+    // docs/62: a failed symbol halts only its dependents. Groups arrive in
+    // topological order, so every outside dependency has already either
+    // resolved or landed in `unrealized` — independent groups keep going.
+    const missingDependency = members
+      .flatMap((member) => member.dependencies)
+      .find((dependency) => !memberNames.has(dependency.name) && unrealized.has(dependency.name));
+    if (missingDependency !== undefined) {
+      const cause = unrealized.get(missingDependency.name)!;
+      for (const member of members) {
+        unrealized.set(member.name, cause);
+        resolutions.push(
+          cause === "blocked"
+            ? {
+                outcome: "blocked",
+                symbol: member,
+                reason: `Skipped '${member.name}': dependency '${missingDependency.name}' is blocked.`,
+                todo: `Unblock '${missingDependency.name}', then rerun chz realize.`,
+              }
+            : {
+                outcome: "failed",
+                symbol: member,
+                reason: `Skipped '${member.name}': dependency '${missingDependency.name}' was not realized.`,
+              },
+        );
+      }
+      continue;
     }
 
+    const writeEnsures = (): void => {
+      for (const member of members) {
+        writeFileSync(
+          join(baseDir, "tests", `test_${member.name}.ensure.ts`),
+          renderEnsureHarness(specByName.get(member.name)!, fileName, specs),
+          "utf8",
+        );
+      }
+    };
+    writeEnsures();
+
+    // A cycle is one session, so one Realizer must support every member type.
+    const realizer = options.realizers.find((candidate) =>
+      members.every((member) => candidate.supportedSymbolTypes.includes(member.type)),
+    );
+    if (realizer === undefined) {
+      for (const member of members) {
+        unrealized.set(member.name, "failed");
+        resolutions.push({
+          outcome: "failed",
+          symbol: member,
+          reason: group.circular
+            ? `No realizer supports every symbol type in the dependency cycle ${members.map((item) => `'${item.name}'`).join(", ")}.`
+            : `No realizer found for symbol '${member.name}' (type: ${member.type}).`,
+        });
+      }
+      continue;
+    }
+
+    const representative = members[0]!;
+    const scope: ChzRealizationScope = { symbolNames: members.map((member) => member.name) };
+    const memberResolution = (
+      member: ChzImagineSymbol,
+      resolution: ChzResolutionResolved,
+    ): ChzResolutionResolved =>
+      member === resolution.symbol ? resolution : {
+        outcome: "resolved",
+        symbol: member,
+        resolvedFile: join(baseDir, "implementations", `${member.name}.ts`),
+        resolvedTestFiles: [join(baseDir, "tests", `test_${member.name}.autogen.ts`)],
+        // The session-level assumptions report covers the whole cycle.
+        ...(resolution.assumptionsReport === undefined
+          ? {}
+          : { assumptionsReport: resolution.assumptionsReport }),
+        resolvedAt: resolution.resolvedAt,
+        resolvedBy: resolution.resolvedBy,
+      };
+
     let feedback: string | undefined;
-    let finalResolution: ChzImagineSymbolResolution | undefined;
+    let groupResolution: ChzImagineSymbolResolution | undefined;
     for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       const baseContexts = readContexts(baseDir);
       const context = {
         projectRoot,
         outputDir: baseDir,
         activeProfile,
-        scope: { symbolNames: [symbol.name] },
-        resolvedDependencies: symbol.dependencies.flatMap((dependency) => {
-          const resolution = resolvedByName.get(dependency.name);
-          return resolution === undefined ? [] : [resolution];
-        }),
+        scope,
+        resolvedDependencies: [
+          ...new Map(
+            members
+              .flatMap((member) => member.dependencies)
+              .filter((dependency) => !memberNames.has(dependency.name))
+              .flatMap((dependency) => {
+                const resolution = resolvedByName.get(dependency.name);
+                return resolution === undefined
+                  ? []
+                  : [[dependency.name, resolution] as const];
+              }),
+          ).values(),
+        ],
         maxTurns,
         maxRetries,
         baseContexts,
@@ -212,55 +256,115 @@ export async function realize(
         now: options.now,
         harness: options.harness,
       };
-      const resolution = await realizer.realize(symbol, context);
-      // This harness is human-contract material owned by the engine. Restore
-      // it after every session so a model edit can never weaken self-grading.
-      writeFileSync(ensurePath, renderEnsureHarness(spec, fileName, specs), "utf8");
+      const resolution = await realizer.realize(representative, context);
+      // These harnesses are human-contract material owned by the engine.
+      // Restore them after every session so a model edit can never weaken
+      // self-grading.
+      writeEnsures();
       // The split human source is engine-owned for the same reason: the model
       // may read prologue helpers but must never rewrite either human layer.
       writeHumanCode();
-      finalResolution = resolution;
+      groupResolution = resolution;
       if (resolution.outcome !== "resolved") break;
 
-      attachProvenance(spec, resolution, options.now ? options.now() : new Date());
+      // The base harness validates every session file at Finish; a custom
+      // Realizer may not, and a missing file must never surface later as a
+      // raw fs error from provenance stamping or cache building.
+      const requiredFiles = members.flatMap((member) =>
+        member === resolution.symbol
+          ? [resolution.resolvedFile, ...resolution.resolvedTestFiles]
+          : [
+              join(baseDir, "implementations", `${member.name}.ts`),
+              join(baseDir, "tests", `test_${member.name}.autogen.ts`),
+            ],
+      );
+      const missingFile = requiredFiles.find((file) => !existsSync(file));
+      if (missingFile !== undefined) {
+        groupResolution = {
+          outcome: "failed",
+          symbol: representative,
+          reason: `Realizer claimed Finish, but ${relative(baseDir, missingFile)} was not written.`,
+        };
+        break;
+      }
+
+      const stampedAt = options.now ? options.now() : new Date();
+      for (const member of members) {
+        attachProvenance(
+          specByName.get(member.name)!,
+          memberResolution(member, resolution),
+          stampedAt,
+        );
+      }
       if (options.skipVerification) break;
 
       const verification = options.verify === undefined
         ? await runDefaultVerification(
             baseDir,
-            { symbolNames: [symbol.name] },
+            scope,
             projectRoot,
             activeProfile,
             maxTurns,
             maxRetries,
             options.harness,
           )
-        : await options.verify({ baseDir, symbol, resolution, attempt });
+        : await options.verify({ baseDir, symbol: representative, resolution, attempt, scope });
       if (verification.passed) break;
       feedback = boundVerificationFeedback(verification.output);
       if (attempt > maxRetries) {
-        finalResolution = {
+        groupResolution = {
           outcome: "failed",
-          symbol,
+          symbol: representative,
           reason: `Independent verification failed after ${attempt} attempt${attempt === 1 ? "" : "s"}:\n${feedback}`,
         };
       }
     }
 
-    if (finalResolution === undefined) {
-      finalResolution = { outcome: "failed", symbol, reason: "Realizer returned no resolution." };
-    }
-    resolutions.push(finalResolution);
-    if (finalResolution.outcome === "blocked") {
-      return resultWithFailure("blocked", finalResolution.reason, finalResolution.todo);
-    }
-    if (finalResolution.outcome === "failed") {
-      return resultWithFailure("failed", finalResolution.reason);
+    if (groupResolution === undefined) {
+      groupResolution = {
+        outcome: "failed",
+        symbol: representative,
+        reason: "Realizer returned no resolution.",
+      };
     }
 
-    resolvedByName.set(symbol.name, finalResolution);
-    const files = collectSymbolFiles(baseDir, spec, finalResolution);
-    realizedSymbols.push({ name: symbol.name, spec, symbol, resolution: finalResolution, files });
+    if (groupResolution.outcome === "resolved") {
+      for (const member of members) {
+        const resolution = memberResolution(member, groupResolution);
+        const spec = specByName.get(member.name)!;
+        resolutions.push(resolution);
+        resolvedByName.set(member.name, resolution);
+        realizedSymbols.push({
+          name: member.name,
+          spec,
+          symbol: member,
+          resolution,
+          files: collectSymbolFiles(baseDir, spec, resolution),
+        });
+      }
+    } else {
+      for (const member of members) {
+        unrealized.set(member.name, groupResolution.outcome === "blocked" ? "blocked" : "failed");
+        resolutions.push(
+          member === groupResolution.symbol
+            ? groupResolution
+            : { ...groupResolution, symbol: member },
+        );
+      }
+    }
+  }
+
+  if (unrealized.size > 0) {
+    const failed = resolutions.filter((resolution) => resolution.outcome === "failed");
+    const blocked = resolutions.filter((resolution) => resolution.outcome === "blocked");
+    const reason = [...new Set([...failed, ...blocked].map((resolution) => resolution.reason))]
+      .join("\n");
+    const todo = [...new Set(blocked.map((resolution) => resolution.todo))].join("\n");
+    return resultWithFailure(
+      failed.length > 0 ? "failed" : "blocked",
+      reason,
+      todo === "" ? undefined : todo,
+    );
   }
 
   if (realizedSymbols.length > 0) {
@@ -334,8 +438,14 @@ export function renderEnsureHarness(
     ),
   ];
   const contractSource = contracts.map(({ ensure }) => ensure.source).join("\n");
+  // The same boundary-aware matcher builds the dependency graph; using it here
+  // keeps the harness imports consistent with the realize order (an imported
+  // symbol without a graph edge could be realized after this one).
+  const mentioned = new Set(
+    mentionedSymbols(contractSource, allSpecs.map((candidate) => candidate.name)),
+  );
   const importedSymbols = allSpecs
-    .filter((candidate) => candidate.name === spec.name || contractSource.includes(candidate.name))
+    .filter((candidate) => candidate.name === spec.name || mentioned.has(candidate.name))
     .map((candidate) => candidate.name);
   const valueImports = contracts.length === 0
     ? ""

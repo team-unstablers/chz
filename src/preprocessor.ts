@@ -238,6 +238,39 @@ export function preprocess(source: string, fileName: string): PreprocessResult {
   return { specs, code: transformToPlainTs(source, fileName, specs) };
 }
 
+/**
+ * The canonical public-surface text of an imagine declaration: its signature
+ * plus its executable ensure contracts (docs/62). Dependents are invalidated
+ * only when this surface changes; requirements prose, comments, and ensure
+ * messages are internal and deliberately excluded.
+ */
+export function publicSurfaceText(spec: ImagineSpec): string {
+  const lines: string[] = [];
+  if (spec.type === "function") {
+    lines.push(`function ${spec.name}(${spec.parameters}): ${spec.returnType}`);
+  } else {
+    lines.push(`class ${spec.name}`);
+    for (const member of spec.members) {
+      const modifiers = member.modifiers.length === 0 ? "" : `${member.modifiers.join(" ")} `;
+      lines.push(
+        member.type === "method"
+          ? `method ${modifiers}${spec.name}.${member.name}(${member.parameters}): ${member.returnType}`
+          : `property ${modifiers}${spec.name}.${member.name}: ${member.returnType}`,
+      );
+    }
+  }
+  const contracts = [
+    ...spec.ensures.map((ensure) => ({ scope: spec.name, ensure })),
+    ...spec.members.flatMap((member) =>
+      member.ensures.map((ensure) => ({ scope: `${spec.name}.${member.name}`, ensure })),
+    ),
+  ];
+  for (const { scope, ensure } of contracts) {
+    lines.push(`ensure ${scope} ${ensure.kind} ${ensure.source}`);
+  }
+  return lines.join("\n");
+}
+
 /** The realization directory base name for a source file: `example.chz.ts` -> `example`. */
 export function realizationBaseName(fileName: string): string {
   const base = basename(fileName);

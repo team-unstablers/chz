@@ -65,6 +65,12 @@ export async function loadChzConfig(path: string): Promise<LoadedChzConfig> {
   if (value.profile !== undefined && typeof value.profile !== "string") {
     throw new Error(`${absolute}: profile must be a string.`);
   }
+  if (
+    value.maxCycleSize !== undefined &&
+    (!Number.isInteger(value.maxCycleSize) || (value.maxCycleSize as number) < 1)
+  ) {
+    throw new Error(`${absolute}: maxCycleSize must be an integer greater than zero.`);
+  }
 
   return {
     path: absolute,

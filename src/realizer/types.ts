@@ -178,4 +178,6 @@ export interface ChzProjectConfig {
   maxTurns?: number;
   maxRetries?: number;
   profile?: string;
+  /** Maximum symbols one dependency cycle may contain (docs/62). */
+  maxCycleSize?: number;
 }

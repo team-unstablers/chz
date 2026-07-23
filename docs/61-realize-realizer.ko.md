@@ -298,6 +298,10 @@ export default {
     ),
     new ComfyRealizer({ endpoint: 'http://localhost:8188' }), // 'resource' 담당
   ],
+
+  // 의존성 순환(SCC) 하나가 포함할 수 있는 심볼 수의 상한 (62 문서). 순환은
+  // 한 세션으로 묶여 함께 realize되므로, 그룹이 클수록 세션 품질이 떨어집니다.
+  maxCycleSize: 3,
 };
 ```
 

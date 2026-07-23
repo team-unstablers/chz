@@ -43,6 +43,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { extractConfirmedDependencies } from "./graph.ts";
+import { publicSurfaceText } from "./preprocessor.ts";
 import type { RealizeResult } from "./realize.ts";
 
 // ---------------------------------------------------------------------------
@@ -276,12 +278,24 @@ export interface RealizationCacheSymbol {
   name: string;
   /** sha256 of the imagine block's `originalText` — the spec that was realized. */
   specHash: string;
+  /**
+   * sha256 of the declaration's public surface (signature + ensure contracts,
+   * docs/62). Re-realize propagates invalidation to dependents only when this
+   * hash changes; a requirements-only edit leaves it stable.
+   */
+  publicSurfaceHash: string;
   /** sha256 of the emitted `implementations/<name>.ts` content. */
   implementationHash: string;
   /** sha256 of the emitted `tests/test_<name>.autogen.ts` content. */
   autogenTestHash: string;
   /** sha256 of the emitted `tests/test_<name>.ensure.ts` content. */
   ensureTestHash: string;
+  /**
+   * Confirmed dependency edges (docs/62 stage 3): the imagine symbols this
+   * realized implementation actually imports, sorted by name. Re-runs prefer
+   * these over the estimated mention-scan edges.
+   */
+  dependencies: string[];
   /** Model label that realized this symbol (provenance). */
   model: string;
   /** ISO-8601 time the realization was recorded. */
@@ -345,14 +359,18 @@ export function buildRealizationCache(input: BuildRealizationCacheInput): Realiz
   const { result, source, chzVersion, realizedAt, testsPassed } = input;
   const testsSkipped = input.testsSkipped ?? false;
 
+  const knownSymbolNames = result.symbols.map((symbol) => symbol.name);
   const symbols: Record<string, RealizationCacheSymbol> = {};
   for (const symbol of result.symbols) {
+    const implementation = emittedContent(result, symbol.name, `implementations/${symbol.name}.ts`);
     symbols[symbol.name] = {
       name: symbol.name,
       specHash: sha256(symbol.spec.originalText),
-      implementationHash: sha256(emittedContent(result, symbol.name, `implementations/${symbol.name}.ts`)),
+      publicSurfaceHash: sha256(publicSurfaceText(symbol.spec)),
+      implementationHash: sha256(implementation),
       autogenTestHash: sha256(emittedContent(result, symbol.name, `tests/test_${symbol.name}.autogen.ts`)),
       ensureTestHash: sha256(emittedContent(result, symbol.name, `tests/test_${symbol.name}.ensure.ts`)),
+      dependencies: extractConfirmedDependencies(implementation, symbol.name, knownSymbolNames),
       model: symbol.resolution.resolvedBy ?? input.modelLabel ?? "unknown-realizer",
       realizedAt,
       testsPassed,
