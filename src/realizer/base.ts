@@ -38,19 +38,19 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "ReadFile",
     description:
-      "Read a UTF-8 text file inside the project root with line-number prefixes. Continue with a larger offset; prefer a large window over tiny repeated slices. Use Grep for specific content and Glob for uncertain paths. Do not copy line-number prefixes into edits.",
+      "Read a UTF-8 text file inside the project root with line-number prefixes. Sensitive paths such as chz.config.js and .env files (except .env.example) are inaccessible. Continue with a larger offset; prefer a large window over tiny repeated slices. Use Grep for specific content and Glob for uncertain paths. Do not copy line-number prefixes into edits.",
     inputSchema: objectSchema({ path: pathProperty, ...pageProperties }, ["path"]),
   },
   {
     name: "ReadDir",
     description:
-      "List a directory inside the project root, directories first and then lexically, with deterministic paging.",
+      "List a directory inside the project root, excluding sensitive paths, directories first and then lexically, with deterministic paging.",
     inputSchema: objectSchema({ path: pathProperty, ...pageProperties }, ["path"]),
   },
   {
     name: "Glob",
     description:
-      "Find files by a gitignore-style glob inside the project root. Results are project-relative and unordered; do not rely on result order.",
+      "Find files by a gitignore-style glob inside the project root. Sensitive paths are excluded. Results are project-relative and unordered; do not rely on result order.",
     inputSchema: objectSchema(
       {
         pattern: { type: "string" },
@@ -63,7 +63,7 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "Grep",
     description:
-      "Search UTF-8 project files with a ripgrep/Rust regular expression. Use include to restrict file names.",
+      "Search non-sensitive UTF-8 project files with a ripgrep/Rust regular expression. Use include to restrict file names.",
     inputSchema: objectSchema(
       {
         pattern: { type: "string" },
@@ -77,13 +77,13 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "WriteFile",
     description:
-      "Create or replace one complete file inside the realization output directory. Existing files must first be read with ReadFile. Parent directories are created automatically and inline diagnostics are returned.",
+      "Create or replace one complete non-sensitive file inside the realization output directory. Existing files must first be read with ReadFile. Parent directories are created automatically and inline diagnostics are returned.",
     inputSchema: objectSchema({ path: pathProperty, content: { type: "string" } }, ["path", "content"]),
   },
   {
     name: "FindAndReplace",
     description:
-      "Replace an exact string in a file inside the realization output directory. Read the file first. Whitespace and indentation must match exactly; set replaceAll only when every exact occurrence should change.",
+      "Replace an exact string in a non-sensitive file inside the realization output directory. Read the file first. Whitespace and indentation must match exactly; set replaceAll only when every exact occurrence should change.",
     inputSchema: objectSchema(
       {
         path: pathProperty,

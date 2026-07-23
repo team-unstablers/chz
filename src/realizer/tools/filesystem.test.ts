@@ -48,14 +48,30 @@ afterEach(() => {
 });
 
 describe("ChzFilesystemToolRuntime path boundaries", () => {
-  it("rejects lexical escapes for both read and write tools", async () => {
+  it("rejects path traversal for every filesystem tool", async () => {
     const runtime = new ChzFilesystemToolRuntime(context());
 
     await expect(runtime.execute("ReadFile", { path: "../secret.txt" })).resolves.toBe(
       `Read access denied: ../secret.txt is outside the project root (${projectRoot}).`,
     );
-    await expect(runtime.execute("WriteFile", { path: "src/escape.ts", content: "x" })).resolves.toBe(
-      `Write access denied: src/escape.ts is outside the realization output directory (${outputDir}). Realized code and tests must be written there.`,
+    await expect(runtime.execute("ReadDir", { path: "../outside" })).resolves.toContain(
+      "Read access denied",
+    );
+    await expect(runtime.execute("Glob", { pattern: "**/*", path: "../outside" })).resolves.toContain(
+      "Read access denied",
+    );
+    await expect(runtime.execute("Grep", { pattern: "secret", path: "../secret.txt" })).resolves.toContain(
+      "Read access denied",
+    );
+    await expect(runtime.execute("WriteFile", { path: "../escape.ts", content: "x" })).resolves.toBe(
+      `Write access denied: ../escape.ts is outside the realization output directory (${outputDir}). Realized code and tests must be written there.`,
+    );
+    await expect(runtime.execute("FindAndReplace", {
+      path: "../escape.ts",
+      oldString: "x",
+      newString: "y",
+    })).resolves.toContain(
+      "Write access denied",
     );
   });
 
@@ -70,9 +86,23 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
     expect(await runtime.execute("ReadFile", { path: "outside-link/secret.txt" })).toContain(
       "Read access denied",
     );
+    expect(await runtime.execute("ReadDir", { path: "outside-link" })).toContain(
+      "Read access denied",
+    );
+    expect(await runtime.execute("Glob", { pattern: "**/*", path: "outside-link" })).toContain(
+      "Read access denied",
+    );
+    expect(await runtime.execute("Grep", { pattern: "secret", path: "outside-link" })).toContain(
+      "Read access denied",
+    );
     expect(await runtime.execute("WriteFile", {
       path: "chz/realization/example/write-link/created.ts",
       content: "unsafe",
+    })).toContain("Write access denied");
+    expect(await runtime.execute("FindAndReplace", {
+      path: "chz/realization/example/write-link/secret.txt",
+      oldString: "secret",
+      newString: "unsafe",
     })).toContain("Write access denied");
     expect(await runtime.execute("ReadDir", { path: "." })).not.toContain("outside-link");
     expect(existsSync(join(outside, "created.ts"))).toBe(false);
@@ -80,7 +110,9 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
 
   it("applies the blocked-path list to direct reads and directory listings", async () => {
     writeFileSync(join(projectRoot, ".env"), "TOKEN=secret");
+    writeFileSync(join(projectRoot, ".envrc"), "TOKEN=secret");
     writeFileSync(join(projectRoot, ".env.example"), "TOKEN=replace-me");
+    writeFileSync(join(projectRoot, "chz.config.js"), "export default { apiKey: 'secret' };");
     writeFileSync(join(projectRoot, "public.txt"), "not secret");
     symlinkSync(join(projectRoot, "public.txt"), join(projectRoot, ".env.local"));
     writeFileSync(join(projectRoot, "server.pem"), "secret");
@@ -88,8 +120,12 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
     writeFileSync(join(projectRoot, ".git", "config"), "secret");
     const runtime = new ChzFilesystemToolRuntime(context());
 
-    expect(await runtime.execute("ReadFile", { path: ".env" })).toBe(
-      "Read access denied: .env matches the blocked-path list (.env, keys, .git).",
+    expect(await runtime.execute("ReadFile", { path: ".env" })).toContain("matches the blocked-path list");
+    expect(await runtime.execute("ReadFile", { path: ".envrc" })).toContain(
+      "matches the blocked-path list",
+    );
+    expect(await runtime.execute("ReadFile", { path: "chz.config.js" })).toContain(
+      "matches the blocked-path list",
     );
     expect(await runtime.execute("ReadFile", { path: ".git/config" })).toContain(
       "matches the blocked-path list",
@@ -103,9 +139,13 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
     expect(await runtime.execute("ReadFile", { path: ".env.example" })).toContain("TOKEN=replace-me");
     const listing = await runtime.execute("ReadDir", { path: "." });
     expect(listing).not.toContain(".env\n");
+    expect(listing).not.toContain(".envrc");
     expect(listing).not.toContain(".git/");
+    expect(listing).not.toContain("chz.config.js");
     expect(listing).not.toContain("server.pem");
     expect(listing).toContain(".env.example");
+
+    expect(await runtime.execute("ReadFile", { path: "config.js" })).not.toContain("chz.config.js");
   });
 });
 
@@ -157,7 +197,9 @@ describe("Glob and Grep", () => {
     writeFileSync(join(projectRoot, "src", "b.ts"), "export const needle = 3;\n");
     writeFileSync(join(projectRoot, "src", "ignored.js"), "const needle = 4;\n");
     writeFileSync(join(projectRoot, ".env"), "needle=secret\n");
+    writeFileSync(join(projectRoot, ".envrc"), "needle=secret-envrc\n");
     writeFileSync(join(projectRoot, ".env.example"), "needle=example\n");
+    writeFileSync(join(projectRoot, "chz.config.js"), "const needle = 'secret-config';\n");
     const runtime = new ChzFilesystemToolRuntime(context());
 
     const glob = await runtime.execute("Glob", { pattern: "**/*.ts" });
@@ -169,6 +211,21 @@ describe("Glob and Grep", () => {
     expect(grep).toContain("src/b.ts:\n  Line 1: export const needle = 3;");
     expect(grep).not.toContain("ignored.js");
     expect(grep).not.toContain("secret");
+    const broadGrep = await runtime.execute("Grep", { pattern: "needle" });
+    expect(broadGrep).toContain("needle=example");
+    expect(broadGrep).not.toContain("secret-envrc");
+    expect(broadGrep).not.toContain("secret-config");
+    expect(await runtime.execute("Glob", { pattern: "**/chz.config.js" })).toBe("No files found");
+    expect(await runtime.execute("Grep", {
+      pattern: "needle",
+      include: "chz.config.js",
+    })).toBe("No matches found");
+    expect(await runtime.execute("Grep", { pattern: "needle", include: ".env*" })).toBe(
+      "No matches found",
+    );
+    expect(await runtime.execute("Grep", { pattern: "needle", path: "chz.config.js" })).toContain(
+      "Read access denied",
+    );
     expect(await runtime.execute("Grep", { pattern: "needle", path: ".env.example" })).toContain(
       "Line 1: needle=example",
     );
@@ -186,6 +243,35 @@ describe("Glob and Grep", () => {
 });
 
 describe("WriteFile and FindAndReplace", () => {
+  it("blocks sensitive output paths while allowing .env.example", async () => {
+    const runtime = new ChzFilesystemToolRuntime(context());
+    const config = "chz/realization/example/chz.config.js";
+    const environment = "chz/realization/example/.env.local";
+    const example = "chz/realization/example/.env.example";
+
+    expect(await runtime.execute("WriteFile", { path: config, content: "secret" })).toContain(
+      "Write access denied",
+    );
+    expect(await runtime.execute("WriteFile", { path: environment, content: "secret" })).toContain(
+      "Write access denied",
+    );
+    expect(existsSync(join(outputDir, "chz.config.js"))).toBe(false);
+    expect(existsSync(join(outputDir, ".env.local"))).toBe(false);
+
+    writeFileSync(join(outputDir, "chz.config.js"), "secret");
+    expect(await runtime.execute("FindAndReplace", {
+      path: config,
+      oldString: "secret",
+      newString: "changed",
+    })).toContain("Write access denied");
+    expect(readFileSync(join(outputDir, "chz.config.js"), "utf8")).toBe("secret");
+
+    expect(await runtime.execute("WriteFile", { path: example, content: "TOKEN=\n" })).toBe(
+      `Created file successfully: ${example}`,
+    );
+    expect(await runtime.execute("ReadFile", { path: example })).toContain("TOKEN=");
+  });
+
   it("enforces read-before-overwrite, stale hashes, and refreshes the hash after writes", async () => {
     const file = join(outputDir, "implementation.ts");
     const displayPath = "chz/realization/example/implementation.ts";

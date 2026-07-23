@@ -21,6 +21,15 @@ const MAX_LINES = 2_000;
 const MAX_BYTES = 50 * 1_024;
 const MAX_LINE_CHARS = 2_000;
 const DEFAULT_SEARCH_LIMIT = 100;
+const BLOCKED_PATH_DESCRIPTION = ".env files (except .env.example), chz.config.js, keys, .git";
+const RIPGREP_BLOCKED_PATH_ARGS = [
+  "--iglob=!**/.git/**",
+  "--iglob=!**/.env*",
+  "--iglob=!**/chz.config.js",
+  "--iglob=!**/*.pem",
+  "--iglob=!**/*.key",
+  "--iglob=!**/id_rsa*",
+] as const;
 const BINARY_EXTENSIONS = new Set([
   ".7z",
   ".a",
@@ -401,7 +410,7 @@ export class ChzFilesystemToolRuntime {
     );
     if (this.#isBlockedPath(policyLexical) || this.#isBlockedPath(canonical)) {
       throw new Error(
-        `Read access denied: ${displayPath} matches the blocked-path list (.env, keys, .git).`,
+        `Read access denied: ${displayPath} matches the blocked-path list (${BLOCKED_PATH_DESCRIPTION}).`,
       );
     }
     return canonical;
@@ -415,6 +424,15 @@ export class ChzFilesystemToolRuntime {
         `Write access denied: ${displayPath} is outside the realization output directory (${this.#context.outputDir}). Realized code and tests must be written there.`,
       );
     }
+    const policyLexical = resolve(
+      this.#projectRoot,
+      relative(resolve(this.#context.projectRoot), lexical),
+    );
+    if (this.#isBlockedPath(policyLexical) || this.#isBlockedPath(canonical)) {
+      throw new Error(
+        `Write access denied: ${displayPath} matches the blocked-path list (${BLOCKED_PATH_DESCRIPTION}).`,
+      );
+    }
     return canonical;
   }
 
@@ -425,8 +443,9 @@ export class ChzFilesystemToolRuntime {
     return components.some((component) => {
       const lower = component.toLowerCase();
       if (lower === ".git") return true;
+      if (lower === "chz.config.js") return true;
       if (lower === ".env.example") return false;
-      if (lower === ".env" || lower.startsWith(".env.")) return true;
+      if (lower.startsWith(".env")) return true;
       if (lower.endsWith(".pem") || lower.endsWith(".key")) return true;
       return lower.startsWith("id_rsa");
     });
@@ -494,15 +513,22 @@ export class ChzFilesystemToolRuntime {
 
     const needle = basename(lexical).toLowerCase();
     const candidates = readdirSync(parent)
-      .filter((entry) => {
+      .flatMap((entry): string[] => {
         const lower = entry.toLowerCase();
-        return lower.includes(needle) || needle.includes(lower);
-      })
-      .slice(0, 3)
-      .map((entry) => {
+        if (!lower.includes(needle) && !needle.includes(lower)) return [];
         const candidate = resolve(parent, entry);
-        return toPosix(relative(resolve(this.#context.projectRoot), candidate));
-      });
+        try {
+          const canonical = realpathSync.native(candidate);
+          if (!contains(this.#projectRoot, canonical) || this.#isBlockedPath(candidate) ||
+              this.#isBlockedPath(canonical)) {
+            return [];
+          }
+          return [toPosix(relative(resolve(this.#context.projectRoot), candidate))];
+        } catch {
+          return [];
+        }
+      })
+      .slice(0, 3);
     return candidates.length === 0
       ? `File not found: ${displayPath}`
       : `File not found: ${displayPath}\n\nDid you mean one of these?\n${candidates.join("\n")}`;
@@ -554,7 +580,13 @@ export class ChzFilesystemToolRuntime {
     if (!statSync(start).isDirectory()) throw new Error(`Glob path must be a directory: ${startDisplay}`);
 
     const startRelative = relative(this.#projectRoot, start) || ".";
-    const args = ["--files", "--no-config", "--glob=!**/.git/**", `--glob=${pattern}`, startRelative];
+    const args = [
+      "--files",
+      "--no-config",
+      `--glob=${pattern}`,
+      ...RIPGREP_BLOCKED_PATH_ARGS,
+      startRelative,
+    ];
     const { stdout } = await this.#runRipgrep(args);
     const files = stdout.split(/\r?\n/).filter(Boolean).flatMap((entry): string[] => {
       const absolute = resolve(this.#projectRoot, entry);
@@ -595,14 +627,9 @@ export class ChzFilesystemToolRuntime {
       "--line-number",
       "--no-config",
       "--hidden",
-      "--glob=!**/.git/**",
-      "--glob=!**/.env",
-      "--glob=!**/.env.*",
-      "--glob=!**/*.pem",
-      "--glob=!**/*.key",
-      "--glob=!**/id_rsa*",
     ];
     if (include !== undefined) args.push(`--glob=${include}`);
+    args.push(...RIPGREP_BLOCKED_PATH_ARGS);
     args.push("--", pattern, startRelative);
 
     let stdout: string;

@@ -168,11 +168,12 @@ V1/V2 구현을 정독하고 얻었으며, '하지 말아야 할 것'은 실제 
 
 - **읽기 계열**(`ReadFile`/`ReadDir`/`Glob`/`Grep`)의 허용 루트는
   `projectRoot`입니다. 추가로 **차단 목록(blocklist)**이 적용됩니다 — 기본값:
-  `.env`, `.env.*`(단, `.env.example`은 허용), `.git/` 이하 전체,
-  `*.pem`, `*.key`, `id_rsa*`. 차단 목록은 프로젝트 설정으로 확장할 수
-  있습니다. **차단 목록은 검색 결과에도 적용됩니다** — `Grep`이 `.env`의
-  내용을 매치로 돌려주는 일은 없습니다.
+  `.env*`(단, `.env.example`은 허용), `chz.config.js`, `.git/` 이하
+  전체, `*.pem`, `*.key`, `id_rsa*`. **차단 목록은 검색 입력과 결과 모두에
+  적용됩니다** — `Glob`이 차단된 파일명을 반환하거나 `Grep`이 그 내용을
+  읽어 매치로 돌려주는 일은 없습니다.
 - **쓰기 계열**(`WriteFile`/`FindAndReplace`)의 허용 루트는 `outputDir`입니다.
+  읽기 계열과 동일한 차단 목록도 적용됩니다.
 
 opencode는 루트 밖 접근을 "사용자에게 물어봄(external_directory 승인)"으로
 처리하지만, 치즈의 realize 세션은 비대화형이 기본이므로 승인 플로우를 두지
@@ -181,7 +182,8 @@ opencode는 루트 밖 접근을 "사용자에게 물어봄(external_directory �
 | 상황 | 에러 문구 |
 |------|-----------|
 | 읽기 루트 밖 | `Read access denied: {path} is outside the project root ({projectRoot}).` |
-| 차단 목록 매치 | `Read access denied: {path} matches the blocked-path list (.env, keys, .git).` |
+| 읽기 차단 목록 매치 | `Read access denied: {path} matches the blocked-path list (.env files (except .env.example), chz.config.js, keys, .git).` |
+| 쓰기 차단 목록 매치 | `Write access denied: {path} matches the blocked-path list (.env files (except .env.example), chz.config.js, keys, .git).` |
 | 쓰기 루트 밖 | `Write access denied: {path} is outside the realization output directory ({outputDir}). Realized code and tests must be written there.` |
 
 ### 읽은 파일 추적 — read-before-write는 코드로 강제됩니다
