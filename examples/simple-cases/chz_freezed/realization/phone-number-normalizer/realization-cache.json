@@ -1,0 +1,22 @@
+{
+  "chzVersion": "0.0.0",
+  "sourceFileName": "phone-number-normalizer.chz.ts",
+  "sourceHash": "9b136121af09ec93d757e86432142076a8e8599cb8ca3d70355858fea8e00271",
+  "contextsHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "humanCodeHash": "2fbe64075f5774f7d307bbf7af9c3fe7eb1a68f7b070a1d7ec7eeee511615f6f",
+  "testsSkipped": false,
+  "symbols": {
+    "phoneNumberNormalizer": {
+      "name": "phoneNumberNormalizer",
+      "specHash": "5aa93ed79af41f5e056ce4ceac8416225283e06c5fbc7c13695c9854413de061",
+      "publicSurfaceHash": "8b76bdfe04193a190f4dd0d7d4aedb6523b4312a69f1a7db7d3b21029aeafd28",
+      "implementationHash": "157e4e661859ae1dc3f8b4fe364ce299904c9d6de648dc20e982f0113930ef19",
+      "autogenTestHash": "54f5802ffcc7d793e871f4cae51a1f070c65d87993e89bdb5a6d66fed6a6a6c2",
+      "ensureTestHash": "6257ad098e6b4dc7687f54e838570bfff50cbf84b0cbfb092935e72192bfe925",
+      "dependencies": [],
+      "model": "x-ai/grok-4.5",
+      "realizedAt": "2026-07-23T21:50:04.364Z",
+      "testsPassed": true
+    }
+  }
+}

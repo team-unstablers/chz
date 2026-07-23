@@ -1,0 +1,22 @@
+{
+  "chzVersion": "0.0.0",
+  "sourceFileName": "gomoku.chz.ts",
+  "sourceHash": "0072d72f18705f2f8811be7aeaf7f380b12f41453f1eae606a519811171afc8d",
+  "contextsHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "humanCodeHash": "9be33557b53e9d9df6f09ed4dd6f6bef59a79a68e98ba1cd71c5ec9c020c3f9a",
+  "testsSkipped": false,
+  "symbols": {
+    "GomokuGame": {
+      "name": "GomokuGame",
+      "specHash": "977677baf04fd649586c10eb9d61da010824d153686f88bd818233265c5acfd8",
+      "publicSurfaceHash": "3bc1a932ee805e7ea2e090624e668c8d88299af8eaa920531f8502dcabc4e562",
+      "implementationHash": "52b2649181f2de86a580c82395216251bc05104ffda3c25bd4ec416f2bb44da0",
+      "autogenTestHash": "79beb5feb9d961675a442ec12494c212e30db6d485fca7364f1ae7d0c19b19fb",
+      "ensureTestHash": "276e6541e72d96b6d9aebfbcdbbeec61903c175bc6295ca708b271425b5c443b",
+      "dependencies": [],
+      "model": "google/gemini-3.6-flash",
+      "realizedAt": "2026-07-23T21:54:26.709Z",
+      "testsPassed": true
+    }
+  }
+}

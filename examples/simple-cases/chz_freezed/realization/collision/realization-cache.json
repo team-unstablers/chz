@@ -1,0 +1,22 @@
+{
+  "chzVersion": "0.0.0",
+  "sourceFileName": "collision.chz.ts",
+  "sourceHash": "773bb1d1b0a8fe2f8da7689a04c91bae27a8e5b43d82f2fe66cb1d28585b4c64",
+  "contextsHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "humanCodeHash": "cb010fdf6d1459763fcb799896a2c7efb008a38093be75423ed5d4f02db295b3",
+  "testsSkipped": false,
+  "symbols": {
+    "충돌판정_2D": {
+      "name": "충돌판정_2D",
+      "specHash": "011866765259dadbf867d7370393b43d3735f287924101300714e96ad506027e",
+      "publicSurfaceHash": "9a7b76d657e494debac5d59c947fba22af722e3d7f870d112fd2e5db98fd56a6",
+      "implementationHash": "897f82353c27d076bbb893a58c9863cd63d93e3bee76ead2e0df8f27bbb3d978",
+      "autogenTestHash": "9df1a9a0443b120e90985d1953a485a76954f6e403697cb8e1fdb0700a48490c",
+      "ensureTestHash": "0b900ac75dd8f4dd19f22fb108760a2bb2723e7016f442531749aca2beee99f8",
+      "dependencies": [],
+      "model": "openai/gpt-5.6-luna",
+      "realizedAt": "2026-07-23T21:44:22.598Z",
+      "testsPassed": true
+    }
+  }
+}

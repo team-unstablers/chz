@@ -17,6 +17,12 @@ imagine class GomokuGame {
           double-three or double-four.
         - The game is a draw if the board fills without a winner.
 
+        - The CPU should be a challenging tactical opponent rather than choosing
+          arbitrary or mostly random moves. It must actively disrupt the human's
+          developing lines, while still taking opportunities to build its own
+          forcing attacks. It does not need to perform an exhaustive search or be
+          unbeatable.
+
         - On the human's turn, use the ←↓↑→ keys to move a cursor within the board,
           and Enter to place a black stone on an empty cell. A stone cannot be placed
           on an occupied cell or outside the board.
@@ -117,9 +123,24 @@ imagine class GomokuGame {
             Select a cell for the CPU without modifying the current board. Return null
             if a winner already exists or there are no empty cells.
 
-            If white can win in one move, prioritize one such empty cell. Otherwise,
-            if black can win on its next move, block one of those winning cells.
-            If neither case applies, select any empty cell within the board.
+            Choose moves according to the following tactical priorities:
+
+            1. If white can win immediately, play a winning move.
+            2. Otherwise, if black can win on its next move, block a winning cell.
+            3. Prefer a move that creates a white fork: two or more distinct cells
+               where white could win on its following turn.
+            4. Prevent black from creating the same kind of fork on its next move.
+            5. Evaluate developing lines in all four directions. Actively block
+               black's open or half-open four-stone lines and open three-stone
+               lines, then prefer moves that extend white's own open lines.
+
+            For non-forced positions, use a positional score that considers contiguous
+            stones, open ends, intersections that contribute to multiple lines, and
+            distance from the center. Defensive scores for black threats must be at
+            least as important as offensive scores for equivalent white patterns.
+            Prefer cells near existing stones over isolated cells. Use a stable
+            tie-break such as distance from the center followed by row and column;
+            do not fall back to an arbitrary or random empty cell.
         `);
 
         ensure("A regular CPU move is an empty in-bounds cell and does not change the board.", () => {
@@ -154,6 +175,45 @@ imagine class GomokuGame {
             const move = game.chooseCpuMove();
             assert(move?.row === 8 && move.column === 7);
             assert(game.stoneAt(8, 7) === null);
+        });
+
+        ensure("The CPU proactively interrupts an open three before it becomes an immediate win.", () => {
+            const game = new GomokuGame();
+            for (let column = 6; column <= 8; column += 1) {
+                assert(game.placeStone(7, column, "black"));
+            }
+
+            const move = game.chooseCpuMove();
+            const blocksLeftEnd = move?.row === 7 && move.column === 5;
+            const blocksRightEnd = move?.row === 7 && move.column === 9;
+
+            assert(blocksLeftEnd || blocksRightEnd);
+        });
+
+        ensure("The CPU prevents a move that would create intersecting open-three threats.", () => {
+            const game = new GomokuGame();
+            assert(game.placeStone(7, 5, "black"));
+            assert(game.placeStone(7, 6, "black"));
+            assert(game.placeStone(5, 7, "black"));
+            assert(game.placeStone(6, 7, "black"));
+
+            const move = game.chooseCpuMove();
+
+            assert(move?.row === 7 && move.column === 7);
+            assert(game.stoneAt(7, 7) === null);
+        });
+
+        ensure("With no urgent defense, the CPU extends its own open three.", () => {
+            const game = new GomokuGame();
+            for (let column = 6; column <= 8; column += 1) {
+                assert(game.placeStone(6, column, "white"));
+            }
+
+            const move = game.chooseCpuMove();
+            const extendsLeftEnd = move?.row === 6 && move.column === 5;
+            const extendsRightEnd = move?.row === 6 && move.column === 9;
+
+            assert(extendsLeftEnd || extendsRightEnd);
         });
     }
 
