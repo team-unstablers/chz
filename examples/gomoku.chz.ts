@@ -17,9 +17,6 @@ imagine class GomokuGame {
 
         - 사람의 턴에는 ←↓↑→ 키로 보드 안의 커서를 이동하고, 엔터 키로 빈 칸에
           흑돌을 놓습니다. 이미 돌이 있거나 보드 밖인 위치에는 둘 수 없습니다.
-        - CPU는 즉시 이길 수 있으면 그 수를 선택하고, 그렇지 않으면 사람의 다음 수
-          승리를 막습니다. 그 밖의 상황에서는 빈 칸 중 아무 곳이나 선택해도 되며,
-          두 수 이상을 내다보는 탐색은 요구하지 않습니다.
         - 매 수 이후 보드와 현재 상태를 출력하고, 승리 또는 무승부가 확정되면 결과를
           출력한 뒤 입력 처리를 종료합니다.
 
@@ -171,5 +168,7 @@ imagine class GomokuGame {
     }
 }
 
-const game = new GomokuGame();
-await game.start();
+(async () => {
+    const game = new GomokuGame();
+    await game.start();
+})();
