@@ -1,0 +1,96 @@
+import { existsSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, parse, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+import type {
+  ChzImagineSymbol,
+  ChzProjectConfig,
+  ChzRealizer,
+} from "./types.ts";
+
+export const CHZ_CONFIG_FILE = "chz.config.js";
+
+/** Identity helper that gives JavaScript/TypeScript configs an explicit API. */
+export function defineConfig(config: ChzProjectConfig): ChzProjectConfig {
+  return config;
+}
+
+export interface LoadedChzConfig {
+  path: string;
+  projectRoot: string;
+  config: ChzProjectConfig;
+}
+
+/** Search from a source directory upward, stopping at the filesystem root. */
+export function findChzConfig(from: string): string | null {
+  let directory = resolve(from);
+  if (existsSync(directory) && !statSync(directory).isDirectory()) directory = dirname(directory);
+
+  const root = parse(directory).root;
+  for (;;) {
+    const candidate = join(directory, CHZ_CONFIG_FILE);
+    if (existsSync(candidate)) return candidate;
+    if (directory === root) return null;
+    directory = dirname(directory);
+  }
+}
+
+/** Load and structurally validate the ESM default export of chz.config.js. */
+export async function loadChzConfig(path: string): Promise<LoadedChzConfig> {
+  const absolute = isAbsolute(path) ? path : resolve(path);
+  const url = pathToFileURL(absolute);
+  // The mtime query avoids stale config modules in long-lived API consumers.
+  url.searchParams.set("mtime", String(statSync(absolute).mtimeMs));
+  const module = (await import(url.href)) as { default?: unknown };
+  const value = module.default;
+  if (!isRecord(value)) {
+    throw new Error(`${absolute}: default export must be a chz configuration object.`);
+  }
+  if (!Array.isArray(value.realizers) || value.realizers.length === 0) {
+    throw new Error(`${absolute}: 'realizers' must be a non-empty array.`);
+  }
+  for (const [index, realizer] of value.realizers.entries()) {
+    if (!isRealizer(realizer)) {
+      throw new Error(
+        `${absolute}: realizers[${index}] must provide name, supportedSymbolTypes, and realize(symbol, context).`,
+      );
+    }
+  }
+  if (value.maxTurns !== undefined && (!Number.isInteger(value.maxTurns) || (value.maxTurns as number) < 1)) {
+    throw new Error(`${absolute}: maxTurns must be an integer greater than zero.`);
+  }
+  if (value.maxRetries !== undefined && (!Number.isInteger(value.maxRetries) || (value.maxRetries as number) < 0)) {
+    throw new Error(`${absolute}: maxRetries must be a non-negative integer.`);
+  }
+  if (value.profile !== undefined && typeof value.profile !== "string") {
+    throw new Error(`${absolute}: profile must be a string.`);
+  }
+
+  return {
+    path: absolute,
+    projectRoot: dirname(absolute),
+    config: value as unknown as ChzProjectConfig,
+  };
+}
+
+/** First matching Realizer wins, as specified by docs/61. */
+export function selectRealizer(
+  realizers: readonly ChzRealizer[],
+  symbol: ChzImagineSymbol,
+): ChzRealizer | null {
+  return realizers.find((realizer) => realizer.supportedSymbolTypes.includes(symbol.type)) ?? null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isRealizer(value: unknown): value is ChzRealizer {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.name === "string" &&
+    Array.isArray(value.supportedSymbolTypes) &&
+    value.supportedSymbolTypes.every((item) => typeof item === "string") &&
+    typeof value.realize === "function"
+  );
+}

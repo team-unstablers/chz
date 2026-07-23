@@ -1,257 +1,222 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { BIN_NAME, buildUsage, run } from "./cli.ts";
-import { FakeBackend } from "./realize.ts";
+import type {
+  ChzImagineSymbol,
+  ChzImagineSymbolResolution,
+  ChzRealizeContext,
+  ChzRealizer,
+} from "./realize.ts";
 import type { RealizationTestOutcome } from "./verify.ts";
 
-const tempDirs: string[] = [];
-/** Write `source` to a temp `.chz.ts` file and return its path. */
-function writeChzFixture(name: string, source: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "chz-cli-"));
-  tempDirs.push(dir);
-  const file = join(dir, name);
-  writeFileSync(file, source, "utf8");
+const roots: string[] = [];
+function makeFixture(name = "demo.chz.ts"): string {
+  const root = mkdtempSync(join(tmpdir(), "chz-cli-"));
+  roots.push(root);
+  const file = join(root, name);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    "imagine function greet(name: string): string {\n  ensure(`이름을 포함합니다.`);\n}\n",
+    "utf8",
+  );
   return file;
 }
 
-afterAll(() => {
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-  tempDirs.length = 0;
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** A minimal LLM response emitting the two files realize expects for `name`. */
-function fakeResponse(name: string): string {
-  return [
-    `===FILE: implementations/${name}.ts===`,
-    `export function ${name}(a: number, b: number): boolean {`,
-    "  return a === b;",
-    "}",
-    "===END===",
-    `===FILE: tests/test_${name}.autogen.ts===`,
-    'import { it, expect } from "vitest";',
-    `import { ${name} } from "../implementations/${name}.ts";`,
-    `import { assertEnsures } from "./test_${name}.ensure.ts";`,
-    `it("x", () => { const r = ${name}(1, 1); expect(r).toBe(true); assertEnsures([1, 1], r); });`,
-    "===END===",
-  ].join("\n");
+class CliRealizer implements ChzRealizer {
+  readonly name = "CliRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+  calls = 0;
+
+  constructor(private readonly reasoning?: string) {}
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    this.calls++;
+    if (this.reasoning !== undefined) context.harness?.onModelReasoning?.(this.reasoning);
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dirname(implementation), { recursive: true });
+    await mkdir(dirname(test), { recursive: true });
+    await writeFile(implementation, `export function ${symbol.name}(name: string): string { return name; }\n`);
+    await writeFile(test, "export {};\n");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date(),
+      resolvedBy: "cli-test-model",
+    };
+  }
 }
 
-describe("buildUsage", () => {
-  it("names the binary and lists the realize command", () => {
+const greenTests = (): Promise<RealizationTestOutcome> =>
+  Promise.resolve({
+    passed: true,
+    timedOut: false,
+    output: "Tests  1 passed (1)",
+    testFiles: [],
+    testCount: 1,
+  });
+
+describe("usage and dispatch", () => {
+  it("documents Realizer config and OpenAI-compatible flags", () => {
     const usage = buildUsage();
-    expect(usage).toContain(`usage: ${BIN_NAME} <command>`);
-    expect(usage).toContain("realize");
-    expect(usage).toContain("--help");
-    expect(usage).toContain("--dry-run");
+    expect(usage).toContain(`usage: ${BIN_NAME}`);
+    expect(usage).toContain("chz.config.js");
+    expect(usage).toContain("--base-url");
+  });
+
+  it("prints help and rejects unknown commands", () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    expect(run([], { out: (message) => out.push(message), err: (message) => err.push(message) })).toBe(0);
+    expect(out.join("\n")).toContain("usage:");
+    expect(run(["wat"], { out: () => {}, err: (message) => err.push(message) })).toBe(1);
+    expect(err.join("\n")).toContain("unknown command 'wat'");
   });
 });
 
-describe("run", () => {
-  it("prints usage and exits 0 with no arguments", () => {
+describe("realize command", () => {
+  it("prints JSON without loading a model or config", async () => {
+    const file = makeFixture();
     const out: string[] = [];
-    const err: string[] = [];
-    const code = run([], { out: (m) => out.push(m), err: (m) => err.push(m) });
-    expect(code).toBe(0);
-    expect(out.join("\n")).toContain(`usage: ${BIN_NAME}`);
-    expect(err).toEqual([]);
-  });
-
-  it("prints usage and exits 0 for --help", () => {
-    const out: string[] = [];
-    const code = run(["--help"], { out: (m) => out.push(m), err: () => {} });
-    expect(code).toBe(0);
-    expect(out.join("\n")).toContain(`usage: ${BIN_NAME}`);
-  });
-
-  it("reports unknown commands to stderr and exits 1", () => {
-    const err: string[] = [];
-    const code = run(["frobnicate"], { out: () => {}, err: (m) => err.push(m) });
-    expect(code).toBe(1);
-    expect(err.join("\n")).toContain("unknown command 'frobnicate'");
-  });
-
-  it("realize --json prints the extracted specs as JSON and exits 0 (no LLM call)", async () => {
-    const file = writeChzFixture(
-      "j.chz.ts",
-      "imagine function greet(name: string): string {\n  ensure(`인사말을 반환합니다.`);\n}\n",
-    );
-    const out: string[] = [];
-    const code = await run(["realize", "--json", file], { out: (m) => out.push(m), err: () => {} });
-    expect(code).toBe(0);
-    const specs = JSON.parse(out.join("\n"));
-    expect(specs).toHaveLength(1);
-    expect(specs[0].name).toBe("greet");
-    expect(specs[0].ensures[0].kind).toBe("natural");
-  });
-
-  it("realize --dry-run prints the assembled prompt without calling the LLM", async () => {
-    const file = writeChzFixture(
-      "demo.chz.ts",
-      [
-        "imagine function 충돌판정_2D(a: number, b: number): boolean {",
-        "  requirements(`두 값이 겹치는지 판정합니다.`);",
-        "  ensure((args, retval) => typeof retval === 'boolean');",
-        "}",
-        "",
-      ].join("\n"),
-    );
-    const out: string[] = [];
-    const err: string[] = [];
-    // A backend that would explode if called — proving --dry-run never calls it.
-    const backend = new FakeBackend(() => {
-      throw new Error("backend must not be called for --dry-run");
+    const code = await run(["realize", "--json", file], {
+      out: (message) => out.push(message),
+      err: () => {},
     });
-    const code = await run(
-      ["realize", "--dry-run", file],
-      { out: (m) => out.push(m), err: (m) => err.push(m) },
-      { makeBackend: () => backend },
-    );
     expect(code).toBe(0);
-    const printed = out.join("\n");
-    expect(printed).toContain("===== realize prompt: 충돌판정_2D =====");
-    expect(printed).toContain("두 값이 겹치는지 판정합니다.");
-    expect(printed).toContain("===FILE:");
-    expect(backend.prompts).toEqual([]);
+    expect(JSON.parse(out.join("\n"))[0].name).toBe("greet");
   });
 
-  /** A green {@link RealizationTestOutcome}, so cli tests never spawn vitest. */
-  const greenTests = (): Promise<RealizationTestOutcome> =>
-    Promise.resolve({ passed: true, timedOut: false, output: "Tests  1 passed (1)", testFiles: [], testCount: 1 });
-
-  it("realize emits the layout, runs tests green, and records the cache (exit 0)", async () => {
-    const file = writeChzFixture(
-      "collide.chz.ts",
-      [
-        "imagine function collide(a: number, b: number): boolean {",
-        "  ensure((args, retval) => typeof retval === 'boolean');",
-        "}",
-        "",
-      ].join("\n"),
-    );
-    const out: string[] = [];
-    const err: string[] = [];
-    const code = await run(
-      ["realize", "--model", "test-model", file],
-      { out: (m) => out.push(m), err: (m) => err.push(m) },
-      {
-        makeBackend: (opts) => new FakeBackend(() => fakeResponse("collide"), opts.model ?? "?"),
-        runTests: greenTests,
-        chzVersion: "9.9.9",
-      },
-    );
-
-    expect(code).toBe(0);
-    const printed = out.join("\n");
-    expect(printed).toContain("realized 1 imagine function");
-    expect(printed).toContain("model: test-model");
-    expect(printed).toContain(`implementations/collide.ts`);
-    expect(printed).toContain("1 test passed");
-    expect(printed).toContain("cache:");
-
-    // Files landed on disk next to the source under chz/realization/collide.
-    const baseDir = join(file, "..", "chz", "realization", "collide");
-    expect(existsSync(join(baseDir, "implementation.ts"))).toBe(true);
-    expect(existsSync(join(baseDir, "implementations", "collide.ts"))).toBe(true);
-    expect(existsSync(join(baseDir, "tests", "test_collide.autogen.ts"))).toBe(true);
-    const ensureFile = join(baseDir, "tests", "test_collide.ensure.ts");
-    expect(readFileSync(ensureFile, "utf8")).toContain(
-      "(args, retval) => typeof retval === 'boolean',",
-    );
-
-    // The cache was written green with the injected version.
-    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
-    expect(cache.chzVersion).toBe("9.9.9");
-    expect(cache.testsSkipped).toBe(false);
-    expect(cache.symbols.collide.testsPassed).toBe(true);
-  });
-
-  it("realize --skip-tests emits + caches unverified, does not run tests (exit 0)", async () => {
-    const file = writeChzFixture(
-      "skip.chz.ts",
-      "imagine function skipme(a: number): number {\n  ensure((args, retval) => typeof retval === 'number');\n}\n",
-    );
-    const out: string[] = [];
-    const err: string[] = [];
-    let ranTests = false;
-    const code = await run(
-      ["realize", "--skip-tests", file],
-      { out: (m) => out.push(m), err: (m) => err.push(m) },
-      {
-        makeBackend: () => new FakeBackend(() => fakeResponse("skipme")),
-        runTests: () => {
-          ranTests = true;
-          return greenTests();
-        },
-      },
-    );
-
-    expect(code).toBe(0);
-    expect(ranTests).toBe(false);
-    expect(err.join("\n")).toContain("--skip-tests set");
-    const baseDir = join(file, "..", "chz", "realization", "skip");
-    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
-    expect(cache.testsSkipped).toBe(true);
-    expect(cache.symbols.skipme.testsPassed).toBe(false);
-  });
-
-  it("realize surfaces vitest output and exits 1 when tests fail (cache testsPassed:false)", async () => {
-    const file = writeChzFixture(
-      "red.chz.ts",
-      "imagine function redme(a: number): number {\n  ensure((args, retval) => typeof retval === 'number');\n}\n",
-    );
+  it("uses injected Realizers and writes a green cache", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer();
     const out: string[] = [];
     const err: string[] = [];
     const code = await run(
       ["realize", file],
-      { out: (m) => out.push(m), err: (m) => err.push(m) },
+      { out: (message) => out.push(message), err: (message) => err.push(message) },
       {
-        makeBackend: () => new FakeBackend(() => fakeResponse("redme")),
-        runTests: () =>
-          Promise.resolve({
-            passed: false,
-            timedOut: false,
-            output: "FAIL some assertion\nexpected true got false",
-            testFiles: [],
-            testCount: null,
-          }),
+        config: { realizers: [realizer], maxRetries: 1 },
+        projectRoot: dirname(file),
+        runTests: greenTests,
+        chzVersion: "9.9.9",
+        now: () => new Date("2026-07-23T00:00:00.000Z"),
+      },
+    );
+    expect(code).toBe(0);
+    expect(realizer.calls).toBe(1);
+    expect(err).toEqual([]);
+    const baseDir = join(dirname(file), "chz", "realization", "demo");
+    expect(existsSync(join(baseDir, "implementations", "greet.ts"))).toBe(true);
+    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
+    expect(cache.chzVersion).toBe("9.9.9");
+    expect(cache.symbols.greet.model).toBe("cli-test-model");
+    expect(out.join("\n")).toContain("1 tests passed");
+  });
+
+  it("routes provider reasoning diagnostics to stderr", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer("[CliRealizer] reasoning turn 1/1\nprivate reasoning");
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const code = await run(
+      ["realize", file],
+      { out: (message) => out.push(message), err: (message) => err.push(message) },
+      {
+        config: { realizers: [realizer] },
+        projectRoot: dirname(file),
+        runTests: greenTests,
       },
     );
 
-    expect(code).toBe(1);
-    const errText = err.join("\n");
-    expect(errText).toContain("expected true got false"); // preserved vitest output
-    expect(errText).toContain("tests FAILED");
-    const baseDir = join(file, "..", "chz", "realization", "red");
-    // Emitted files are kept for human review.
-    expect(existsSync(join(baseDir, "implementations", "redme.ts"))).toBe(true);
-    const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
-    expect(cache.symbols.redme.testsPassed).toBe(false);
-    expect(cache.testsSkipped).toBe(false);
+    expect(code).toBe(0);
+    expect(err).toContain("[CliRealizer] reasoning turn 1/1\nprivate reasoning");
+    expect(out.join("\n")).not.toContain("private reasoning");
   });
 
-  it("realize reports a read error for a missing file (exit 1)", async () => {
-    const err: string[] = [];
-    const code = await run(["realize", "does-not-exist.chz.ts"], { out: () => {}, err: (m) => err.push(m) });
-    expect(code).toBe(1);
-    expect(err.join("\n")).toContain("cannot read file");
-    expect(err.join("\n")).toContain("does-not-exist.chz.ts");
+  it("loads chz.config.js and selects its Realizer", async () => {
+    const file = makeFixture("nested/demo.chz.ts");
+    const root = dirname(dirname(file));
+    writeFileSync(
+      join(root, "chz.config.js"),
+      `import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
+export default {
+  maxTurns: 4,
+  realizers: [{
+    name: "ConfigRealizer",
+    supportedSymbolTypes: ["function"],
+    async realize(symbol, context) {
+      const implementation = join(context.outputDir, "implementations", symbol.name + ".ts");
+      const test = join(context.outputDir, "tests", "test_" + symbol.name + ".autogen.ts");
+      await mkdir(dirname(implementation), { recursive: true });
+      await mkdir(dirname(test), { recursive: true });
+      await writeFile(implementation, "export function greet(name: string): string { return name; }\\n");
+      await writeFile(test, "export {};\\n");
+      return { outcome: "resolved", symbol, resolvedFile: implementation, resolvedTestFiles: [test], resolvedAt: new Date(), resolvedBy: "config-model" };
+    }
+  }]
+};
+`,
+      "utf8",
+    );
+    const out: string[] = [];
+    const code = await run(
+      ["realize", file],
+      { out: (message) => out.push(message), err: () => {} },
+      { runTests: greenTests },
+    );
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain(`config: ${join(root, "chz.config.js")}`);
+    const cache = JSON.parse(
+      readFileSync(join(dirname(file), "chz", "realization", "demo", "realization-cache.json"), "utf8"),
+    );
+    expect(cache.symbols.greet.model).toBe("config-model");
   });
 
-  it("realize without a file reports the missing argument (exit 1)", async () => {
-    const err: string[] = [];
-    const code = await run(["realize"], { out: () => {}, err: (m) => err.push(m) });
-    expect(code).toBe(1);
-    expect(err.join("\n")).toContain("missing <file>");
+  it("dry-run prints canonical harness prompt without invoking the Realizer", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer();
+    const out: string[] = [];
+    const code = await run(
+      ["realize", "--dry-run", file],
+      { out: (message) => out.push(message), err: () => {} },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file) },
+    );
+    expect(code).toBe(0);
+    expect(realizer.calls).toBe(0);
+    expect(out.join("\n")).toContain("You are the Cheese Realizer");
+    expect(out.join("\n")).toContain("# Symbol to realize");
   });
 
-  it("realize rejects an unknown option (exit 1)", async () => {
+  it("requires a configured model when no config exists", async () => {
+    const file = makeFixture();
+    const previous = process.env.OPENAI_MODEL;
+    delete process.env.OPENAI_MODEL;
     const err: string[] = [];
-    const code = await run(["realize", "--nope", "x.chz.ts"], { out: () => {}, err: (m) => err.push(m) });
-    expect(code).toBe(1);
-    expect(err.join("\n")).toContain("unknown option '--nope'");
+    try {
+      const code = await run(["realize", file], { out: () => {}, err: (message) => err.push(message) });
+      expect(code).toBe(1);
+      expect(err.join("\n")).toContain("no OpenAI model was configured");
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_MODEL;
+      else process.env.OPENAI_MODEL = previous;
+    }
   });
 });

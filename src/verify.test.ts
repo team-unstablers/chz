@@ -5,7 +5,13 @@ import { basename, dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { extractImagineSpecs } from "./preprocessor.ts";
-import { FakeBackend, realize, writeRealization } from "./realize.ts";
+import {
+  realize,
+  type ChzImagineSymbol,
+  type ChzImagineSymbolResolution,
+  type ChzRealizeContext,
+  type ChzRealizer,
+} from "./realize.ts";
 import {
   buildRealizationCache,
   findRealizationTestFiles,
@@ -131,26 +137,43 @@ const SOURCE = [
 ].join("\n");
 const FILE = "collide.chz.ts";
 
-function fakeResponse(name: string): string {
-  return [
-    `===FILE: implementations/${name}.ts===`,
-    `export function ${name}(ax: number, ay: number, bx: number, by: number): boolean {`,
-    "  return ax === bx && ay === by;",
-    "}",
-    "===END===",
-    `===FILE: tests/test_${name}.autogen.ts===`,
-    'import { it, expect } from "vitest";',
-    `import { ${name} } from "../implementations/${name}.ts";`,
-    `import { assertEnsures } from "./test_${name}.ensure.ts";`,
-    `it("same", () => { const r = ${name}(1, 2, 1, 2); expect(r).toBe(true); assertEnsures([1, 2, 1, 2], r); });`,
-    "===END===",
-  ].join("\n");
+class FixtureRealizer implements ChzRealizer {
+  readonly name = "FixtureRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(
+      implementation,
+      `export function ${symbol.name}(ax: number, ay: number, bx: number, by: number): boolean { return ax === bx && ay === by; }\n`,
+      "utf8",
+    );
+    writeFileSync(test, 'import { it, expect } from "vitest";\nit("same", () => expect(true).toBe(true));\n', "utf8");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date("2026-07-23T12:34:56.000Z"),
+      resolvedBy: "fake-model",
+    };
+  }
 }
 
 async function realizeFixture(): Promise<Awaited<ReturnType<typeof realize>>> {
-  const backend = new FakeBackend(() => fakeResponse(NAME), "fake-model");
   const file = join(makeTempDir(), FILE);
-  return realize(SOURCE, file, { backend, now: () => new Date("2026-07-23T12:34:56.000Z") });
+  writeFileSync(file, SOURCE, "utf8");
+  return realize(SOURCE, file, {
+    realizers: [new FixtureRealizer()],
+    now: () => new Date("2026-07-23T12:34:56.000Z"),
+    skipVerification: true,
+  });
 }
 
 describe("buildRealizationCache", () => {
@@ -207,7 +230,6 @@ describe("buildRealizationCache", () => {
 describe("writeRealizationCache", () => {
   it("writes pretty-printed JSON to <baseDir>/realization-cache.json", async () => {
     const result = await realizeFixture();
-    writeRealization(result); // create the base dir + emitted files
     const path = writeRealizationCache({
       result,
       source: SOURCE,

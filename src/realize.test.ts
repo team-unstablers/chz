@@ -1,291 +1,325 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { extractImagineSpecs } from "./preprocessor.ts";
 import {
-  buildRealizePrompt,
-  FakeBackend,
-  parseRealizeResponse,
+  CHZ_HARNESS_TOOLS,
+  CHZ_REALIZER_SYSTEM,
+  ChzRealizerBase,
+  buildEstimatedRealizeOrder,
+  buildSessionBaseline,
+  imagineSpecToSymbol,
   realize,
-  RealizeResponseError,
   renderEnsureHarness,
-  writeRealization,
+  renderEntryPoint,
+  type ChzChatMessage,
+  type ChzChatResponse,
+  type ChzImagineSymbol,
+  type ChzImagineSymbolResolution,
+  type ChzRealizeContext,
+  type ChzRealizer,
+  type ChzToolDefinition,
 } from "./realize.ts";
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-const NAME = "충돌판정_2D";
-const SOURCE = [
-  "const EPS = 0.0001;",
-  `imagine function ${NAME}(ax: number, ay: number, bx: number, by: number): boolean {`,
-  "  requirements(`두 점이 같은 위치인지 판정합니다.`);",
-  "  ensure((args, retval) => typeof retval === 'boolean');",
-  "  ensure(`같은 좌표가 주어지면 반드시 true 를 반환해야 합니다.`);",
-  "}",
-  "",
-].join("\n");
-const FILE = "collide.chz.ts";
-
-/** A well-formed LLM response emitting the two expected files for `NAME`. */
-function fakeResponse(name: string): string {
-  return [
-    "Sure! Here is the realization (this preamble is outside the markers).",
-    `===FILE: implementations/${name}.ts===`,
-    "/**",
-    " * 두 점이 같은지 판정합니다.",
-    " *",
-    " * [요구사항 해석]",
-    " * - 좌표가 모두 일치하면 같은 위치로 봅니다.",
-    " *",
-    " * [계약 대응]",
-    " * - ensure: 반환값은 boolean 입니다.",
-    " */",
-    `export function ${name}(ax: number, ay: number, bx: number, by: number): boolean {`,
-    "  // ASSUMPTION: 부동소수 오차는 무시하고 정확히 비교합니다.",
-    "  return ax === bx && ay === by;",
+const roots: string[] = [];
+function fixture(): { root: string; sourceFile: string; outputDir: string; source: string } {
+  const root = mkdtempSync(join(tmpdir(), "chz-realizer-base-"));
+  roots.push(root);
+  const sourceFile = join(root, "sample.chz.ts");
+  const outputDir = join(root, "chz", "realization", "sample");
+  const source = [
+    "imagine function greet(name: string): string {",
+    "  requirements(`인사말을 만듭니다.`);",
+    "  ensure((args, retval) => typeof retval === 'string');",
+    "  ensure(`이름을 포함해야 합니다.`);",
     "}",
-    "===END===",
-    `===FILE: tests/test_${name}.autogen.ts===`,
-    'import { describe, it, expect } from "vitest";',
-    `import { ${name} } from "../implementations/${name}.ts";`,
-    `import { assertEnsures } from "./test_${name}.ensure.ts";`,
     "",
-    `describe("${name}", () => {`,
-    '  it("같은 좌표면 true", () => {',
-    `    const r = ${name}(1, 2, 1, 2);`,
-    "    expect(r).toBe(true);",
-    "    assertEnsures([1, 2, 1, 2], r);",
-    "  });",
-    "});",
-    "===END===",
-    "That's it — hope it helps!",
   ].join("\n");
+  writeFileSync(sourceFile, source, "utf8");
+  return { root, sourceFile, outputDir, source };
 }
 
-const tempDirs: string[] = [];
-function makeTempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "chz-realize-"));
-  tempDirs.push(dir);
-  return dir;
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function contextFor(root: string, outputDir: string): ChzRealizeContext {
+  return {
+    projectRoot: root,
+    outputDir,
+    activeProfile: "console",
+    resolvedDependencies: [],
+    maxTurns: 3,
+    maxRetries: 2,
+    baseContexts: "",
+    now: () => new Date("2026-07-23T00:00:00.000Z"),
+  };
 }
-afterAll(() => {
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-  tempDirs.length = 0;
-});
 
-// ---------------------------------------------------------------------------
-// buildRealizePrompt
-// ---------------------------------------------------------------------------
+class ScriptedRealizer extends ChzRealizerBase {
+  readonly name = "ScriptedRealizer";
+  readonly seenMessages: ChzChatMessage[][] = [];
+  readonly seenTools: ChzToolDefinition[][] = [];
+  private readonly turns: Array<ChzChatResponse | Error>;
 
-describe("buildRealizePrompt", () => {
-  const spec = extractImagineSpecs(SOURCE, FILE)[0]!;
-  const prompt = buildRealizePrompt(spec, SOURCE, FILE);
+  constructor(turns: Array<ChzChatResponse | Error>, maxApiRetries = 0) {
+    super({ model: "scripted-model", maxApiRetries, retryDelayMs: 0 });
+    this.turns = [...turns];
+  }
 
-  it("embeds the whole source file for context", () => {
-    expect(prompt).toContain("const EPS = 0.0001;");
-    expect(prompt).toContain(SOURCE);
+  protected async chat(
+    messages: readonly ChzChatMessage[],
+    tools: readonly ChzToolDefinition[],
+  ): Promise<ChzChatResponse> {
+    this.seenMessages.push([...messages]);
+    this.seenTools.push([...tools]);
+    const next = this.turns.shift();
+    if (next === undefined) throw new Error("script exhausted");
+    if (next instanceof Error) throw next;
+    return next;
+  }
+}
+
+function response(toolCalls: ChzChatResponse["message"]["toolCalls"]): ChzChatResponse {
+  return { message: { role: "assistant", content: "", toolCalls } };
+}
+
+describe("canonical prompt and symbol graph", () => {
+  it("uses the canonical fixed prompt and deterministic baseline", () => {
+    const data = fixture();
+    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
+    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const context = contextFor(data.root, data.outputDir);
+    const first = buildSessionBaseline(symbol, context, "gpt-test");
+    const second = buildSessionBaseline(symbol, context, "gpt-test");
+
+    expect(CHZ_REALIZER_SYSTEM).toContain("You are the Cheese Realizer");
+    expect(CHZ_REALIZER_SYSTEM).toContain("Every session ends with exactly one of Finish, Block, or Abort.");
+    expect(first).toBe(second);
+    expect(first).toContain("Project root (read boundary)");
+    expect(first).toContain(spec.originalText);
+    expect(first).toContain("Today's date: 2026-07-23");
   });
 
-  it("embeds the target imagine block verbatim and the signature", () => {
-    expect(prompt).toContain(spec.originalText);
-    expect(prompt).toContain(`${NAME}(ax: number, ay: number, bx: number, by: number): boolean`);
-  });
-
-  it("includes the requirements and both ensure contracts", () => {
-    expect(prompt).toContain("두 점이 같은 위치인지 판정합니다.");
-    expect(prompt).toContain("(args, retval) => typeof retval === 'boolean'");
-    expect(prompt).toContain("같은 좌표가 주어지면 반드시 true 를 반환해야 합니다.");
-  });
-
-  it("instructs the file-marker output format and the assertEnsures obligation", () => {
-    expect(prompt).toContain("===FILE:");
-    expect(prompt).toContain("===END===");
-    expect(prompt).toContain(`implementations/${NAME}.ts`);
-    expect(prompt).toContain(`tests/test_${NAME}.autogen.ts`);
-    expect(prompt).toContain("assertEnsures");
-    // Audit-comment obligations from docs/60-realize.ko.md.
-    expect(prompt).toContain("[요구사항 해석]");
-    expect(prompt).toContain("[계약 대응]");
-    expect(prompt).toContain("ASSUMPTION:");
-  });
-
-  it("notes when requirements are absent", () => {
-    const noReq = extractImagineSpecs(
-      "imagine function ping(): void {\n  ensure((a, r) => r === undefined);\n}\n",
-      "ping.chz.ts",
-    )[0]!;
-    expect(buildRealizePrompt(noReq, "…", "ping.chz.ts")).toContain("(none provided");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseRealizeResponse
-// ---------------------------------------------------------------------------
-
-describe("parseRealizeResponse", () => {
-  it("extracts the marked files and ignores surrounding prose", () => {
-    const files = parseRealizeResponse(fakeResponse(NAME));
-    expect(files.map((f) => f.path)).toEqual([
-      `implementations/${NAME}.ts`,
-      `tests/test_${NAME}.autogen.ts`,
-    ]);
-    expect(files[0]!.content).toContain(`export function ${NAME}`);
-    expect(files[0]!.content).not.toContain("preamble");
-    expect(files[1]!.content).toContain("assertEnsures([1, 2, 1, 2], r)");
-  });
-
-  it("tolerates leading/trailing whitespace on marker lines", () => {
-    const resp = ["  ===FILE: a.ts===", "const a = 1;", "===END===  "].join("\n");
-    expect(parseRealizeResponse(resp)).toEqual([{ path: "a.ts", content: "const a = 1;" }]);
-  });
-
-  it("throws when a file is never closed", () => {
-    const resp = ["===FILE: a.ts===", "const a = 1;"].join("\n");
-    expect(() => parseRealizeResponse(resp)).toThrow(RealizeResponseError);
-    expect(() => parseRealizeResponse(resp)).toThrow(/never closed/);
-  });
-
-  it("throws on an '===END===' with no open file", () => {
-    expect(() => parseRealizeResponse("===END===")).toThrow(/no open/);
-  });
-
-  it("throws on a new file marker before the previous one closed", () => {
-    const resp = ["===FILE: a.ts===", "===FILE: b.ts===", "===END==="].join("\n");
-    expect(() => parseRealizeResponse(resp)).toThrow(/still open/);
-  });
-
-  it("throws on a duplicate file marker", () => {
-    const resp = [
-      "===FILE: a.ts===",
-      "x",
-      "===END===",
-      "===FILE: a.ts===",
-      "y",
-      "===END===",
+  it("orders mentioned dependencies before dependents", () => {
+    const source = [
+      "imagine function leaf(): number { requirements(`leaf`); }",
+      "imagine function parent(): number { requirements(`Use leaf to calculate.`); }",
     ].join("\n");
-    expect(() => parseRealizeResponse(resp)).toThrow(/duplicate/);
+    const order = buildEstimatedRealizeOrder(extractImagineSpecs(source, "graph.chz.ts"), source, "graph.chz.ts");
+    expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parent"]);
+    expect(order[1]!.dependencies.map((symbol) => symbol.name)).toEqual(["leaf"]);
   });
 
-  it("throws when there are no markers at all", () => {
-    expect(() => parseRealizeResponse("just some prose, no files")).toThrow(/no '===FILE/);
+  it("imports external signature types into the engine-owned ensure harness", () => {
+    const source = "imagine function inspect(value: Widget): Result { ensure((args, retval) => (retval as Result) !== undefined); }\n";
+    const spec = extractImagineSpecs(source, "types.chz.ts")[0]!;
+    const harness = renderEnsureHarness(spec, "types.chz.ts");
+    expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');
+  });
+
+  it("connects prologue, realized symbols, and epilogue in entry-point order", () => {
+    const source = "imagine function greet(): string { ensure(`인사합니다.`); }\n";
+    const specs = extractImagineSpecs(source, "example.chz.ts");
+    const entry = renderEntryPoint(specs, "example.chz.ts");
+
+    expect(entry.indexOf('import "./implementations/__prologue__.ts";'))
+      .toBeLessThan(entry.indexOf('export { greet } from "./implementations/greet.ts";'));
+    expect(entry.indexOf('export { greet } from "./implementations/greet.ts";'))
+      .toBeLessThan(entry.indexOf('import "./implementations/__epilogue__.ts";'));
   });
 });
 
-// ---------------------------------------------------------------------------
-// renderEnsureHarness (deterministic, engine-owned)
-// ---------------------------------------------------------------------------
-
-describe("renderEnsureHarness", () => {
-  const spec = extractImagineSpecs(SOURCE, FILE)[0]!;
-
-  it("copies predicate ensures verbatim and exports assertEnsures", () => {
-    const harness = renderEnsureHarness(spec, FILE);
-    expect(harness).toContain("export function assertEnsures(");
-    expect(harness).toContain("const ENSURE_PREDICATES: readonly EnsurePredicate[] = [");
-    // Predicate copied verbatim.
-    expect(harness).toContain("(args, retval) => typeof retval === 'boolean',");
-    // The natural-language ensure is NOT part of the predicate harness.
-    expect(harness).not.toContain("같은 좌표가 주어지면");
-    // Verbatim source recorded for failure messages.
-    expect(harness).toContain(JSON.stringify("(args, retval) => typeof retval === 'boolean'"));
-  });
-
-  it("emits a valid (empty) harness when there are no predicate contracts", () => {
-    const naturalOnly = extractImagineSpecs(
-      "imagine function f(): void {\n  ensure(`무언가를 해야 합니다.`);\n}\n",
-      "f.chz.ts",
+describe("ChzRealizerBase", () => {
+  it("owns the tool loop and resolves files after Finish", async () => {
+    const data = fixture();
+    const events: string[] = [];
+    const symbol = buildEstimatedRealizeOrder(
+      extractImagineSpecs(data.source, data.sourceFile),
+      data.source,
+      data.sourceFile,
     )[0]!;
-    const harness = renderEnsureHarness(naturalOnly, "f.chz.ts");
-    expect(harness).toContain("no predicate `ensure(...)` contracts");
-    expect(harness).toContain("export function assertEnsures(");
+    const implementation = join(data.outputDir, "implementations", "greet.ts");
+    const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
+    const realizer = new ScriptedRealizer([
+      response([
+        { id: "write-impl", name: "WriteFile", arguments: { path: implementation, content: "export function greet(name: string): string { return `Hi ${name}`; }\n" } },
+        { id: "write-test", name: "WriteFile", arguments: { path: test, content: "export {};\n" } },
+      ]),
+      response([{ id: "finish", name: "Finish", arguments: {} }]),
+    ]);
+
+    const result = await realizer.realize(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      maxTurns: 2,
+      harness: { onEvent: (message) => events.push(message) },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    if (result.outcome !== "resolved") throw new Error("expected resolved");
+    expect(result.resolvedFile).toBe(implementation);
+    expect(result.resolvedTestFiles).toContain(test);
+    expect(readFileSync(implementation, "utf8")).toContain("function greet");
+    expect(realizer.seenMessages[0]![0]).toEqual({ role: "system", content: CHZ_REALIZER_SYSTEM });
+    expect(realizer.seenTools[0]!.map((tool) => tool.name)).toEqual(CHZ_HARNESS_TOOLS.map((tool) => tool.name));
+    expect(realizer.seenTools[1]!.map((tool) => tool.name)).toEqual(["Finish", "Block", "Abort"]);
+    expect(events[0]).toBe("[ScriptedRealizer] turn 1/2");
+    expect(events.find((event) => event.includes("WriteFile(path=\"chz/realization/sample/implementations/greet.ts\"")))
+      .toMatch(/size=\d+ B, lines=1\) → ok · \d+ms$/);
+    expect(events).toContain("[ScriptedRealizer] turn 2/2");
+    expect(events.at(-1)).toMatch(/^\[ScriptedRealizer\] Finish → finished · \d+ms$/);
+    expect(events.join("\n")).not.toContain("return `Hi ${name}`");
+  });
+
+  it("logs verification outcomes without leaking diagnostic output", async () => {
+    const data = fixture();
+    const events: string[] = [];
+    const symbol = buildEstimatedRealizeOrder(
+      extractImagineSpecs(data.source, data.sourceFile),
+      data.source,
+      data.sourceFile,
+    )[0]!;
+    const implementation = join(data.outputDir, "implementations", "greet.ts");
+    const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(implementation, "export function greet(name: string): string { return name; }\n", "utf8");
+    writeFileSync(test, "export {};\n", "utf8");
+    const realizer = new ScriptedRealizer([
+      response([{ id: "typecheck", name: "RunTypeCheck", arguments: {} }]),
+      response([{ id: "finish", name: "Finish", arguments: {} }]),
+    ]);
+
+    const result = await realizer.realize(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      maxTurns: 2,
+      harness: {
+        onEvent: (message) => events.push(message),
+        runTypeCheck: async () => ({ passed: false, output: "private compiler diagnostic" }),
+      },
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(events).toContainEqual(expect.stringMatching(/^\[ScriptedRealizer\] RunTypeCheck → failed · \d+ms$/));
+    expect(events.join("\n")).not.toContain("private compiler diagnostic");
+  });
+
+  it("retries provider failures in the base class", async () => {
+    const data = fixture();
+    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const implementation = join(data.outputDir, "implementations", "greet.ts");
+    const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(implementation, "export function greet(name: string): string { return name; }\n", "utf8");
+    writeFileSync(test, "export {};\n", "utf8");
+    const realizer = new ScriptedRealizer([
+      new Error("temporary outage"),
+      response([{ id: "finish", name: "Finish", arguments: {} }]),
+    ], 1);
+    const context = { ...contextFor(data.root, data.outputDir), maxTurns: 1 };
+
+    expect((await realizer.realize(symbol, context)).outcome).toBe("resolved");
+    expect(realizer.seenMessages).toHaveLength(2);
+  });
+
+  it("returns the three-way blocked/failed outcomes", async () => {
+    const data = fixture();
+    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const blocked = new ScriptedRealizer([
+      response([{ id: "block", name: "Block", arguments: { reason: "dependency missing", todo: "npm install package" } }]),
+    ]);
+    const aborted = new ScriptedRealizer([
+      response([{ id: "abort", name: "Abort", arguments: { reason: "requirements contradict" } }]),
+    ]);
+    const context = { ...contextFor(data.root, data.outputDir), maxTurns: 1 };
+
+    const blockedResult = await blocked.realize(symbol, context);
+    expect(blockedResult).toMatchObject({ outcome: "blocked", todo: "npm install package" });
+    const failedResult = await aborted.realize(symbol, context);
+    expect(failedResult).toMatchObject({ outcome: "failed", reason: "requirements contradict" });
+  });
+
+  it("does not mistake the engine-owned ensure harness for an LLM-authored test", async () => {
+    const data = fixture();
+    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const implementation = join(data.outputDir, "implementations", "greet.ts");
+    const ensure = join(data.outputDir, "tests", "test_greet.ensure.ts");
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(ensure), { recursive: true });
+    writeFileSync(implementation, "export function greet(name: string): string { return name; }\n", "utf8");
+    writeFileSync(ensure, "export function assertEnsures(): void {}\n", "utf8");
+    const realizer = new ScriptedRealizer([
+      response([{ id: "finish", name: "Finish", arguments: {} }]),
+    ]);
+
+    const result = await realizer.realize(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      maxTurns: 1,
+    });
+
+    expect(result).toMatchObject({ outcome: "failed" });
+    if (result.outcome !== "failed") throw new Error("expected failed");
+    expect(result.reason).toContain("no test files were found");
   });
 });
 
-// ---------------------------------------------------------------------------
-// realize + writeRealization (end-to-end with a fake backend, no real CLI)
-// ---------------------------------------------------------------------------
+class RetryingEngineRealizer implements ChzRealizer {
+  readonly name = "RetryingEngineRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+  readonly contexts: ChzRealizeContext[] = [];
 
-describe("realize", () => {
-  it("records every prompt on the backend", async () => {
-    const backend = new FakeBackend(() => fakeResponse(NAME));
-    const file = join(makeTempDir(), FILE);
-    await realize(SOURCE, file, { backend });
-    expect(backend.prompts).toHaveLength(1);
-    expect(backend.prompts[0]).toContain(NAME);
-  });
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    this.contexts.push(context);
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(implementation, `export function ${symbol.name}(name: string): string { return name; }\n`, "utf8");
+    writeFileSync(test, "export {};\n", "utf8");
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date(),
+      resolvedBy: "engine-model",
+    };
+  }
+}
 
-  it("produces the chz/realization/<base>/ layout in memory", async () => {
-    const backend = new FakeBackend(() => fakeResponse(NAME));
-    const file = join(makeTempDir(), FILE);
-    const result = await realize(SOURCE, file, { backend });
-
-    expect(result.baseName).toBe("collide");
-    expect(result.baseDir.endsWith(join("chz", "realization", "collide"))).toBe(true);
-    expect(result.files.map((f) => f.relPath).sort()).toEqual(
-      [
-        "implementation.ts",
-        `implementations/${NAME}.ts`,
-        `tests/test_${NAME}.autogen.ts`,
-        `tests/test_${NAME}.ensure.ts`,
-      ].sort(),
-    );
-  });
-
-  it("attaches the provenance header and AUTO-GENERATED markers to the implementation", async () => {
-    const backend = new FakeBackend(() => fakeResponse(NAME), "claude-opus-4.8");
-    const file = join(makeTempDir(), FILE);
-    const result = await realize(SOURCE, file, {
-      backend,
-      now: () => new Date("2026-07-23T12:34:56.000Z"),
+describe("realize engine", () => {
+  it("feeds independent verification failures into bounded retry sessions", async () => {
+    const data = fixture();
+    const realizer = new RetryingEngineRealizer();
+    let verificationCalls = 0;
+    const result = await realize(data.source, data.sourceFile, {
+      realizers: [realizer],
+      projectRoot: data.root,
+      maxRetries: 1,
+      verify: async () => {
+        verificationCalls++;
+        return verificationCalls === 1
+          ? { passed: false, output: "TS2322 first attempt failed" }
+          : { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
     });
-    const impl = result.files.find((f) => f.relPath === `implementations/${NAME}.ts`)!.content;
 
-    expect(impl.startsWith(`/// ${NAME}.ts\n`)).toBe(true);
-    expect(impl).toContain(`/// realization of \`imagine function ${NAME}(`);
-    expect(impl).toContain(
-      "/// realized by claude-opus-4.8 (via chz-realize) on 2026-07-23T12:34:56.000Z",
-    );
-    expect(impl).toContain("/// AUTO-GENERATED CODE - DO NOT EDIT");
-    expect(impl).toContain("/// END OF AUTO-GENERATED CODE");
-    // The LLM body is present, without its markers.
-    expect(impl).toContain(`export function ${NAME}(`);
-    expect(impl).not.toContain("===FILE:");
-  });
-
-  it("generates the re-export entry point the preprocessor import points at", async () => {
-    const backend = new FakeBackend(() => fakeResponse(NAME));
-    const file = join(makeTempDir(), FILE);
-    const result = await realize(SOURCE, file, { backend });
-    const entry = result.files.find((f) => f.relPath === "implementation.ts")!.content;
-    expect(entry).toContain(`export { ${NAME} } from "./implementations/${NAME}.ts";`);
-  });
-
-  it("writes the files to disk under the base directory", async () => {
-    const backend = new FakeBackend(() => fakeResponse(NAME));
-    const dir = makeTempDir();
-    const file = join(dir, FILE);
-    const result = await realize(SOURCE, file, { backend });
-    const written = writeRealization(result);
-
-    expect(written).toHaveLength(result.files.length);
-    for (const abs of written) expect(existsSync(abs)).toBe(true);
-
-    const ensurePath = join(result.baseDir, "tests", `test_${NAME}.ensure.ts`);
-    expect(readFileSync(ensurePath, "utf8")).toContain("export function assertEnsures(");
-  });
-
-  it("throws a clear error when the response omits an expected file", async () => {
-    const backend = new FakeBackend(
-      () => [`===FILE: implementations/${NAME}.ts===`, "export function x() {}", "===END==="].join("\n"),
-    );
-    const file = join(makeTempDir(), FILE);
-    await expect(realize(SOURCE, file, { backend })).rejects.toThrow(
-      new RegExp(`missing the expected file 'tests/test_${NAME}\\.autogen\\.ts'`),
+    expect(result.outcome).toBe("resolved");
+    expect(realizer.contexts).toHaveLength(2);
+    expect(realizer.contexts[1]!.verificationFeedback).toContain("TS2322");
+    expect(result.files.map((file) => file.relPath)).toContain("implementation.ts");
+    expect(result.files.map((file) => file.relPath)).toContain("implementations/__prologue__.ts");
+    expect(result.files.map((file) => file.relPath)).toContain("implementations/__epilogue__.ts");
+    expect(readFileSync(join(result.baseDir, "implementations", "greet.ts"), "utf8")).toContain(
+      "realized by engine-model",
     );
   });
 });

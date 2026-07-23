@@ -129,6 +129,7 @@ export interface RunRealizationTestsOptions {
 
 /** Two minutes: enough for a realization's small unit suite, bounded for CI. */
 const DEFAULT_TEST_TIMEOUT_MS = 2 * 60 * 1000;
+const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 
 /** Pull the "Tests  N passed" count out of vitest's default summary output. */
 function parseVitestTestCount(output: string): number | null {
@@ -192,11 +193,26 @@ export async function runRealizationTests(
 
       // Append both streams to one buffer in arrival order for readable output.
       let combined = "";
+      let capturedBytes = 0;
+      let captureTruncated = false;
       let timedOut = false;
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => (combined += chunk));
-      child.stderr.on("data", (chunk: string) => (combined += chunk));
+      const capture = (chunk: string): void => {
+        if (captureTruncated) return;
+        const bytes = Buffer.from(chunk, "utf8");
+        const available = MAX_PROCESS_OUTPUT_BYTES - capturedBytes;
+        if (bytes.length <= available) {
+          combined += chunk;
+          capturedBytes += bytes.length;
+          return;
+        }
+        if (available > 0) combined += bytes.subarray(0, available).toString("utf8");
+        capturedBytes = MAX_PROCESS_OUTPUT_BYTES;
+        captureTruncated = true;
+      };
+      child.stdout.on("data", capture);
+      child.stderr.on("data", capture);
 
       const timer = setTimeout(() => {
         timedOut = true;
@@ -205,7 +221,10 @@ export async function runRealizationTests(
 
       const finish = (passed: boolean, extra = "") => {
         clearTimeout(timer);
-        const output = combined + extra;
+        const truncation = captureTruncated
+          ? "\n[output capture truncated at the in-memory safety limit]\n"
+          : "";
+        const output = combined + truncation + extra;
         resolvePromise({
           passed,
           timedOut,
@@ -278,8 +297,8 @@ export interface BuildRealizationCacheInput {
   source: string;
   /** chz tool version to stamp into the cache. */
   chzVersion: string;
-  /** Model label to record as provenance for every symbol. */
-  modelLabel: string;
+  /** Legacy fallback label; each resolved symbol normally records resolvedBy. */
+  modelLabel?: string;
   /** ISO-8601 timestamp recorded for every symbol. */
   realizedAt: string;
   /** Whether the emitted tests passed. */
@@ -308,7 +327,7 @@ function emittedContent(result: RealizeResult, symbolName: string, relPath: stri
  * only hashes strings, so tests can assert the schema without touching disk.
  */
 export function buildRealizationCache(input: BuildRealizationCacheInput): RealizationCache {
-  const { result, source, chzVersion, modelLabel, realizedAt, testsPassed } = input;
+  const { result, source, chzVersion, realizedAt, testsPassed } = input;
   const testsSkipped = input.testsSkipped ?? false;
 
   const symbols: Record<string, RealizationCacheSymbol> = {};
@@ -319,7 +338,7 @@ export function buildRealizationCache(input: BuildRealizationCacheInput): Realiz
       implementationHash: sha256(emittedContent(result, symbol.name, `implementations/${symbol.name}.ts`)),
       autogenTestHash: sha256(emittedContent(result, symbol.name, `tests/test_${symbol.name}.autogen.ts`)),
       ensureTestHash: sha256(emittedContent(result, symbol.name, `tests/test_${symbol.name}.ensure.ts`)),
-      model: modelLabel,
+      model: symbol.resolution.resolvedBy ?? input.modelLabel ?? "unknown-realizer",
       realizedAt,
       testsPassed,
     };

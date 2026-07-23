@@ -5,7 +5,11 @@
   "type": "module",
   "description": "Cheese (.chz) — a TypeScript superset where the LLM writes the implementation and the human supervises.",
   "bin": {
-    "chz": "src/cli.ts"
+    "chz": "bin/chz.mjs"
+  },
+  "exports": {
+    ".": "./src/realizer/index.ts",
+    "./realizer": "./src/realizer/index.ts"
   },
   "scripts": {
     "chz": "tsx src/cli.ts",
@@ -17,5 +21,8 @@
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "openai": "^6.48.0"
   }
 }

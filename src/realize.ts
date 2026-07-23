@@ -1,487 +1,321 @@
-/**
- * chz — realize engine.
- *
- * `realize` is the development-time step where an LLM turns an `imagine
- * function` spec (lifted by the preprocessor) into committed, *auditable*
- * TypeScript plus vitest tests. This module owns everything from prompt
- * assembly through file emit; it deliberately does NOT run the emitted tests or
- * record a realization cache — that is Step 4.
- *
- * The pipeline for one file is:
- *
- *   extractImagineSpecs(source)             (preprocessor)
- *     -> buildRealizePrompt(spec, source)   assemble the prompt
- *     -> backend.complete(prompt)           call the LLM (abstracted)
- *     -> parseRealizeResponse(response)     pull files out of the markers
- *     -> render{Implementation,Autogen,Ensure,EntryPoint}   shape the emit
- *     -> writeRealization(result)           write chz/realization/<base>/...
- *
- * Two design rules from the docs are load-bearing here:
- *
- *   1. Auditability. Realized code targets a human reviewer, so the prompt
- *      demands dense audit comments and inline `ASSUMPTION:` notes, and the
- *      engine (not the LLM) attaches the provenance header + AUTO-GENERATED
- *      markers so their format is trustworthy.
- *   2. No self-grading. The human's predicate `ensure(...)` contracts are
- *      compiled by the *engine* into a deterministic `assertEnsures` harness
- *      (`tests/test_<name>.ensure.ts`), and the prompt forces every LLM test
- *      case to call it. The LLM therefore cannot route around the human's
- *      contracts — they ride along on the LLM's own test inputs.
- *
- * Zero third-party dependencies: only node builtins.
- */
+/** Realize engine: turns preprocessed imagine specs into Realizer sessions. */
 
-import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 
-import { extractImagineSpecs, realizationBaseName, type ImagineSpec } from "./preprocessor.ts";
+import { splitHumanCode } from "./human-code.ts";
+import {
+  extractImagineSpecs,
+  realizationBaseName,
+  type ImagineSpec,
+} from "./preprocessor.ts";
+import { selectRealizer } from "./realizer/config.ts";
+import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
+import type {
+  ChzAskUserAnswer,
+  ChzAskUserQuestion,
+  ChzHarnessServices,
+  ChzImagineSymbol,
+  ChzImagineSymbolResolution,
+  ChzRealizer,
+  ChzResolutionResolved,
+  ChzVerificationResult,
+} from "./realizer/types.ts";
 
-// ---------------------------------------------------------------------------
-// LLM backend abstraction
-// ---------------------------------------------------------------------------
+export * from "./realizer/index.ts";
 
-/**
- * A source of LLM completions. Assembling the prompt and shaping the emit are
- * pure and testable; the actual model call is hidden behind this interface so
- * unit tests can substitute a {@link FakeBackend} and never touch the real
- * claude CLI.
- */
-export interface RealizeBackend {
-  /**
-   * A label identifying the model, embedded verbatim in the provenance header
-   * of every emitted implementation (`realized by <modelLabel> ...`).
-   */
-  readonly modelLabel: string;
-  /** Send `prompt` to the model and resolve with its raw text response. */
-  complete(prompt: string): Promise<string>;
+export interface EmittedFile {
+  relPath: string;
+  content: string;
 }
 
-/** Options for {@link ClaudeCliBackend}. */
-export interface ClaudeCliOptions {
-  /** Model name passed to the claude CLI via `--model`. Omit for the CLI default. */
-  model?: string;
-  /** Hard timeout for a single call, in milliseconds. Defaults to 10 minutes. */
-  timeoutMs?: number;
-  /** The executable to spawn. Defaults to `"claude"`; injectable for tests. */
-  command?: string;
+export interface RealizedSymbol {
+  name: string;
+  spec: ImagineSpec;
+  symbol: ChzImagineSymbol;
+  resolution: ChzResolutionResolved;
+  files: EmittedFile[];
 }
 
-/** Ten minutes: realize prompts are large and the model may think for a while. */
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/**
- * {@link RealizeBackend} backed by the headless claude CLI (`claude -p`).
- *
- * The prompt is delivered over **stdin**, not argv, so it is not bounded by the
- * shell/OS argument-length limit — realize prompts embed the whole source file
- * and are easily tens of kilobytes.
- */
-export class ClaudeCliBackend implements RealizeBackend {
-  readonly modelLabel: string;
-  private readonly options: ClaudeCliOptions;
-
-  constructor(options: ClaudeCliOptions = {}) {
-    this.options = options;
-    this.modelLabel = options.model ?? "claude CLI (default model)";
-  }
-
-  complete(prompt: string): Promise<string> {
-    const command = this.options.command ?? "claude";
-    const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const args = ["-p"];
-    if (this.options.model !== undefined) args.push("--model", this.options.model);
-
-    return new Promise<string>((resolvePromise, rejectPromise) => {
-      const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-
-      const finishError = (message: string) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        child.kill("SIGKILL");
-        rejectPromise(new Error(message));
-      };
-
-      const timer = setTimeout(() => {
-        finishError(`claude CLI timed out after ${timeoutMs} ms`);
-      }, timeoutMs);
-
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => (stdout += chunk));
-      child.stderr.on("data", (chunk: string) => (stderr += chunk));
-
-      child.on("error", (err) => {
-        finishError(`failed to launch '${command}': ${err.message}`);
-      });
-
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (code !== 0) {
-          const detail = stderr.trim() ? `:\n${stderr.trim()}` : "";
-          rejectPromise(new Error(`claude CLI exited with code ${code}${detail}`));
-          return;
-        }
-        resolvePromise(stdout);
-      });
-
-      child.stdin.on("error", () => {
-        // A broken pipe (e.g. the CLI exited early) surfaces via 'close'/'error';
-        // swallow the stdin write error so it does not become an unhandled event.
-      });
-      child.stdin.write(prompt);
-      child.stdin.end();
-    });
-  }
+export interface RealizeResult {
+  outcome: "resolved" | "blocked" | "failed";
+  fileName: string;
+  baseName: string;
+  baseDir: string;
+  symbols: RealizedSymbol[];
+  resolutions: ChzImagineSymbolResolution[];
+  files: EmittedFile[];
+  reason?: string;
+  todo?: string;
 }
 
-/**
- * A {@link RealizeBackend} that returns a canned response for a prompt, for use
- * in tests and by Step 4. It records every prompt it was asked to complete.
- * Unit tests MUST use this (or another fake) — they never call the real CLI.
- */
-export class FakeBackend implements RealizeBackend {
-  readonly modelLabel: string;
-  /** Every prompt passed to {@link complete}, in call order. */
-  readonly prompts: string[] = [];
-  private readonly responder: (prompt: string) => string | Promise<string>;
-
-  constructor(responder: (prompt: string) => string | Promise<string>, modelLabel = "fake-model") {
-    this.responder = responder;
-    this.modelLabel = modelLabel;
-  }
-
-  async complete(prompt: string): Promise<string> {
-    this.prompts.push(prompt);
-    return this.responder(prompt);
-  }
+export interface IndependentVerificationInput {
+  baseDir: string;
+  symbol: ChzImagineSymbol;
+  resolution: ChzResolutionResolved;
+  attempt: number;
 }
 
-// ---------------------------------------------------------------------------
-// Prompt assembly
-// ---------------------------------------------------------------------------
-
-/** The marker a file block opens with in the LLM response (see {@link parseRealizeResponse}). */
-const FILE_MARKER_HINT = "===FILE: <path>===";
-
-/** Reconstruct the human-readable signature of an imagine function for headers/prompts. */
-function formatSignature(spec: ImagineSpec): string {
-  const head = `${spec.name}(${spec.parameters})`;
-  return spec.returnType ? `${head}: ${spec.returnType}` : head;
+export interface RealizeOptions {
+  realizers: readonly ChzRealizer[];
+  projectRoot?: string;
+  activeProfile?: string;
+  maxTurns?: number;
+  maxRetries?: number;
+  askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
+  now?: () => Date;
+  harness?: ChzHarnessServices;
+  /** Independent engine verification after Finish. */
+  verify?: (input: IndependentVerificationInput) => Promise<ChzVerificationResult>;
+  /** Explicit escape hatch used by --skip-tests. */
+  skipVerification?: boolean;
 }
 
-/** Render the predicate / natural-language ensure contracts as prompt bullet lists. */
-function describeContracts(spec: ImagineSpec): { predicates: string; naturals: string } {
-  const predicates = spec.ensures.filter((e) => e.kind === "predicate");
-  const naturals = spec.ensures.filter((e) => e.kind === "natural");
-  const renderList = (items: { source: string }[], empty: string): string =>
-    items.length === 0
-      ? empty
-      : items.map((item, i) => `  ${i + 1}. ${item.source}`).join("\n");
+export function realizationBaseDir(fileName: string): string {
+  return resolve(dirname(fileName), "chz", "realization", realizationBaseName(fileName));
+}
+
+export function imagineSpecToSymbol(
+  spec: ImagineSpec,
+  source: string,
+  fileName: string,
+): ChzImagineSymbol {
+  const before = source.slice(0, spec.start);
+  const lines = before.split(/\r?\n/);
   return {
-    predicates: renderList(predicates, "  (none)"),
-    naturals: renderList(naturals, "  (none)"),
+    name: spec.name,
+    type: "function",
+    definition: spec.originalText,
+    file: resolve(fileName),
+    posLine: lines.length,
+    posCol: (lines.at(-1)?.length ?? 0) + 1,
+    dependencies: [],
+    circularDependencies: [],
   };
 }
 
 /**
- * Assemble the realize prompt for one imagine spec. Pure and deterministic so
- * it can be inspected with `chz realize --dry-run` and asserted in tests.
- *
- * The prompt carries: (1) the whole `.chz.ts` source as context, (2) the target
- * imagine block verbatim, (3) the requirements + ensure contracts, and (4) the
- * output-format and audit-comment instructions.
+ * Build the v0 estimated graph from explicit symbol-name mentions, then return
+ * dependencies before dependents. Actual-use graph refinement remains an
+ * engine concern and does not leak into Realizer transports.
  */
-export function buildRealizePrompt(spec: ImagineSpec, source: string, fileName: string): string {
-  const signature = formatSignature(spec);
-  const { predicates, naturals } = describeContracts(spec);
-  const requirements =
-    spec.requirements !== null && spec.requirements.trim() !== ""
-      ? spec.requirements
-      : "(none provided — infer the intent from the signature and the function name.)";
-
-  return `You are the code resolver for **chz**, a TypeScript superset built on the principle
-"the LLM writes the implementation, the human supervises". Your task is to REALIZE
-exactly one \`imagine function\`: produce a plain-TypeScript implementation plus vitest
-tests that a human can *audit*, not merely run. Auditability outranks cleverness.
-
-# Context — the whole source file
-The imagine function lives in \`${fileName}\`. Here is the entire file, for context
-(it may reference other symbols in the file):
-
-\`\`\`typescript
-${source}
-\`\`\`
-
-# Target — the imagine function to realize
-Realize this block, and only this block:
-
-\`\`\`typescript
-${spec.originalText}
-\`\`\`
-
-- Function name: \`${spec.name}\`
-- Signature your implementation MUST match exactly: \`${signature}\`
-
-# Requirements (human intent)
-${requirements}
-
-# ensure contracts (human-authored)
-Machine-checked predicate contracts — these are enforced automatically for you and
-you must NOT reimplement them; just make your implementation satisfy them:
-${predicates}
-
-Natural-language contracts — you MUST convert EACH of these into at least one autogen
-test case:
-${naturals}
-
-# What to produce — exactly two files
-
-## File 1 — \`implementations/${spec.name}.ts\` (the implementation)
-- Plain TypeScript that compiles under \`strict\` mode. FORBIDDEN: \`any\`, \`eval\`,
-  \`@ts-ignore\`/\`@ts-expect-error\`, and any API outside a plain computation.
-- Export the function as a named export matching the signature exactly, e.g.
-  \`export function ${spec.name}(...) { ... }\`.
-- Do NOT write a provenance header or AUTO-GENERATED markers yourself — the engine
-  attaches those. Start the file at the implementation's doc comment.
-- Audit-oriented comments are MANDATORY (this is the whole point of chz):
-  - A doc comment (\`/** ... */\`) directly above the function with these two exact
-    section headers:
-    - \`[요구사항 해석]\` — how you interpreted the requirements (prose bullets).
-    - \`[계약 대응]\` — how the implementation satisfies each ensure contract.
-  - Step-by-step explanatory comments through the body.
-  - Wherever the requirements left room for interpretation, an inline
-    \`// ASSUMPTION: ...\` comment stating the assumption AND why you made it.
-
-## File 2 — \`tests/test_${spec.name}.autogen.ts\` (your own tests)
-- vitest format. Begin with: \`import { describe, it, expect } from "vitest";\`
-- Import the implementation with exactly:
-  \`import { ${spec.name} } from "../implementations/${spec.name}.ts";\`
-- Import the human-contract harness with exactly:
-  \`import { assertEnsures } from "./test_${spec.name}.ensure.ts";\`
-- Convert EACH natural-language contract above into at least one \`it(...)\` case.
-- CRITICAL: in EVERY test case, after calling \`${spec.name}(...)\`, you MUST call
-  \`assertEnsures([...the args you passed], theReturnValue);\`. This applies the human's
-  predicate contracts to your inputs. Never skip it and never reimplement it.
-- Add any further test cases you judge necessary for correctness.
-
-# Audit-comment style to follow
-\`\`\`typescript
-/**
- * 예금 계좌에 이자를 지급하고, 지급 내역서를 반환합니다.
- *
- * [요구사항 해석]
- * - 예치 일수에 대한 이자를 단리로 계산합니다.
- *
- * [계약 대응]
- * - ensure: netInterest 는 interest - tax 와 일치해야 합니다.
- */
-function payDepositInterest(/* ... */) {
-  // ASSUMPTION: 연 기준 일수는 365일로 가정합니다.
-  // (요구사항에 윤년 처리에 대한 언급이 없습니다.)
-  const DAYS_IN_YEAR = 365;
-  // ...
-}
-\`\`\`
-
-# OUTPUT FORMAT (strict)
-Emit each file between markers exactly as below. Anything you write outside the
-markers is ignored. Emit each of the two files exactly once, with the exact paths
-shown, and nothing else between \`===FILE:\` and \`===END===\` besides file contents:
-
-\`\`\`
-${FILE_MARKER_HINT}
-<file contents>
-===END===
-\`\`\`
-
-Concretely, produce:
-
-\`\`\`
-===FILE: implementations/${spec.name}.ts===
-...implementation...
-===END===
-===FILE: tests/test_${spec.name}.autogen.ts===
-...tests...
-===END===
-\`\`\`
-`;
-}
-
-// ---------------------------------------------------------------------------
-// Response parsing
-// ---------------------------------------------------------------------------
-
-/** A malformed LLM realize response (missing / duplicate / unbalanced markers). */
-export class RealizeResponseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RealizeResponseError";
+export function buildEstimatedRealizeOrder(
+  specs: ImagineSpec[],
+  source: string,
+  fileName: string,
+): ChzImagineSymbol[] {
+  const symbols = specs.map((spec) => imagineSpecToSymbol(spec, source, fileName));
+  for (const symbol of symbols) {
+    symbol.dependencies = symbols.filter(
+      (candidate) => candidate !== symbol && symbol.definition.includes(candidate.name),
+    );
   }
-}
 
-/** One file lifted from an LLM response by {@link parseRealizeResponse}. */
-export interface ParsedResponseFile {
-  /** The path exactly as written in the `===FILE: ... ===` marker, trimmed. */
-  path: string;
-  /** The file contents between the markers, trimmed of surrounding blank lines. */
-  content: string;
-}
-
-const FILE_OPEN_RE = /^\s*===FILE:\s*(.+?)\s*===\s*$/;
-const FILE_CLOSE_RE = /^\s*===END===\s*$/;
-
-/**
- * Pull the marker-delimited files out of an LLM response. Text outside any
- * `===FILE: ... ===` / `===END===` pair is ignored, so the model may add prose
- * around the blocks. Throws a {@link RealizeResponseError} for unbalanced,
- * duplicated, or entirely absent markers.
- */
-export function parseRealizeResponse(response: string): ParsedResponseFile[] {
-  const lines = response.split(/\r?\n/);
-  const files: ParsedResponseFile[] = [];
-  const seen = new Set<string>();
-  let current: { path: string; body: string[] } | null = null;
-
-  for (let n = 0; n < lines.length; n++) {
-    const line = lines[n]!;
-    const open = FILE_OPEN_RE.exec(line);
-    if (open) {
-      if (current !== null) {
-        throw new RealizeResponseError(
-          `line ${n + 1}: new '===FILE:' marker for '${open[1]}' while '${current.path}' ` +
-            `is still open (missing '===END===')`,
-        );
+  const ordered: ChzImagineSymbol[] = [];
+  const permanent = new Set<ChzImagineSymbol>();
+  const active: ChzImagineSymbol[] = [];
+  const visit = (symbol: ChzImagineSymbol): void => {
+    if (permanent.has(symbol)) return;
+    const cycleAt = active.indexOf(symbol);
+    if (cycleAt >= 0) {
+      const cycle = active.slice(cycleAt);
+      for (const member of cycle) {
+        member.circularDependencies = cycle.filter((candidate) => candidate !== member);
       }
-      const path = open[1]!.trim();
-      if (seen.has(path)) {
-        throw new RealizeResponseError(`line ${n + 1}: duplicate file marker for '${path}'`);
-      }
-      seen.add(path);
-      current = { path, body: [] };
-      continue;
+      return;
     }
-    if (FILE_CLOSE_RE.test(line)) {
-      if (current === null) {
-        throw new RealizeResponseError(
-          `line ${n + 1}: '===END===' with no open '===FILE:' marker`,
-        );
-      }
-      files.push({ path: current.path, content: current.body.join("\n").trim() });
-      current = null;
-      continue;
+    active.push(symbol);
+    for (const dependency of symbol.dependencies) visit(dependency);
+    active.pop();
+    permanent.add(symbol);
+    ordered.push(symbol);
+  };
+  for (const symbol of symbols) visit(symbol);
+  return ordered;
+}
+
+/** Realize every imagine symbol, selecting the first configured compatible Realizer. */
+export async function realize(
+  source: string,
+  fileName: string,
+  options: RealizeOptions,
+): Promise<RealizeResult> {
+  const specs = extractImagineSpecs(source, fileName);
+  const specByName = new Map(specs.map((spec) => [spec.name, spec]));
+  const baseName = realizationBaseName(fileName);
+  const baseDir = realizationBaseDir(fileName);
+  const projectRoot = resolve(options.projectRoot ?? dirname(resolve(fileName)));
+  const maxTurns = options.maxTurns ?? 24;
+  const maxRetries = options.maxRetries ?? 2;
+  const activeProfile = options.activeProfile ?? extractProfile(source) ?? "console";
+  mkdirSync(join(baseDir, "implementations"), { recursive: true });
+  mkdirSync(join(baseDir, "tests"), { recursive: true });
+  const humanCode = splitHumanCode(source, fileName, specs);
+  const writeHumanCode = (): void => {
+    writeFileSync(join(baseDir, "implementations", "__prologue__.ts"), humanCode.prologue, "utf8");
+    writeFileSync(join(baseDir, "implementations", "__epilogue__.ts"), humanCode.epilogue, "utf8");
+  };
+  writeHumanCode();
+
+  const order = buildEstimatedRealizeOrder(specs, source, fileName);
+  const resolutions: ChzImagineSymbolResolution[] = [];
+  const resolvedByName = new Map<string, ChzResolutionResolved>();
+  const realizedSymbols: RealizedSymbol[] = [];
+
+  for (const symbol of order) {
+    const spec = specByName.get(symbol.name)!;
+    const ensurePath = join(baseDir, "tests", `test_${symbol.name}.ensure.ts`);
+    writeFileSync(ensurePath, renderEnsureHarness(spec, fileName), "utf8");
+
+    const realizer = selectRealizer(options.realizers, symbol);
+    if (realizer === null) {
+      const resolution: ChzImagineSymbolResolution = {
+        outcome: "failed",
+        symbol,
+        reason: `No realizer found for symbol '${symbol.name}' (type: ${symbol.type}).`,
+      };
+      resolutions.push(resolution);
+      return resultWithFailure("failed", resolution.reason);
     }
-    if (current !== null) current.body.push(line);
+
+    let feedback: string | undefined;
+    let finalResolution: ChzImagineSymbolResolution | undefined;
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      const baseContexts = readContexts(baseDir);
+      const context = {
+        projectRoot,
+        outputDir: baseDir,
+        activeProfile,
+        resolvedDependencies: symbol.dependencies.flatMap((dependency) => {
+          const resolution = resolvedByName.get(dependency.name);
+          return resolution === undefined ? [] : [resolution];
+        }),
+        maxTurns,
+        maxRetries,
+        baseContexts,
+        askUser: options.askUser,
+        attempt,
+        verificationFeedback: feedback,
+        now: options.now,
+        harness: options.harness,
+      };
+      const resolution = await realizer.realize(symbol, context);
+      // This harness is human-contract material owned by the engine. Restore
+      // it after every session so a model edit can never weaken self-grading.
+      writeFileSync(ensurePath, renderEnsureHarness(spec, fileName), "utf8");
+      // The split human source is engine-owned for the same reason: the model
+      // may read prologue helpers but must never rewrite either human layer.
+      writeHumanCode();
+      finalResolution = resolution;
+      if (resolution.outcome !== "resolved") break;
+
+      attachProvenance(spec, resolution, options.now ? options.now() : new Date());
+      if (options.skipVerification) break;
+
+      const verification = options.verify === undefined
+        ? await runDefaultIndependentVerification(
+            { baseDir, symbol, resolution, attempt },
+            projectRoot,
+            activeProfile,
+            maxTurns,
+            maxRetries,
+            options.harness,
+          )
+        : await options.verify({ baseDir, symbol, resolution, attempt });
+      if (verification.passed) break;
+      feedback = boundVerificationFeedback(verification.output);
+      if (attempt > maxRetries) {
+        finalResolution = {
+          outcome: "failed",
+          symbol,
+          reason: `Independent verification failed after ${attempt} attempt${attempt === 1 ? "" : "s"}:\n${feedback}`,
+        };
+      }
+    }
+
+    if (finalResolution === undefined) {
+      finalResolution = { outcome: "failed", symbol, reason: "Realizer returned no resolution." };
+    }
+    resolutions.push(finalResolution);
+    if (finalResolution.outcome === "blocked") {
+      return resultWithFailure("blocked", finalResolution.reason, finalResolution.todo);
+    }
+    if (finalResolution.outcome === "failed") {
+      return resultWithFailure("failed", finalResolution.reason);
+    }
+
+    resolvedByName.set(symbol.name, finalResolution);
+    const files = collectSymbolFiles(baseDir, spec, finalResolution);
+    realizedSymbols.push({ name: symbol.name, spec, symbol, resolution: finalResolution, files });
   }
 
-  if (current !== null) {
-    throw new RealizeResponseError(`file '${current.path}' was never closed with '===END==='`);
+  if (realizedSymbols.length > 0) {
+    writeFileSync(join(baseDir, "implementation.ts"), renderEntryPoint(specs, fileName), "utf8");
   }
-  if (files.length === 0) {
-    throw new RealizeResponseError("no '===FILE: ... ===' markers found in the response");
+  const files = collectAllEmittedFiles(baseDir);
+  return {
+    outcome: "resolved",
+    fileName,
+    baseName,
+    baseDir,
+    symbols: realizedSymbols,
+    resolutions,
+    files,
+  };
+
+  function resultWithFailure(
+    outcome: "blocked" | "failed",
+    reason: string,
+    todo?: string,
+  ): RealizeResult {
+    return {
+      outcome,
+      fileName,
+      baseName,
+      baseDir,
+      symbols: realizedSymbols,
+      resolutions,
+      files: collectAllEmittedFiles(baseDir),
+      reason,
+      ...(todo === undefined ? {} : { todo }),
+    };
   }
-  return files;
 }
 
-// ---------------------------------------------------------------------------
-// File rendering
-// ---------------------------------------------------------------------------
-
-/**
- * Wrap the LLM's implementation body in the engine-owned provenance header and
- * AUTO-GENERATED markers. The header format is fixed by the engine (not the
- * LLM) so a reviewer can trust it: see docs/60-realize.ko.md.
- */
-export function renderImplementationFile(
-  spec: ImagineSpec,
-  llmContent: string,
-  modelLabel: string,
-  isoTime: string,
-): string {
-  return `/// ${spec.name}.ts
-/// realization of \`imagine function ${formatSignature(spec)}\`
-/// realized by ${modelLabel} (via chz-realize) on ${isoTime}
-///
-/// AUTO-GENERATED CODE - DO NOT EDIT (manual edits must be marked with @chz-realize-override)
-
-${llmContent.trim()}
-
-/// END OF AUTO-GENERATED CODE
-`;
-}
-
-/** Prepend a light provenance header to the LLM-authored autogen test file. */
-export function renderAutogenFile(
-  spec: ImagineSpec,
-  llmContent: string,
-  modelLabel: string,
-  isoTime: string,
-): string {
-  return `/// test_${spec.name}.autogen.ts
-/// AUTO-GENERATED tests for \`imagine function ${spec.name}\`, authored by ${modelLabel}
-/// (via chz-realize) on ${isoTime}. These are the LLM's own tests; the human's
-/// ensure predicate contracts are enforced separately via ./test_${spec.name}.ensure.ts,
-/// which every case below invokes through assertEnsures().
-
-${llmContent.trim()}
-`;
-}
-
-/**
- * Deterministically build the ensure harness for a spec: the human's predicate
- * `ensure(...)` contracts copied VERBATIM into an array, plus an `assertEnsures`
- * helper the autogen tests call. This is the anti-self-grading mechanism — the
- * engine, not the LLM, writes this file.
- */
+/** Deterministic human ensure harness; this file is engine-owned. */
 export function renderEnsureHarness(spec: ImagineSpec, fileName: string): string {
   const base = realizationBaseName(fileName);
-  const predicates = spec.ensures.filter((e) => e.kind === "predicate");
-
+  const predicates = spec.ensures.filter((ensure) => ensure.kind === "predicate");
+  const externalTypes = collectExternalTypeNames(spec);
+  const typeImports = externalTypes.length === 0
+    ? ""
+    : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n\n`;
   const predicateEntries =
     predicates.length === 0
       ? "  // (no predicate `ensure(...)` contracts were declared for this function)"
-      : predicates.map((p) => `  ${p.source},`).join("\n");
-  const sourceEntries =
-    predicates.length === 0 ? "" : predicates.map((p) => `  ${JSON.stringify(p.source)},`).join("\n");
+      : predicates.map((predicate) => `  ${predicate.source},`).join("\n");
+  const sourceEntries = predicates.map((predicate) => `  ${JSON.stringify(predicate.source)},`).join("\n");
 
   return `/// test_${spec.name}.ensure.ts
 /// AUTO-GENERATED ensure-contract harness — DO NOT EDIT.
-/// Generated deterministically by chz-realize from the human-authored
-/// \`ensure((args, retval) => ...)\` predicate contracts of
-/// \`imagine function ${spec.name}\` in ${base}.chz.ts.
-///
-/// The predicates below are copied VERBATIM from the .chz.ts spec. To change a
-/// contract, edit the ensure(...) in the source and re-realize — never edit this
-/// file. assertEnsures is invoked from every autogen test case so the human's
-/// contracts ride along on the LLM's own test inputs (no self-grading).
+/// Generated deterministically by chz-realize from ${base}.chz.ts.
 
-/** One human-authored ensure predicate: receives the call args and its return value. */
-type EnsurePredicate = (args: readonly unknown[], retval: unknown) => unknown;
+${typeImports}type EnsurePredicate = (args: readonly unknown[], retval: unknown) => unknown;
 
-/** The predicate ensure(...) contracts, copied verbatim from the spec. */
 const ENSURE_PREDICATES: readonly EnsurePredicate[] = [
 ${predicateEntries}
 ];
 
-/** The verbatim source text of each predicate, used only in failure messages. */
 const ENSURE_SOURCES: readonly string[] = [
 ${sourceEntries}
 ];
 
-/**
- * Apply every human-authored ensure predicate to one concrete call of
- * \`${spec.name}\`. Throws with a precise message if any predicate is not satisfied.
- *
- * @param args   the argument list passed to the implementation, as an array
- * @param retval the value the implementation returned
- */
 export function assertEnsures(args: readonly unknown[], retval: unknown): void {
   ENSURE_PREDICATES.forEach((predicate, index) => {
     const satisfied = predicate(args, retval);
@@ -497,7 +331,6 @@ export function assertEnsures(args: readonly unknown[], retval: unknown): void {
   });
 }
 
-/** Best-effort human-readable rendering of a value for failure messages. */
 function describeValue(value: unknown): string {
   try {
     const json = JSON.stringify(value);
@@ -509,150 +342,163 @@ function describeValue(value: unknown): string {
 `;
 }
 
-/** Build the re-export entry point that the preprocessor's import points at. */
+function collectExternalTypeNames(spec: ImagineSpec): string[] {
+  const builtins = new Set([
+    "Array",
+    "BigInt",
+    "Boolean",
+    "Date",
+    "Error",
+    "Function",
+    "Map",
+    "Number",
+    "Object",
+    "Promise",
+    "Readonly",
+    "ReadonlyArray",
+    "Record",
+    "RegExp",
+    "Set",
+    "String",
+    "Symbol",
+    "Uint8Array",
+    "WeakMap",
+    "WeakSet",
+  ]);
+  const typeText = [
+    spec.parameters,
+    spec.returnType,
+    ...spec.ensures.filter((ensure) => ensure.kind === "predicate").map((ensure) => ensure.source),
+  ].join("\n");
+  const names = typeText.match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
+  return [...new Set(names.filter((name) => !builtins.has(name)))].sort();
+}
+
 export function renderEntryPoint(specs: ImagineSpec[], fileName: string): string {
   const base = realizationBaseName(fileName);
   const exports = specs
     .map((spec) => `export { ${spec.name} } from "./implementations/${spec.name}.ts";`)
     .join("\n");
   return `/// implementation.ts — realization entry point for ${base}.chz.ts (AUTO-GENERATED by chz-realize).
-/// Re-exports every realized symbol. Do not edit; re-run \`chz realize\` instead.
+/// Loads human prologue, realized symbols, then human epilogue. Do not edit; re-run \`chz realize\` instead.
+
+import "./implementations/__prologue__.ts";
 
 ${exports}
+
+import "./implementations/__epilogue__.ts";
 `;
 }
 
-// ---------------------------------------------------------------------------
-// Orchestration
-// ---------------------------------------------------------------------------
-
-/** A single emitted file, path relative to the realization base directory. */
-export interface EmittedFile {
-  /** Path relative to {@link RealizeResult.baseDir} (POSIX-style, e.g. `tests/test_x.ensure.ts`). */
-  relPath: string;
-  content: string;
-}
-
-/** The realization of one imagine function: its prompt, raw response, and emitted files. */
-export interface RealizedSymbol {
-  name: string;
-  spec: ImagineSpec;
-  /** The exact prompt sent to the backend (also what `--dry-run` prints). */
-  prompt: string;
-  /** The raw backend response. */
-  response: string;
-  /** The three files emitted for this symbol (implementation + autogen + ensure). */
-  files: EmittedFile[];
-}
-
-/** The full result of realizing one `.chz.ts` file. Nothing is written until {@link writeRealization}. */
-export interface RealizeResult {
-  /** The source file that was realized. */
-  fileName: string;
-  /** The realization base name (`example.chz.ts` -> `example`). */
-  baseName: string;
-  /** Absolute path of the realization directory (`.../chz/realization/<base>`). */
-  baseDir: string;
-  /** One entry per realized imagine function, in source order. */
-  symbols: RealizedSymbol[];
-  /** Every emitted file (all symbols' files plus the shared `implementation.ts`). */
-  files: EmittedFile[];
-}
-
-/** Options for {@link realize}. */
-export interface RealizeOptions {
-  backend: RealizeBackend;
-  /** Injectable clock for the provenance timestamp; defaults to `new Date()`. */
-  now?: () => Date;
-}
-
-/** Compute the absolute realization base directory for a source file. */
-export function realizationBaseDir(fileName: string): string {
-  return resolve(dirname(fileName), "chz", "realization", realizationBaseName(fileName));
-}
-
-/** Find the file a marker with `relPath` produced, or throw a helpful error. */
-function requireResponseFile(
-  parsed: ParsedResponseFile[],
-  relPath: string,
-  spec: ImagineSpec,
-): ParsedResponseFile {
-  const found = parsed.find((f) => f.path === relPath);
-  if (found === undefined) {
-    const got = parsed.map((f) => f.path).join(", ") || "(none)";
-    throw new RealizeResponseError(
-      `realize response for '${spec.name}' is missing the expected file '${relPath}'; ` +
-        `the response provided: ${got}`,
+function attachProvenance(spec: ImagineSpec, resolution: ChzResolutionResolved, now: Date): void {
+  const implementation = readFileSync(resolution.resolvedFile, "utf8");
+  if (!implementation.includes("AUTO-GENERATED CODE - DO NOT EDIT")) {
+    const parameters = `${spec.name}(${spec.parameters})${spec.returnType ? `: ${spec.returnType}` : ""}`;
+    writeFileSync(
+      resolution.resolvedFile,
+      `/// ${spec.name}.ts\n/// realization of \`imagine function ${parameters}\`\n/// realized by ${resolution.resolvedBy} (via chz-realize) on ${now.toISOString()}\n///\n/// AUTO-GENERATED CODE - DO NOT EDIT (manual edits must be marked with @chz-realize-override)\n\n${implementation.trim()}\n\n/// END OF AUTO-GENERATED CODE\n`,
+      "utf8",
     );
   }
-  return found;
+  for (const testFile of resolution.resolvedTestFiles) {
+    const test = readFileSync(testFile, "utf8");
+    if (test.includes("AUTO-GENERATED tests")) continue;
+    writeFileSync(
+      testFile,
+      `/// ${relative(dirname(testFile), testFile)}\n/// AUTO-GENERATED tests for \`imagine function ${spec.name}\`, authored by ${resolution.resolvedBy}\n/// (via chz-realize) on ${now.toISOString()}.\n\n${test.trim()}\n`,
+      "utf8",
+    );
+  }
 }
 
-/**
- * Realize every imagine function in `source` into an in-memory {@link RealizeResult}.
- * Pure except for the backend call and the clock — writes nothing to disk. Call
- * {@link writeRealization} to persist the result.
- */
-export async function realize(
-  source: string,
-  fileName: string,
-  options: RealizeOptions,
-): Promise<RealizeResult> {
-  const specs = extractImagineSpecs(source, fileName);
-  const baseName = realizationBaseName(fileName);
-  const baseDir = realizationBaseDir(fileName);
-  const isoTime = (options.now ? options.now() : new Date()).toISOString();
-  const modelLabel = options.backend.modelLabel;
-
-  const symbols: RealizedSymbol[] = [];
-  const files: EmittedFile[] = [];
-
-  for (const spec of specs) {
-    const prompt = buildRealizePrompt(spec, source, fileName);
-    const response = await options.backend.complete(prompt);
-    const parsed = parseRealizeResponse(response);
-
-    const implSource = requireResponseFile(parsed, `implementations/${spec.name}.ts`, spec);
-    const autogenSource = requireResponseFile(parsed, `tests/test_${spec.name}.autogen.ts`, spec);
-
-    const symFiles: EmittedFile[] = [
-      {
-        relPath: `implementations/${spec.name}.ts`,
-        content: renderImplementationFile(spec, implSource.content, modelLabel, isoTime),
-      },
-      {
-        relPath: `tests/test_${spec.name}.autogen.ts`,
-        content: renderAutogenFile(spec, autogenSource.content, modelLabel, isoTime),
-      },
-      {
-        relPath: `tests/test_${spec.name}.ensure.ts`,
-        content: renderEnsureHarness(spec, fileName),
-      },
-    ];
-
-    symbols.push({ name: spec.name, spec, prompt, response, files: symFiles });
-    files.push(...symFiles);
-  }
-
-  if (specs.length > 0) {
-    files.push({ relPath: "implementation.ts", content: renderEntryPoint(specs, fileName) });
-  }
-
-  return { fileName, baseName, baseDir, symbols, files };
+function collectSymbolFiles(
+  baseDir: string,
+  spec: ImagineSpec,
+  resolution: ChzResolutionResolved,
+): EmittedFile[] {
+  const paths = [
+    resolution.resolvedFile,
+    ...resolution.resolvedTestFiles,
+    join(baseDir, "tests", `test_${spec.name}.ensure.ts`),
+  ];
+  return [...new Set(paths)].filter(existsSync).map((path) => ({
+    relPath: relative(baseDir, path).split("\\").join("/"),
+    content: readFileSync(path, "utf8"),
+  }));
 }
 
-/**
- * Write a {@link RealizeResult} under its `baseDir`, creating directories as
- * needed. Returns the absolute paths written, in emit order. Overwrites existing
- * files (re-realize is idempotent at the file level for v0).
- */
-export function writeRealization(result: RealizeResult): string[] {
-  const written: string[] = [];
-  for (const file of result.files) {
-    const abs = join(result.baseDir, file.relPath);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, file.content, "utf8");
-    written.push(abs);
+function collectAllEmittedFiles(baseDir: string, directory = baseDir): EmittedFile[] {
+  if (!existsSync(directory)) return [];
+  const result: EmittedFile[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) result.push(...collectAllEmittedFiles(baseDir, path));
+    else if (entry.isFile() && entry.name !== "CONTEXTS.md" && entry.name !== "realization-cache.json") {
+      result.push({
+        relPath: relative(baseDir, path).split("\\").join("/"),
+        content: readFileSync(path, "utf8"),
+      });
+    }
   }
-  return written;
+  return result.sort((a, b) => a.relPath.localeCompare(b.relPath));
+}
+
+function readContexts(baseDir: string): string {
+  const path = join(baseDir, "CONTEXTS.md");
+  return existsSync(path) ? readFileSync(path, "utf8") : "";
+}
+
+function extractProfile(source: string): string | null {
+  return /^\s*@profile\s+([\p{L}_$][\p{L}\p{N}_$]*)/mu.exec(source)?.[1] ?? null;
+}
+
+function boundVerificationFeedback(output: string): string {
+  const lines = output.split(/\r?\n/);
+  const boundedLines = lines.length <= 2_000 ? lines : [...lines.slice(0, 1_000), "... output truncated ...", ...lines.slice(-1_000)];
+  let bounded = boundedLines.join("\n");
+  if (Buffer.byteLength(bounded, "utf8") > 51_200) {
+    bounded = Buffer.from(bounded, "utf8").subarray(0, 51_000).toString("utf8") + "\n... output truncated ...";
+  }
+  return bounded;
+}
+
+async function runDefaultIndependentVerification(
+  input: IndependentVerificationInput,
+  projectRoot: string,
+  activeProfile: string,
+  maxTurns: number,
+  maxRetries: number,
+  harness: ChzHarnessServices | undefined,
+): Promise<ChzVerificationResult> {
+  const context = {
+    projectRoot,
+    outputDir: input.baseDir,
+    activeProfile,
+    resolvedDependencies: [],
+    maxTurns,
+    maxRetries,
+    baseContexts: "",
+    harness,
+  };
+  const runtime = new ChzVerificationToolRuntime(context, (path) => resolve(projectRoot, path));
+  const checks = await Promise.all([
+    runtime.execute("RunTests", { testFiles: [] }),
+    runtime.execute("RunTypeCheck", {}),
+    runtime.execute("RunLinter", {}),
+  ]);
+  const names = ["Tests", "Type check", "Linter"];
+  const parsed = checks.map((check, index) => {
+    if (check === null) return { passed: false, output: `${names[index]} tool was unavailable.` };
+    try {
+      return JSON.parse(check) as { passed: boolean; output?: string; diagnostics?: unknown[] };
+    } catch {
+      return { passed: false, output: check };
+    }
+  });
+  return {
+    passed: parsed.every((check) => check.passed),
+    output: parsed.map((check, index) =>
+      `## ${names[index]}\n${check.output ?? JSON.stringify(check.diagnostics ?? [], null, 2)}`,
+    ).join("\n\n"),
+  };
 }

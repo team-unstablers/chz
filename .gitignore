@@ -9,3 +9,8 @@ dist/
 npm-debug.log*
 .npm/
 .vitest/
+**/.chz/tool-output/
+
+chz.config.js
+
+__donotcommit__tmpfile/
