@@ -8,6 +8,7 @@ import { buildSystemParts, TURN_LIMIT_PROMPT } from "./prompt.ts";
 import type {
   ChzChatMessage,
   ChzChatResponse,
+  ChzHarnessEvent,
   ChzImagineSymbol,
   ChzImagineSymbolResolution,
   ChzImagineSymbolType,
@@ -244,7 +245,13 @@ export abstract class ChzRealizerBase implements ChzRealizer {
     for (let turn = 1; turn <= context.maxTurns && terminal === undefined; turn++) {
       const closing = turn === context.maxTurns;
       if (closing) messages.push({ role: "user", content: TURN_LIMIT_PROMPT });
-      emitHarnessEvent(sessionContext, `[${this.name}] turn ${turn}/${context.maxTurns}`);
+      emitHarnessEvent(sessionContext, {
+        kind: "turn",
+        realizer: this.name,
+        turn,
+        maxTurns: context.maxTurns,
+        text: `[${this.name}] turn ${turn}/${context.maxTurns}`,
+      });
 
       let response: ChzChatResponse;
       try {
@@ -253,10 +260,13 @@ export abstract class ChzRealizerBase implements ChzRealizer {
         return { outcome: "failed", symbol, reason: `Model request failed: ${(error as Error).message}` };
       }
       if (response.reasoning?.trim()) {
-        emitModelReasoning(
-          sessionContext,
-          `[${this.name}] reasoning turn ${turn}/${context.maxTurns}\n${response.reasoning.trim()}`,
-        );
+        emitHarnessEvent(sessionContext, {
+          kind: "reasoning",
+          realizer: this.name,
+          turn,
+          maxTurns: context.maxTurns,
+          text: response.reasoning.trim(),
+        });
       }
       messages.push(response.message);
 
@@ -317,10 +327,16 @@ export abstract class ChzRealizerBase implements ChzRealizer {
         const details = summarizeToolInput(call.name, input.value, sessionContext.projectRoot);
         const outcome = summarizeToolOutcome(call.name, output, terminal, dispatchErrored);
         const durationMs = Math.max(0, Date.now() - startedAt);
-        emitHarnessEvent(
-          sessionContext,
-          `[${this.name}] ${call.name}${details === "" ? "" : `(${details})`} → ${outcome} · ${durationMs}ms`,
-        );
+        emitHarnessEvent(sessionContext, {
+          kind: "tool",
+          realizer: this.name,
+          tool: call.name,
+          ...(details === "" ? {} : { toolDetail: details }),
+          outcome,
+          durationMs,
+          errored: dispatchErrored,
+          text: `[${this.name}] ${call.name}${details === "" ? "" : `(${details})`} → ${outcome} · ${durationMs}ms`,
+        });
         if (terminal !== undefined) break;
       }
     }
@@ -375,19 +391,11 @@ function parseToolArguments(call: ChzToolCall): { value: unknown; error?: undefi
   }
 }
 
-function emitHarnessEvent(context: ChzRealizeContext, message: string): void {
+function emitHarnessEvent(context: ChzRealizeContext, event: ChzHarnessEvent): void {
   try {
-    context.harness?.onEvent?.(message);
+    context.harness?.onEvent?.(event);
   } catch {
     // Observability must never alter the realization result.
-  }
-}
-
-function emitModelReasoning(context: ChzRealizeContext, message: string): void {
-  try {
-    context.harness?.onModelReasoning?.(message);
-  } catch {
-    // Human-only diagnostics must never alter the realization result.
   }
 }
 

@@ -20,6 +20,7 @@ import {
   type RealizeResult,
 } from "./realize.ts";
 import { findChzConfig, loadChzConfig } from "./realizer/config.ts";
+import { createRenderer } from "./render.ts";
 import { ChzOpenAIRealizer } from "./realizer/openai.ts";
 import { buildSystemParts } from "./realizer/prompt.ts";
 import {
@@ -64,6 +65,7 @@ interface RealizeArguments {
   json: boolean;
   dryRun: boolean;
   skipTests: boolean;
+  simplify: boolean;
   jobs?: number;
   model?: string;
   baseURL?: string;
@@ -71,7 +73,7 @@ interface RealizeArguments {
 }
 
 function parseRealizeArguments(args: string[], io: CliIO): RealizeArguments | null {
-  const parsed: RealizeArguments = { json: false, dryRun: false, skipTests: false };
+  const parsed: RealizeArguments = { json: false, dryRun: false, skipTests: false, simplify: false };
   const setJobs = (value: string): boolean => {
     const jobs = Number(value);
     if (!Number.isInteger(jobs) || jobs < 1) {
@@ -86,6 +88,7 @@ function parseRealizeArguments(args: string[], io: CliIO): RealizeArguments | nu
     if (argument === "--json") parsed.json = true;
     else if (argument === "--dry-run") parsed.dryRun = true;
     else if (argument === "--skip-tests") parsed.skipTests = true;
+    else if (argument === "-s" || argument === "--simplify-output") parsed.simplify = true;
     else if (argument === "-j" || argument === "--jobs") {
       const value = args[++index];
       if (value === undefined) {
@@ -174,11 +177,11 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     io.err(`${BIN_NAME} realize: 'include' matched no files (${include.join(", ")})`);
     return 1;
   }
-  if (configured.path !== undefined) io.out(`config: ${configured.path}`);
+  if (configured.path !== undefined) io.err(`config: ${configured.path}`);
   let exitCode = 0;
   for (const file of files) {
     const displayName = relative(process.cwd(), file) || file;
-    io.out(`==> ${displayName}`);
+    io.err(`==> ${displayName}`);
     const code = await realizeSourceFile(
       file,
       displayName,
@@ -285,7 +288,7 @@ async function realizeSourceFile(
     return 0;
   }
 
-  if (announceConfig && configured.path !== undefined) io.out(`config: ${configured.path}`);
+  if (announceConfig && configured.path !== undefined) io.err(`config: ${configured.path}`);
   let lastTestOutcome: RealizationTestOutcome | undefined;
   const runTests = deps.runTests ?? runSelectedTests;
   const runVerificationChecks = async (baseDir: string, scope?: ChzRealizationScope) => {
@@ -335,6 +338,29 @@ async function realizeSourceFile(
     };
   };
 
+  // All progress (events, reasoning, live view) renders on stderr; stdout
+  // carries only results, so `chz realize > out.txt` stays clean.
+  const stderrTTY = process.stderr.isTTY === true;
+  const renderer = createRenderer({
+    simplify: parsed.simplify,
+    color: stderrTTY && !("NO_COLOR" in process.env) && process.env.TERM !== "dumb",
+    err: io.err,
+    ...(parsed.simplify && stderrTTY ? { tty: process.stderr } : {}),
+  });
+  const baseAskUser = deps.askUser ??
+    (process.stdin.isTTY && stderrTTY ? interactiveAskUser(io) : undefined);
+  const askUser = baseAskUser === undefined
+    ? undefined
+    : async (questions: ChzAskUserQuestion[]): Promise<ChzAskUserAnswer[]> => {
+        // The live view and an interactive prompt cannot share the terminal.
+        renderer.suspend();
+        try {
+          return await baseAskUser(questions);
+        } finally {
+          renderer.resume();
+        }
+      };
+
   let result: RealizeResult;
   try {
     result = await realize(source, sourceFile, {
@@ -346,7 +372,7 @@ async function realizeSourceFile(
       maxCycleSize: configured.config.maxCycleSize,
       jobs: parsed.jobs ?? configured.config.jobs,
       chzVersion: deps.chzVersion,
-      askUser: deps.askUser ?? (process.stdin.isTTY && process.stdout.isTTY ? interactiveAskUser(io) : undefined),
+      askUser,
       now: deps.now,
       skipVerification: parsed.skipTests,
       // input.scope covers every session symbol — for a cycle group, scoping
@@ -364,14 +390,15 @@ async function realizeSourceFile(
             timedOut: outcome.timedOut,
           };
         },
-        onEvent: (message) => io.out(message),
-        onModelReasoning: (message) => io.err(message),
+        onEvent: (event) => renderer.event(event),
       },
     });
   } catch (error) {
+    renderer.close();
     io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
     return 1;
   }
+  renderer.close();
 
   if (result.outcome === "blocked") {
     io.err(`== BLOCKED ==\n${result.reason ?? "Realizer requires human action."}`);
@@ -478,16 +505,17 @@ function defaultProjectRoot(sourceFile: string): string {
 
 function interactiveAskUser(io: CliIO) {
   return async (questions: ChzAskUserQuestion[]): Promise<ChzAskUserAnswer[]> => {
-    const readline = createInterface({ input: process.stdin, output: process.stdout });
+    // Prompts are interaction, not results: stderr, like the progress stream.
+    const readline = createInterface({ input: process.stdin, output: process.stderr });
     try {
       const answers: ChzAskUserAnswer[] = [];
       for (const question of questions) {
-        io.out(`Question from Realizer — ${question.header}:`);
-        io.out(question.question);
+        io.err(`Question from Realizer — ${question.header}:`);
+        io.err(question.question);
         question.options.forEach((option, index) => {
-          io.out(`  ${index + 1}. ${option.label} — ${option.description}`);
+          io.err(`  ${index + 1}. ${option.label} — ${option.description}`);
         });
-        io.out("  Enter option number(s), or type a free-form answer.");
+        io.err("  Enter option number(s), or type a free-form answer.");
         const raw = (await readline.question("> ")).trim();
         const tokens = question.multiple ? raw.split(",").map((part) => part.trim()) : [raw];
         answers.push(tokens.filter(Boolean).map((token) => {
@@ -521,6 +549,9 @@ export function buildUsage(): string {
     "                   [--dry-run]       print canonical Realizer prompts",
     "                   [--skip-tests]    skip independent verification",
     "                   [-j, --jobs <n>]  concurrent realize sessions",
+    "                   [-s, --simplify-output]",
+    "                                     compact per-session progress instead of",
+    "                                     the full audit log (live view on a TTY)",
     "                   [--model <name>]  default OpenAI model",
     "                   [--base-url <u>]  OpenAI-compatible API base URL",
     "                   [--config <path>] explicit chz.config.js",

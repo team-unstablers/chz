@@ -63,7 +63,9 @@ class CliRealizer implements ChzRealizer {
     context: ChzRealizeContext,
   ): Promise<ChzImagineSymbolResolution> {
     this.calls++;
-    if (this.reasoning !== undefined) context.harness?.onModelReasoning?.(this.reasoning);
+    if (this.reasoning !== undefined) {
+      context.harness?.onEvent?.({ kind: "reasoning", text: this.reasoning });
+    }
     const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
     const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
     const { mkdir, writeFile } = await import("node:fs/promises");
@@ -183,7 +185,9 @@ describe("realize command", () => {
     );
     expect(code).toBe(0);
     expect(realizer.calls).toBe(1);
-    expect(err).toEqual([]);
+    // stderr carries only the progress stream, no errors.
+    expect(err.every((line) => line.startsWith("[chz-realize]"))).toBe(true);
+    expect(err.join("\n")).toContain("[ OK ] greet");
     const baseDir = join(dirname(file), "chz", "realization", "demo");
     expect(existsSync(join(baseDir, "implementations", "greet.ts"))).toBe(true);
     const cache = JSON.parse(readFileSync(join(baseDir, "realization-cache.json"), "utf8"));
@@ -210,7 +214,7 @@ describe("realize command", () => {
     );
 
     expect(code).toBe(0);
-    expect(err).toEqual([]);
+    expect(err.every((line) => line.startsWith("[chz-realize]"))).toBe(true);
     expect(realizer.calls).toBe(1);
     const baseDir = join(dirname(file), "chz", "realization", "game");
     expect(readFileSync(join(baseDir, "implementations", "Game.ts"), "utf8"))
@@ -220,7 +224,7 @@ describe("realize command", () => {
 
   it("routes provider reasoning diagnostics to stderr", async () => {
     const file = makeFixture();
-    const realizer = new CliRealizer("[CliRealizer] reasoning turn 1/1\nprivate reasoning");
+    const realizer = new CliRealizer("private reasoning");
     const out: string[] = [];
     const err: string[] = [];
 
@@ -235,8 +239,30 @@ describe("realize command", () => {
     );
 
     expect(code).toBe(0);
-    expect(err).toContain("[CliRealizer] reasoning turn 1/1\nprivate reasoning");
+    // The audit renderer indents reasoning under a per-realizer header.
+    expect(err).toContain("    private reasoning");
     expect(out.join("\n")).not.toContain("private reasoning");
+  });
+
+  it("keeps only group results on stderr with --simplify-output off a TTY", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer("noisy reasoning");
+    const out: string[] = [];
+    const err: string[] = [];
+
+    const code = await run(
+      ["realize", file, "-s"],
+      { out: (message) => out.push(message), err: (message) => err.push(message) },
+      {
+        config: { realizers: [realizer] },
+        projectRoot: dirname(file),
+        runTests: greenTests,
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(err).toEqual(["[chz-realize] [1/1] [ OK ] greet"]);
+    expect(out.join("\n")).toContain("realized 1 symbol");
   });
 
   it("forwards selected test files, scopes symbol verification, and runs an unscoped final pass", async () => {
@@ -314,13 +340,14 @@ export default {
       "utf8",
     );
     const out: string[] = [];
+    const err: string[] = [];
     const code = await run(
       ["realize", file],
-      { out: (message) => out.push(message), err: () => {} },
+      { out: (message) => out.push(message), err: (message) => err.push(message) },
       { runTests: greenTests },
     );
     expect(code).toBe(0);
-    expect(out.join("\n")).toContain(`config: ${join(root, "chz.config.js")}`);
+    expect(err.join("\n")).toContain(`config: ${join(root, "chz.config.js")}`);
     const cache = JSON.parse(
       readFileSync(join(dirname(file), "chz", "realization", "demo", "realization-cache.json"), "utf8"),
     );

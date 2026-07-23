@@ -43,6 +43,48 @@ export interface ChzVerificationResult {
   timedOut?: boolean;
 }
 
+export type ChzHarnessEventKind =
+  | "engine"
+  | "group-start"
+  | "group-end"
+  | "turn"
+  | "tool"
+  | "diff"
+  | "reasoning";
+
+export type ChzGroupStatus = "resolved" | "reused" | "failed" | "blocked" | "skipped";
+
+/**
+ * One observability event from the realize engine or a harness session.
+ * `text` is always a complete plain-text rendering, so a consumer may ignore
+ * every structured field and still produce a faithful audit log; the fields
+ * exist for renderers that style or aggregate (e.g. the CLI live view).
+ */
+export interface ChzHarnessEvent {
+  kind: ChzHarnessEventKind;
+  /** Canonical plain-text rendering; multi-line for diff/reasoning payloads. */
+  text: string;
+  /** Representative symbol of the emitting realize group, when one exists. */
+  group?: string;
+  /** group-start/group-end: display label and 1-based launch order. */
+  label?: string;
+  index?: number;
+  total?: number;
+  /** group-end: how the group settled, with an optional one-line detail. */
+  status?: ChzGroupStatus;
+  detail?: string;
+  /** turn/tool/reasoning: the emitting Realizer and its turn counters. */
+  realizer?: string;
+  turn?: number;
+  maxTurns?: number;
+  /** tool: executed tool name, input summary, outcome, and duration. */
+  tool?: string;
+  toolDetail?: string;
+  outcome?: string;
+  durationMs?: number;
+  errored?: boolean;
+}
+
 /**
  * Engine-owned operations exposed to the fixed verification tools. These
  * callbacks never accept a shell command from the model.
@@ -52,9 +94,8 @@ export interface ChzHarnessServices {
   runTypeCheck?: () => Promise<ChzVerificationResult>;
   runLinter?: () => Promise<ChzVerificationResult>;
   diagnoseFile?: (file: string) => Promise<ChzDiagnostic[]>;
-  onEvent?: (message: string) => void;
-  /** Receives provider-supplied reasoning text for human-only diagnostics. */
-  onModelReasoning?: (message: string) => void;
+  /** Receives every observability event, including model reasoning. */
+  onEvent?: (event: ChzHarnessEvent) => void;
 }
 
 /**

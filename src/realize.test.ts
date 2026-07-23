@@ -249,7 +249,7 @@ describe("ChzRealizerBase", () => {
     const result = await realizer.realize(symbol, {
       ...contextFor(data.root, data.outputDir),
       maxTurns: 2,
-      harness: { onEvent: (message) => events.push(message) },
+      harness: { onEvent: (event) => events.push(event.text) },
     });
 
     expect(result.outcome).toBe("resolved");
@@ -291,7 +291,7 @@ describe("ChzRealizerBase", () => {
       ...contextFor(data.root, data.outputDir),
       maxTurns: 2,
       harness: {
-        onEvent: (message) => events.push(message),
+        onEvent: (event) => events.push(event.text),
         runTypeCheck: async () => ({ passed: false, output: "private compiler diagnostic" }),
       },
     });
@@ -676,7 +676,7 @@ describe("realize engine", () => {
         return { passed: true, output: "green" };
       },
       verifyRealization: async () => ({ passed: true, output: "green" }),
-      harness: { onEvent: (message) => warnings.push(message) },
+      harness: { onEvent: (event) => warnings.push(event.text) },
       now: () => new Date("2026-07-23T00:00:00.000Z"),
     });
 

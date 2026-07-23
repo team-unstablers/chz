@@ -67,7 +67,11 @@ describe("ChzOpenAIRealizer", () => {
       maxRetries: 0,
       baseContexts: "",
       now: () => new Date("2026-07-23T00:00:00.000Z"),
-      harness: { onModelReasoning: (message) => reasoningEvents.push(message) },
+      harness: {
+        onEvent: (event) => {
+          if (event.kind === "reasoning") reasoningEvents.push(`${event.realizer} ${event.turn}/${event.maxTurns}: ${event.text}`);
+        },
+      },
     };
 
     const result = await realizer.realize(symbol, context);
@@ -84,7 +88,7 @@ describe("ChzOpenAIRealizer", () => {
     const secondTools = requests[1]!.tools as Array<{ function: { name: string } }>;
     expect(secondTools.map((tool) => tool.function.name)).toEqual(["Finish", "Block", "Abort"]);
     expect(reasoningEvents).toEqual([
-      "[ChzOpenAIRealizer] reasoning turn 1/2\nI should write the implementation and its test.",
+      "ChzOpenAIRealizer 1/2: I should write the implementation and its test.",
     ]);
     expect(JSON.stringify(requests[1]!.messages)).not.toContain("I should write the implementation");
   });

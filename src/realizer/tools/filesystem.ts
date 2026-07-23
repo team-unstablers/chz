@@ -798,7 +798,11 @@ export class ChzFilesystemToolRuntime {
 
     const fullDiff = this.#diffPreview(oldNormalized, newNormalized, Number.MAX_SAFE_INTEGER);
     try {
-      this.#context.harness?.onEvent?.(`FindAndReplace diff for ${displayPath}:\n${fullDiff}`);
+      this.#context.harness?.onEvent?.({
+        kind: "diff",
+        tool: "FindAndReplace",
+        text: `FindAndReplace diff for ${displayPath}:\n${fullDiff}`,
+      });
     } catch {
       // Audit logging is supplemental and must not turn a successful edit into a failure.
     }

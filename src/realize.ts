@@ -34,6 +34,8 @@ import {
 import type {
   ChzAskUserAnswer,
   ChzAskUserQuestion,
+  ChzGroupStatus,
+  ChzHarnessEvent,
   ChzHarnessServices,
   ChzImagineSymbol,
   ChzImagineSymbolResolution,
@@ -229,7 +231,8 @@ export async function realize(
     if (error instanceof ChzCycleError) return resultWithFailure("failed", error.message);
     throw error;
   }
-  const emitEvent = (message: string): void => options.harness?.onEvent?.(`[chz-realize] ${message}`);
+  const emitEvent = (message: string, extra?: Partial<ChzHarnessEvent>): void =>
+    options.harness?.onEvent?.({ kind: "engine", text: `[chz-realize] ${message}`, ...extra });
   for (const warning of graph.warnings) emitEvent(warning);
 
   // Symbols re-realized in this run, split by whether their public surface
@@ -240,9 +243,53 @@ export async function realize(
   const changedInternal = new Set<string>();
   const askUser = options.askUser === undefined ? undefined : serializeAskUser(options.askUser);
 
+  let launchedGroups = 0;
   const processGroup = async (group: ChzRealizeGroup): Promise<void> => {
     const members = group.symbols;
     const memberNames = new Set(members.map((member) => member.name));
+    const representative = members[0]!;
+    const displayLabel = members.map((member) => member.name).join(" ↔ ");
+    // Observability only: launch order for progress display ([k/n]); the
+    // authoritative ordering remains the topological scheduler below.
+    const groupIndex = ++launchedGroups;
+    const groupTotal = graph.groups.length;
+    const lifecycle = (
+      kind: "group-start" | "group-end",
+      text: string,
+      status?: ChzGroupStatus,
+      detail?: string,
+    ): void =>
+      options.harness?.onEvent?.({
+        kind,
+        group: representative.name,
+        label: displayLabel,
+        index: groupIndex,
+        total: groupTotal,
+        ...(status === undefined ? {} : { status }),
+        ...(detail === undefined ? {} : { detail }),
+        text: `[chz-realize] [${groupIndex}/${groupTotal}] ${text}`,
+      });
+    const groupEnd = (status: ChzGroupStatus, detail?: string): void => {
+      const badge = { resolved: " OK ", reused: " OK ", failed: "FAIL", blocked: "BLCK", skipped: "SKIP" }[status];
+      lifecycle(
+        "group-end",
+        `[${badge}] ${displayLabel}${detail === undefined ? "" : ` — ${detail}`}`,
+        status,
+        detail,
+      );
+    };
+    lifecycle("group-start", `realizing ${displayLabel}`);
+    // Sessions report through a per-group harness so every event carries its
+    // group; concurrent (-j) streams stay attributable to a symbol.
+    const groupHarness: ChzHarnessServices | undefined = options.harness === undefined
+      ? undefined
+      : {
+          ...options.harness,
+          ...(options.harness.onEvent === undefined ? {} : {
+            onEvent: (event: ChzHarnessEvent) =>
+              options.harness!.onEvent!({ group: representative.name, ...event }),
+          }),
+        };
 
     // docs/62: a failed symbol halts only its dependents. Groups arrive in
     // topological order, so every outside dependency has already either
@@ -252,6 +299,10 @@ export async function realize(
       .find((dependency) => !memberNames.has(dependency.name) && unrealized.has(dependency.name));
     if (missingDependency !== undefined) {
       const cause = unrealized.get(missingDependency.name)!;
+      groupEnd(
+        "skipped",
+        `dependency '${missingDependency.name}' ${cause === "blocked" ? "is blocked" : "was not realized"}`,
+      );
       for (const member of members) {
         unrealized.set(member.name, cause);
         resolutions.push(
@@ -285,7 +336,6 @@ export async function realize(
     };
     writeEnsures();
 
-    const representative = members[0]!;
     const scope: ChzRealizationScope = { symbolNames: members.map((member) => member.name) };
     const groupLabel = members.map((member) => `'${member.name}'`).join(", ");
 
@@ -335,14 +385,14 @@ export async function realize(
         // A dependency (or the human layer) changed internally: contracts
         // stand, but behavior may have drifted. Re-run this group's tests
         // (no LLM); green stops the propagation, red invalidates the group.
-        emitEvent(`${groupLabel}: dependencies changed internally — re-running tests`);
+        emitEvent(`${groupLabel}: dependencies changed internally — re-running tests`, { group: representative.name });
         const retested = options.retest === undefined
-          ? await runScopedTests(baseDir, scope, projectRoot, activeProfile, maxTurns, maxRetries, options.harness)
+          ? await runScopedTests(baseDir, scope, projectRoot, activeProfile, maxTurns, maxRetries, groupHarness)
           : await options.retest({ baseDir, scope });
         if (!retested.passed) {
           reusable = false;
           retestFeedback = boundVerificationFeedback(retested.output);
-          emitEvent(`${groupLabel}: tests went red under changed dependencies — re-realizing`);
+          emitEvent(`${groupLabel}: tests went red under changed dependencies — re-realizing`, { group: representative.name });
         }
       }
       if (reusable) {
@@ -368,7 +418,7 @@ export async function realize(
             reused: true,
           });
         }
-        emitEvent(`${groupLabel}: unchanged — reused the cached realization`);
+        groupEnd("reused", "unchanged — reused the cached realization");
         return;
       }
     }
@@ -378,6 +428,7 @@ export async function realize(
       members.every((member) => candidate.supportedSymbolTypes.includes(member.type)),
     );
     if (realizer === undefined) {
+      groupEnd("failed", "no compatible Realizer");
       for (const member of members) {
         unrealized.set(member.name, "failed");
         resolutions.push({
@@ -437,7 +488,7 @@ export async function realize(
         attempt,
         verificationFeedback: feedback,
         now: options.now,
-        harness: options.harness,
+        harness: groupHarness,
       };
       const resolution = await realizer.realize(representative, context);
       // These harnesses are human-contract material owned by the engine.
@@ -535,7 +586,12 @@ export async function realize(
           changedSurface.add(member.name);
         }
       }
+      groupEnd("resolved");
     } else {
+      groupEnd(
+        groupResolution.outcome === "blocked" ? "blocked" : "failed",
+        groupResolution.reason.split("\n", 1)[0],
+      );
       for (const member of members) {
         unrealized.set(member.name, groupResolution.outcome === "blocked" ? "blocked" : "failed");
         resolutions.push(
