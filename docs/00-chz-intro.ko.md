@@ -95,35 +95,65 @@ imagine class ShootingGame {
     width = 720;
     height = 1280;
     
-    requirements(`2D 슈팅 게임에 적합한 배경 이미지를 생성하십시오. 배경은 우주 공간을 연상시키는 디자인이어야 합니다.`);
+    requirements(`
+      Positive prompt: masterpiece, best quality, vertical 2D arcade shooter
+      background, deep outer space, colorful nebulae, dense star field,
+      subtle parallax layers, dark navy and violet palette, polished game art
+      Negative prompt: characters, enemies, spacecraft, projectiles, HUD, UI,
+      text, logo, watermark, border, blurry, low quality
+    `);
   };
   
   imagine resource alienSprite: Chz.ImageAsset {
     width = 64;
     height = 64;
     
-    requirements(`외계인 적 캐릭터 스프라이트를 생성하십시오. 외계인은 귀엽고 만화적인 스타일이어야 합니다.`);
+    requirements(`
+      Positive prompt: masterpiece, best quality, single cute cartoon alien
+      enemy, 2D arcade game sprite, front view, full body, centered,
+      symmetrical, bold readable silhouette, vibrant colors, transparent background
+      Negative prompt: multiple characters, scenery, ground, frame, text,
+      logo, watermark, realistic, blurry, cropped, extra limbs
+    `);
   };
   
   imagine resource playerSprite: Chz.ImageAsset {
     width = 64;
     height = 64;
   
-    requirements(`플레이어 캐릭터 스프라이트를 생성하십시오. 플레이어는 우주선 형태여야 합니다.`);
+    requirements(`
+      Positive prompt: masterpiece, best quality, single player spaceship,
+      2D arcade game sprite, front view, centered, symmetrical, compact shape,
+      blue engine glow, crisp edges, transparent background
+      Negative prompt: multiple spacecraft, pilot, scenery, ground, frame,
+      text, logo, watermark, realistic photograph, blurry, cropped
+    `);
   };
   
   imagine resource bulletSprite: Chz.ImageAsset {
     width = 16;
     height = 16;
     
-    requirements(`총알 스프라이트를 생성하십시오. 총알은 단순한 원형 모양이어야 합니다.`);
+    requirements(`
+      Positive prompt: masterpiece, best quality, single circular energy
+      bullet, tiny 2D arcade game projectile sprite, centered, simple round
+      shape, bright cyan core, soft glow, crisp edges, transparent background
+      Negative prompt: multiple projectiles, weapon, scenery, frame, text,
+      logo, watermark, complex shape, blurry
+    `);
   };
   
   imagine resource shootSound: Chz.AudioAsset {
     // maxDuration 같은 제약 프로퍼티를 통해 상한/하한을 걸 수도 있습니다.
     maxDuration = 1.0;
     
-    requirements(`총알 발사 효과음을 생성하십시오. 짧고 날카로운 소리여야 합니다.`);
+    requirements(`
+      Positive prompt: retro arcade laser shot sound effect, single one-shot,
+      short sharp electronic zap, crisp transient, fast decay, punchy, clean,
+      dry, under one second
+      Negative prompt: music, melody, ambience, speech, echo, reverb,
+      distortion, long tail, multiple shots
+    `);
   };
 }
 
@@ -141,6 +171,7 @@ $ chz realize example.chz.ts
 
 # realize가 완료되면, 아래와 같은 파일 구조가 생성됩니다.
 |- example.chz.ts
+|- example.ts                                # 자동 생성된 shim — 바깥 코드가 import하는 진입구 (아래 참조)
 |- chz/realization
     |- example/
         |- realization-cache.json                # 증분 realize를 위한 캐시
@@ -164,10 +195,32 @@ $ chz realize example.chz.ts
 ```
 
 사람이 직접 작성한 코드도 realization 디렉토리에 복사된다는 점에 주목하십시오.
-`chz build`는 이 디렉토리만으로 — LLM 호출 없이 — 빌드를 수행해야 하기
-때문입니다. 이때 imagine 심볼을 참조하지 않는 코드는 `__prologue__.ts`로,
-참조하는 코드는 `__epilogue__.ts`로 나뉘어 저장됩니다. 구현보다 먼저 로드되어야
-하는 코드와 나중에 로드되어야 하는 코드의 구분이며, 자세한 규칙은
-[60 문서](60-realize-intro.ko.md)를 참조하십시오.
+치즈에는 별도의 빌드 단계가 없어서, 커밋된 이 디렉토리가 — LLM 호출 없이 —
+그대로 실행·번들링되는 최종 코드이기 때문입니다. 이때 imagine 심볼을 참조하지
+않는 코드는 `__prologue__.ts`로, 참조하는 코드는 `__epilogue__.ts`로 나뉘어
+저장됩니다. 구현보다 먼저 로드되어야 하는 코드와 나중에 로드되어야 하는 코드의
+구분이며, 자세한 규칙은 [60 문서](60-realize-intro.ko.md)를 참조하십시오.
 
 realize에 대한 자세한 명세는 60 문서에서 확인할 수 있습니다.
+
+### realize된 코드는 어떻게 import하나요?
+
+소스 파일 옆에 자동 생성되는 `example.ts`(shim)를, 평범한 상대 경로로
+import하면 됩니다:
+
+```typescript
+/// game.ts
+import { greetLikePirate, ShootingGame } from './example';
+
+console.log(greetLikePirate('치즈군'));
+```
+
+치즈에는 별도의 빌드 단계도, 번들러 플러그인도 없습니다 — realize가 끝난
+프로젝트는 치즈를 모르는 도구도 그대로 다룰 수 있는 평범한 TypeScript
+프로젝트이며, shim은 표준 해석 규칙만으로 realize 산출물에 도달하게 해 주는
+커밋된 파일입니다. 치즈 파일끼리 import할 때도 같은 규칙이 적용되며, 이
+import 문이 파일 경계를 넘는 의존성 그래프
+([62 문서](62-realize-dependency-graph.ko.md) 참조)의 단서가 됩니다.
+
+이 규칙의 전체 명세는 [20 문서](20-module-resolution.ko.md)에서 확인할 수
+있습니다.

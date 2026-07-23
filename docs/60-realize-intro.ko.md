@@ -154,15 +154,17 @@ function payDepositInterest(account: DepositAccount, baseRate: number): Interest
 
 **기본적으로 계약이 이깁니다.**
 
-- `ensure` 계약 테스트는 오버라이드를 포함한 최종 코드에 대해 실행되며, 실패하면 빌드가 실패합니다.
+- `ensure` 계약 테스트는 오버라이드를 포함한 최종 코드에 대해 실행되며, 실패하면 검증(`chz verify`, [20 문서](20-module-resolution.ko.md) 참조)이 실패합니다.
 - 계약 역시 사람이 작성한 스펙입니다. 오버라이드와 계약이 충돌한다는 것은 '사람이 작성한 의도끼리의 모순'이며, 치즈는 이를 감추지 않고 드러냅니다. 오버라이드를 고치거나, 계약을 갱신하십시오.
 - 단, `--skip-tests` 같은 옵션을 명시적으로 사용한 경우에는 검증을 건너뛰고 편집이 우선할 수 있습니다. 이 경우에도 경고는 출력됩니다.
 
 ## 사람이 작성한 코드는 어디에 저장되나요?
 
-`chz build`와 CI는 커밋된 realization 디렉토리만으로 — LLM 호출 없이 — 빌드를
-수행합니다. 따라서 realization 디렉토리는 그 자체로 완결된 TypeScript 컴파일
-단위여야 하며, LLM이 생성한 구현뿐 아니라 **사람이 직접 작성한 코드의 사본**도
+치즈에는 별도의 빌드 단계가 없습니다 — realize가 끝난 프로젝트는 여러분이
+원래 쓰던 빌드 도구가 그대로 소비하는 평범한 TypeScript 프로젝트이며, CI도
+커밋된 realization 디렉토리만으로 — LLM 호출 없이 — 동작합니다(20 문서 참조).
+따라서 realization 디렉토리는 그 자체로 완결된 TypeScript 컴파일 단위여야
+하며, LLM이 생성한 구현뿐 아니라 **사람이 직접 작성한 코드의 사본**도
 포함해야 합니다.
 
 이때 사람 코드는 imagine 심볼과의 관계에 따라 두 파일로 나뉘어 저장됩니다
@@ -190,6 +192,11 @@ chz/realization/example/implementations/
 > 것뿐입니다.** 구현이 `__epilogue__.ts`의 심볼을 참조하면 import가 순환하게
 > 되므로, realize 단계에서 에러로 보고됩니다. 구현에게 보여주고 싶은 타입과
 > 헬퍼는 imagine 심볼을 참조하지 않는 형태로 작성하여 prologue에 남게 하십시오.
+
+세 층을 순서대로 연결하는 진입점이 `implementation.ts`입니다. 소스 파일이
+`export`한 심볼은 이 진입점을 거쳐 그대로 다시 내보내지며, 바깥 코드는 소스
+파일 옆에 자동 생성되는 shim을 통해 이를 import합니다 — 이 경로 전체의
+규칙은 20 문서가 정의합니다.
 
 또한 `.chz.ts` 원본이 여전히 유일한 source of truth입니다. prologue와
 epilogue는 파생 산출물이므로 직접 수정해서는 안 되며(수정은 `.chz.ts`에서),

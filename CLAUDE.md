@@ -24,12 +24,14 @@ cache, and a changed human layer (prologue/epilogue) routes every reused
 symbol through the retest net. `chz realize -j N` runs independent graph
 groups concurrently (AskUser batches are serialized FIFO), and the file-less
 form realizes the `include` globs from chz.config.js file by file. Broader
-syntax, override (`@chz-realize-override`) preservation, and cross-file
-graphs remain future work. When code and docs disagree, the docs are more
-current.
+syntax, override (`@chz-realize-override`) preservation, and the cross-file
+graph implementation remain future work; the module-resolution / sidecar-shim
+spec that cross-file imports build on is settled in doc 20. When code and
+docs disagree, the docs are more current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
-`docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,
+`docs/` — `00` intro, `20` module resolution & the no-build principle, `60`
+realize output & overrides, `61` Realizer harness,
 `62` dependency graph, `63` harness rules & tool spec, `64` harness system
 prompt — and `docs/idea-sketches/` for open questions, rationale, and
 discussion history (`260723-00-init.md` is the latest sketch). If this file
@@ -86,8 +88,12 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   `@profile`).
 - The Cheese extension keywords exist only at declaration level, so the
   compiler is a declaration-level preprocessor plus the TypeScript compiler
-  API — no full self-built parser. `chz build` = strip extensions → plain TS
-  → esbuild/tsc, with no LLM involvement.
+  API — no full self-built parser. There is deliberately **no `chz build`
+  step** (doc 20): realize commits plain TS — including a per-module sidecar
+  shim (`example.ts` next to `example.chz.ts`) that consumers import as
+  `./example` — so the user's existing toolchain (tsc/esbuild/Vite/Metro/
+  webpack) consumes the project with zero Cheese plugins; `chz verify`
+  re-checks drift hashes, unrealized symbols, and tests without an LLM.
 - "Usage creates the contract" is implemented by running tsc on the stripped
   output and converting its diagnostics (e.g. `Property 'start' does not
   exist`) into the LLM's obligation list.
@@ -102,8 +108,11 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   goes to `implementations/__prologue__.ts`, code that does goes to
   `__epilogue__.ts`. One-way ES-module layering (prologue ← realized code ←
   epilogue) means realized code may only reference prologue symbols;
-  referencing epilogue is an error. Build/CI compile this directory alone,
-  with no LLM. `.chz.ts` stays the source of truth; realized code is edited
+  referencing epilogue is an error. CI and the user's own build tooling
+  consume this committed directory alone, with no LLM and no bundler plugin;
+  outside code reaches it through the sidecar shim (doc 20), never by
+  importing `.chz.ts` or realization paths directly. `.chz.ts` stays the
+  source of truth; realized code is edited
   only via `@chz-realize-override` markers, and unauthorized drift is caught
   by hashes in `realization-cache.json`. Preserving top-level side-effect
   order across the split is an open design issue.
