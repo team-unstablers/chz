@@ -1,12 +1,12 @@
 imagine function phoneNumberNormalizer(input: string) {
     requirements(`
-        # 휴대폰 번호 노멀라이저
+        # Mobile Phone Number Normalizer
 
-        - 01012341234 -> 010-1234-1234 형식으로 노멀라이즈 합니다.
-        - 한국 휴대폰번호 기준.
-        - 010-123-1234 / 010-1234-1234 의 두가지 형식이 있습니다
+        - Normalize 01012341234 to the 010-1234-1234 format.
+        - Follow South Korean mobile phone number conventions.
+        - Support both 010-123-1234 and 010-1234-1234.
 
-        - 무효한 번호는 포매팅 하지 마세요. (010-1234-12345 -> X)
+        - Do not format invalid numbers. (010-1234-12345 -> invalid)
     `);
 }
 

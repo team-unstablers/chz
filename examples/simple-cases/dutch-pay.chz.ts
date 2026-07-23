@@ -1,53 +1,52 @@
 /// dutch-pay.chz.ts
-// AskUser 에스컬레이션 경로를 검증하기 위한 예제 — 더치페이 정산.
+// An example that verifies the AskUser escalation path: splitting a bill.
 //
-// 이 예제의 requirements에는 의도적인 '정책 공백'이 있습니다. 총액이
-// 나누어떨어지지 않을 때 남는 몇 원을 배열의 어느 위치 사람이 더 내는지는
-// 스펙 작성자(사람)만 아는 모임의 관례이고, 이 파일의 ensure 계약은 그
-// 선택을 일부러 구분하지 못하도록 불변식만 검사합니다. requirements가 임의
-// 가정(ASSUMPTION)을 명시적으로 금지하므로, 성실한 Realizer는 구현 전에
-// AskUser로 사람에게 관례를 확인할 수밖에 없습니다.
+// The requirements in this example contain an intentional policy gap. When
+// the total is not evenly divisible, only the human spec author knows which
+// array positions should pay the remaining won. The ensure contracts
+// deliberately check only invariants, so they cannot distinguish that choice.
+// Because the requirements explicitly prohibit an arbitrary ASSUMPTION, a
+// diligent Realizer must use AskUser to confirm the convention before coding.
 
 imagine function 더치페이(총액: number, 인원수: number): number[] {
   requirements(`
-    # 더치페이 정산기
+    # Group Bill Splitter
 
-    모임에서 쓴 총액(원)을 인원수만큼 나누어, i번째 사람이 낼 금액의 배열을
-    반환합니다.
+    Divide a group's total expenditure in won among the given number of people,
+    and return an array containing the amount the person at each position pays.
 
-    ## 확정된 규칙
-    - 총액은 0 이상의 정수(원 단위), 인원수는 1 이상의 정수라고 가정해도
-      됩니다.
-    - 반환 배열의 길이는 인원수와 같고, 모든 금액은 0 이상의 정수입니다.
-    - 배열의 합은 총액과 정확히 일치해야 합니다. 1원도 새거나 남으면 안
-      됩니다.
-    - 가장 많이 내는 사람과 가장 적게 내는 사람의 차이는 최대 1원입니다.
-      (즉, 남는 원은 여러 사람에게 1원씩 나뉘어 얹힙니다)
+    ## Established rules
+    - You may assume that the total is a non-negative integer amount in won and
+      that the number of people is an integer of at least 1.
+    - The returned array has the same length as the number of people, and every
+      amount is a non-negative integer.
+    - The array must sum to exactly the total. Not even one won may be lost or left over.
+    - The difference between the largest and smallest payment is at most one won.
+      In other words, the remaining won are distributed one each among several people.
 
-    ## 남는 원(₩)의 배분 위치 — 구현 전에 반드시 사람에게 확인할 것
-    - 총액이 나누어떨어지지 않으면 일부 인원은 1원을 더 내야 합니다. 배열의
-      '어느 위치'에 있는 사람들이 1원을 더 내는지는 우리 모임의 관례로
-      정해져 있습니다.
-    - 그 관례는 이 파일에도, 이 프로젝트의 다른 어떤 파일에도 적혀 있지
-      않습니다. 스펙 작성자의 머릿속에만 있습니다.
-    - 돈이 걸린 정책이라 잘못 짚으면 실제 불만이 생깁니다. 임의로 정한 뒤
-      ASSUMPTION 주석으로 넘어가는 것을 금지합니다. 반드시 사람에게
-      질문(AskUser)하여 관례를 확인한 뒤 그대로 구현하십시오.
+    ## Positions that receive the remaining won — ask the human before implementation
+    - When the total is not evenly divisible, some people must pay one additional won.
+      Our group's convention determines which array positions pay that extra won.
+    - That convention is not documented in this file or anywhere else in the project.
+      It exists only in the spec author's mind.
+    - This policy concerns money, so guessing incorrectly could cause real complaints.
+      Do not choose arbitrarily and proceed with an ASSUMPTION comment. You must use
+      AskUser to confirm the convention with the human, then implement it exactly.
   `);
 
-  // 짧은 계약: 혼자 정산하면 배분 정책이 개입할 여지가 없습니다.
-  ensure(더치페이(10000, 1)[0] === 10000, "혼자면 총액을 그대로 냅니다.");
+  // Short contract: splitting for one person leaves no room for the distribution policy.
+  ensure(더치페이(10000, 1)[0] === 10000, "One person pays the full total.");
 
-  ensure("나누어떨어지면 전원이 똑같이 냅니다.", () => {
+  ensure("Everyone pays the same amount when the total divides evenly.", () => {
     const 금액들 = 더치페이(9000, 3);
 
     assert(금액들.length === 3);
     assert(금액들.every((금액) => 금액 === 3000));
   });
 
-  // 핵심 계약: 나누어떨어지지 않는 경우에도 '누가' 1원을 더 내는지는
-  // 일부러 검사하지 않습니다. 그것이 AskUser로 확인해야 할 정책입니다.
-  ensure("남는 원이 있어도 합계와 공평성 불변식은 지켜집니다.", () => {
+  // Key contract: when the total does not divide evenly, this deliberately does
+  // not check who pays the extra won. That policy must be confirmed through AskUser.
+  ensure("Sum and fairness invariants hold even when some won remain.", () => {
     const 금액들 = 더치페이(10000, 3);
 
     assert(금액들.length === 3);
@@ -56,7 +55,7 @@ imagine function 더치페이(총액: number, 인원수: number): number[] {
     assert(Math.max(...금액들) - Math.min(...금액들) <= 1);
   });
 
-  ensure("총액이 0원이면 아무도 내지 않습니다.", () => {
+  ensure("Nobody pays anything when the total is zero.", () => {
     const 금액들 = 더치페이(0, 4);
 
     assert(금액들.length === 4);
@@ -64,7 +63,7 @@ imagine function 더치페이(총액: number, 인원수: number): number[] {
   });
 }
 
-// --- 최소 배선 코드: realize된 함수를 호출하여 결과를 콘솔에 출력합니다. ---
+// --- Minimal wiring: call the realized function and print the result. ---
 
 const 정산_결과 = 더치페이(10000, 3);
-console.log(`10,000원 / 3명 정산 결과: ${정산_결과.join("원, ")}원`);
+console.log(`Result of splitting 10,000 won among 3 people: ${정산_결과.join(" won, ")} won`);
