@@ -521,12 +521,19 @@ ERROR [12:5] TS2322: Type 'string' is not assignable to type 'number'.
   권장합니다(엔진 세부사항).
 
 이 피드백은 `RunTypeCheck`를 대체하지 않습니다 — 인라인 진단은 "방금 쓴 파일"
-의 빠른 신호이고, `RunTypeCheck`는 realization 디렉토리 전체의 판정입니다.
+의 빠른 신호이고, `RunTypeCheck`는 세션 스코프 전체의 판정입니다.
 
 ## 검증 툴
 
 세 툴 모두 **엔진이 미리 정해 둔 명령**을 실행할 뿐입니다. LLM이 넘기는 인자는
 `RunTests`의 대상 파일 목록이 전부이고, 커맨드라인을 구성할 표면은 없습니다.
+
+세 툴의 기본 판정 범위는 **세션 스코프**입니다: 이 세션이 realize 중인 심볼
+(순환 그룹이면 그 멤버 전체)의 구현·autogen·ensure 파일. 스코프 파일이
+import하는 대상(프롤로그, 이미 realize된 의존 심볼)은 타입체크에 자연히
+포함되지만, 아직 realize되지 않은 다른 심볼의 파일이나 `__epilogue__`가 세션의
+판정을 오염시키지는 않습니다. 스코프 없는 전체 판정은 모든 심볼이 resolve된
+뒤 엔진의 최종 검증에서 한 번 수행됩니다([61 문서](61-realize-realizer.ko.md)).
 
 ### `RunTests`
 
@@ -535,7 +542,9 @@ RunTests(testFiles: string[]): TestResult[]
 ```
 
 - `testFiles`는 `outputDir` 내부의 테스트 파일 경로들이어야 합니다(경계 검사
-  적용). 빈 배열이면 realization 디렉토리의 전체 테스트를 실행합니다.
+  적용). 빈 배열이면 세션 스코프의 전체 테스트(이 심볼의 autogen + ensure)를
+  실행합니다. 스코프 심볼의 autogen 테스트가 아직 없으면 red 결과와 함께
+  "유닛 테스트를 먼저 작성하라"는 복구 힌트를 돌려줍니다.
 - 엔진이 vitest를 고정 설정으로 실행하고, 결과를 요약해 돌려줍니다: 파일별
   pass/fail 카운트와, 실패한 테스트의 이름·assertion 메시지·관련 스택 일부.
 - 세션 안에서 green을 확인했더라도 그것이 최종 판정은 아닙니다 — `Finish` 후
@@ -547,8 +556,9 @@ RunTests(testFiles: string[]): TestResult[]
 RunTypeCheck(): TypeCheckResult
 ```
 
-- 엔진이 realization 디렉토리 전체에 `tsc --noEmit`을 실행하고, 진단 목록
-  (`{file, line, col, code, message}`)을 돌려줍니다.
+- 엔진이 세션 스코프 파일과 그 import 대상에 `tsc --noEmit`을 실행하고, 진단
+  목록(`{file, line, col, code, message}`)을 돌려줍니다. 스코프가 없는 최종
+  검증에서는 realization 디렉토리 전체가 대상입니다.
 
 ### `RunLinter`
 
@@ -559,6 +569,12 @@ RunLinter(): LintResult[]
 - 엔진이 고정 설정의 린터(eslint)를 실행하고 결과를 돌려줍니다. realize
   산출물의 제한 서브셋 검사(`no-eval`, `no-any`, `@profile` 밖 API 사용 금지 —
   00 문서)도 린트 규칙으로 이 단계에서 걸립니다.
+- 제한 서브셋은 **모델이 작성한 파일**(심볼 구현, autogen 테스트)에만
+  적용됩니다. 사람 소유 파일(`__prologue__`, `__epilogue__`)과 엔진 소유 파일
+  (`implementation.ts` 엔트리포인트, `*.ensure.ts` 하네스)은 린트 대상이
+  아닙니다 — 확장은 사람의 것이고, 제한은 LLM의 것입니다(00 문서). 특히
+  엔트리포인트는 에필로그를 정당하게 import하므로 `no-epilogue-import`의
+  대상이 될 수 없습니다.
 
 > **NOTE (캡처 한도와 출력 바운딩의 분리)**: 검증 툴은 서브프로세스를 실행
 > 하므로 두 층의 상한이 있습니다. (1) **프로세스 캡처 한도** — 엔진은

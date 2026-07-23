@@ -14,8 +14,8 @@ import {
   type ChzAskUserAnswer,
   type ChzAskUserQuestion,
   type ChzProjectConfig,
+  type ChzRealizationScope,
   type ChzRealizer,
-  type IndependentVerificationInput,
   type RealizeResult,
 } from "./realize.ts";
 import { findChzConfig, loadChzConfig, selectRealizer } from "./realizer/config.ts";
@@ -179,18 +179,19 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
   if (configured.path !== undefined) io.out(`config: ${configured.path}`);
   let lastTestOutcome: RealizationTestOutcome | undefined;
   const runTests = deps.runTests ?? runSelectedTests;
-  const verify = async (input: IndependentVerificationInput) => {
+  const runVerificationChecks = async (baseDir: string, scope?: ChzRealizationScope) => {
     const verificationContext = {
       projectRoot: configured.projectRoot,
-      outputDir: input.baseDir,
+      outputDir: baseDir,
       activeProfile: configured.config.profile ?? "console",
+      scope,
       resolvedDependencies: [],
       maxTurns: configured.config.maxTurns ?? 24,
       maxRetries: configured.config.maxRetries ?? 2,
       baseContexts: "",
       harness: {
         runTests: async (testFiles: string[]) => {
-          lastTestOutcome = await runTests(input.baseDir, testFiles);
+          lastTestOutcome = await runTests(baseDir, testFiles);
           return {
             passed: lastTestOutcome.passed,
             output: lastTestOutcome.output,
@@ -236,7 +237,8 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       askUser: deps.askUser ?? (process.stdin.isTTY && process.stdout.isTTY ? interactiveAskUser(io) : undefined),
       now: deps.now,
       skipVerification: parsed.skipTests,
-      verify,
+      verify: (input) => runVerificationChecks(input.baseDir, { symbolNames: [input.symbol.name] }),
+      verifyRealization: (baseDir) => runVerificationChecks(baseDir),
       harness: {
         runTests: async (testFiles) => {
           const outcome = await runTests(realizationBaseDir(sourceFile), testFiles);

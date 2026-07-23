@@ -23,6 +23,7 @@ import type {
   ChzHarnessServices,
   ChzImagineSymbol,
   ChzImagineSymbolResolution,
+  ChzRealizationScope,
   ChzRealizer,
   ChzResolutionResolved,
   ChzVerificationResult,
@@ -71,8 +72,13 @@ export interface RealizeOptions {
   askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
   now?: () => Date;
   harness?: ChzHarnessServices;
-  /** Independent engine verification after Finish. */
+  /** Independent engine verification after Finish, scoped to one symbol. */
   verify?: (input: IndependentVerificationInput) => Promise<ChzVerificationResult>;
+  /**
+   * Whole-realization verification (epilogue wiring, entry point, full test
+   * suite) after every symbol resolved. Defaults to the engine checks.
+   */
+  verifyRealization?: (baseDir: string) => Promise<ChzVerificationResult>;
   /** Explicit escape hatch used by --skip-tests. */
   skipVerification?: boolean;
 }
@@ -192,6 +198,7 @@ export async function realize(
         projectRoot,
         outputDir: baseDir,
         activeProfile,
+        scope: { symbolNames: [symbol.name] },
         resolvedDependencies: symbol.dependencies.flatMap((dependency) => {
           const resolution = resolvedByName.get(dependency.name);
           return resolution === undefined ? [] : [resolution];
@@ -219,8 +226,9 @@ export async function realize(
       if (options.skipVerification) break;
 
       const verification = options.verify === undefined
-        ? await runDefaultIndependentVerification(
-            { baseDir, symbol, resolution, attempt },
+        ? await runDefaultVerification(
+            baseDir,
+            { symbolNames: [symbol.name] },
             projectRoot,
             activeProfile,
             maxTurns,
@@ -257,6 +265,30 @@ export async function realize(
 
   if (realizedSymbols.length > 0) {
     writeFileSync(join(baseDir, "implementation.ts"), renderEntryPoint(specs, fileName), "utf8");
+  }
+
+  // Per-symbol verification is scoped, so the human epilogue wiring, the entry
+  // point, and cross-symbol integration have not been judged yet. One unscoped
+  // pass covers them; its failures are not fed back to a model because no
+  // single symbol owns them.
+  if (realizedSymbols.length > 0 && !options.skipVerification) {
+    const finalVerification = options.verifyRealization === undefined
+      ? await runDefaultVerification(
+          baseDir,
+          undefined,
+          projectRoot,
+          activeProfile,
+          maxTurns,
+          maxRetries,
+          options.harness,
+        )
+      : await options.verifyRealization(baseDir);
+    if (!finalVerification.passed) {
+      return resultWithFailure(
+        "failed",
+        `Whole-realization verification failed after every symbol resolved. The realized symbols are individually green; check the human-owned wiring (__epilogue__) and cross-symbol integration:\n${boundVerificationFeedback(finalVerification.output)}`,
+      );
+    }
   }
   const files = collectAllEmittedFiles(baseDir);
   return {
@@ -529,8 +561,9 @@ function boundVerificationFeedback(output: string): string {
   return bounded;
 }
 
-async function runDefaultIndependentVerification(
-  input: IndependentVerificationInput,
+async function runDefaultVerification(
+  baseDir: string,
+  scope: ChzRealizationScope | undefined,
   projectRoot: string,
   activeProfile: string,
   maxTurns: number,
@@ -539,8 +572,9 @@ async function runDefaultIndependentVerification(
 ): Promise<ChzVerificationResult> {
   const context = {
     projectRoot,
-    outputDir: input.baseDir,
+    outputDir: baseDir,
     activeProfile,
+    scope,
     resolvedDependencies: [],
     maxTurns,
     maxRetries,

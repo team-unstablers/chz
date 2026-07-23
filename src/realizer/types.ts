@@ -57,10 +57,21 @@ export interface ChzHarnessServices {
   onModelReasoning?: (message: string) => void;
 }
 
+/**
+ * The realization files one session owns. Verification tools narrow to this
+ * scope so a session is never judged on other symbols' unfinished files; an
+ * SCC group realized together lists every member symbol.
+ */
+export interface ChzRealizationScope {
+  symbolNames: readonly string[];
+}
+
 export interface ChzRealizeContext {
   projectRoot: string;
   outputDir: string;
   activeProfile: string;
+  /** Verification scope of this session; absent = the whole realization. */
+  scope?: ChzRealizationScope;
   resolvedDependencies: ChzResolutionResolved[];
   maxTurns: number;
   maxRetries: number;

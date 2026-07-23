@@ -279,6 +279,86 @@ describe("ChzVerificationToolRuntime default restricted-subset linter", () => {
   });
 });
 
+describe("ChzVerificationToolRuntime verification scope", () => {
+  it("judges a scoped session only on its own files, never the epilogue or later symbols", async () => {
+    const { context, resolveOutputPath } = makeContext();
+    writeTree(context.outputDir, {
+      "implementations/__prologue__.ts": "export type Title = string;\n",
+      "implementations/slugify.ts": [
+        'import type { Title } from "./__prologue__.ts";',
+        "export function slugify(input: Title): string { return input.toLowerCase(); }",
+        "",
+      ].join("\n"),
+      "tests/test_slugify.autogen.ts": [
+        'import { slugify } from "../implementations/slugify.ts";',
+        'export const checked: string = slugify("A");',
+        "",
+      ].join("\n"),
+      // Human wiring already references the not-yet-realized second symbol.
+      "implementations/__epilogue__.ts": [
+        'import { buildUniqueSlugs } from "./buildUniqueSlugs.ts";',
+        "console.log(buildUniqueSlugs([]));",
+        "",
+      ].join("\n"),
+    });
+    context.scope = { symbolNames: ["slugify"] };
+    const runtime = new ChzVerificationToolRuntime(context, resolveOutputPath);
+
+    expect(parseOutput(await runtime.execute("RunTypeCheck", {}))).toEqual({
+      passed: true,
+      diagnostics: [],
+    });
+
+    // The unscoped final pass still surfaces the dangling epilogue import.
+    context.scope = undefined;
+    const finalResult = parseOutput(await runtime.execute("RunTypeCheck", {}));
+    expect(finalResult.passed).toBe(false);
+  });
+
+  it("exempts engine-owned and human-owned files from the restricted-subset linter", async () => {
+    const { context, resolveOutputPath } = makeContext();
+    writeTree(context.outputDir, {
+      // The engine-owned entry point legitimately imports the epilogue.
+      "implementation.ts": 'import "./implementations/__epilogue__.ts";\n',
+      // Human layers may use full TypeScript, including explicit any.
+      "implementations/__prologue__.ts": "export const config: any = {};\n",
+      "implementations/__epilogue__.ts": "export const wired: any = true;\n",
+      "tests/test_greet.ensure.ts": "export const harnessValue: any = null;\n",
+      "implementations/greet.ts": "export function greet(name: string): string { return name; }\n",
+    });
+    const runtime = new ChzVerificationToolRuntime(context, resolveOutputPath);
+
+    expect(parseOutput(await runtime.execute("RunLinter", {}))).toEqual({
+      passed: true,
+      diagnostics: [],
+    });
+  });
+
+  it("substitutes the session scope for an empty RunTests list and demands autogen tests first", async () => {
+    const runTests = vi.fn(async (files: string[]) => ({ passed: true, output: files.join("|") }));
+    const { context, resolveOutputPath } = makeContext({ runTests });
+    context.scope = { symbolNames: ["greet"] };
+    writeTree(context.outputDir, {
+      "tests/test_greet.ensure.ts": "export {};\n",
+    });
+    const runtime = new ChzVerificationToolRuntime(context, resolveOutputPath);
+
+    // No autogen test yet: a red result with a recovery hint, nothing runs.
+    const missing = parseOutput(await runtime.execute("RunTests", { testFiles: [] }));
+    expect(missing.passed).toBe(false);
+    expect(String(missing.output)).toContain("tests/test_greet.autogen.ts");
+    expect(runTests).not.toHaveBeenCalled();
+
+    writeTree(context.outputDir, { "tests/test_greet.autogen.ts": "export {};\n" });
+    const substituted = parseOutput(await runtime.execute("RunTests", { testFiles: [] }));
+    expect(substituted).toMatchObject({ passed: true });
+    expect(runTests).toHaveBeenCalledWith([
+      join(context.outputDir, "tests", "test_greet.autogen.ts"),
+      join(context.outputDir, "tests", "test_greet.ensure.ts"),
+    ]);
+  });
+});
+
 describe("ChzVerificationToolRuntime default test runner", () => {
   it(
     "runs only selected tests and uses an empty list for the complete realization suite",

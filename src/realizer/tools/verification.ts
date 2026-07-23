@@ -115,6 +115,63 @@ function collectTypeScriptFiles(directory: string): string[] {
   return files.sort();
 }
 
+// ---------------------------------------------------------------------------
+// Verification scope (docs/62: per-symbol sessions must not be judged on other
+// symbols' unfinished files, and never on engine- or human-owned layers)
+// ---------------------------------------------------------------------------
+
+function scopeImplementationPath(outputDir: string, symbolName: string): string {
+  return join(outputDir, "implementations", `${symbolName}.ts`);
+}
+
+function scopeAutogenTestPath(outputDir: string, symbolName: string): string {
+  return join(outputDir, "tests", `test_${symbolName}.autogen.ts`);
+}
+
+function scopeEnsureTestPath(outputDir: string, symbolName: string): string {
+  return join(outputDir, "tests", `test_${symbolName}.ensure.ts`);
+}
+
+/**
+ * The existing files a scoped session is verified on. Dependencies (prologue,
+ * previously realized symbols) still enter the type-check program through the
+ * scope files' imports; `__epilogue__` may import not-yet-realized symbols and
+ * must never be pulled in by a scoped session.
+ */
+function collectScopeFiles(outputDir: string, symbolNames: readonly string[]): string[] {
+  return symbolNames
+    .flatMap((name) => [
+      scopeImplementationPath(outputDir, name),
+      scopeAutogenTestPath(outputDir, name),
+      scopeEnsureTestPath(outputDir, name),
+    ])
+    .filter(existsSync);
+}
+
+/** The scope's runnable test files (model autogen + engine ensure), existing only. */
+function collectScopeTestFiles(outputDir: string, symbolNames: readonly string[]): string[] {
+  return symbolNames
+    .flatMap((name) => [
+      scopeAutogenTestPath(outputDir, name),
+      scopeEnsureTestPath(outputDir, name),
+    ])
+    .filter(existsSync);
+}
+
+/**
+ * The restricted subset binds realized (model-authored) code only. Human
+ * layers may use full TypeScript, and the engine-owned entry point must import
+ * `__epilogue__` — so neither is ever linted.
+ */
+function isModelAuthoredFile(outputDir: string, file: string): boolean {
+  const rel = relative(outputDir, file).split(sep).join("/");
+  if (rel === "implementation.ts") return false; // engine-owned entry point
+  if (rel === "implementations/__prologue__.ts") return false; // human-owned
+  if (rel === "implementations/__epilogue__.ts") return false; // human-owned
+  if (/^tests\/[^/]+\.ensure\.ts$/.test(rel)) return false; // engine-owned ensure harness
+  return true;
+}
+
 function createCompilerConfig(
   configPath: string,
   projectRoot: string,
@@ -210,7 +267,9 @@ function flattenDiagnosticMessage(diagnostic: TypeScriptDiagnostic): string {
 }
 
 function runDefaultTypeCheck(context: ChzRealizeContext): VerificationOutput {
-  const files = collectTypeScriptFiles(context.outputDir);
+  const files = context.scope === undefined
+    ? collectTypeScriptFiles(context.outputDir)
+    : collectScopeFiles(context.outputDir, context.scope.symbolNames);
   if (files.length === 0) return { passed: true, diagnostics: [] };
 
   return withTypeScriptProgram(context.projectRoot, files, (program) => {
@@ -401,7 +460,10 @@ function lintSourceFile(sourceFile: SourceFile, activeProfile: string): ChzDiagn
 }
 
 function runDefaultLinter(context: ChzRealizeContext): VerificationOutput {
-  const files = collectTypeScriptFiles(context.outputDir);
+  const candidates = context.scope === undefined
+    ? collectTypeScriptFiles(context.outputDir)
+    : collectScopeFiles(context.outputDir, context.scope.symbolNames);
+  const files = candidates.filter((file) => isModelAuthoredFile(context.outputDir, file));
   if (files.length === 0) return { passed: true, diagnostics: [] };
 
   return withTypeScriptProgram(context.projectRoot, files, (program) => {
@@ -473,7 +535,27 @@ export class ChzVerificationToolRuntime {
   async execute(name: string, input: unknown): Promise<string | null> {
     if (name === "RunTests") {
       const parsed = parseRunTestsInput(input);
-      const testFiles = parsed.testFiles.map((path) => this.resolveOutputPath(path));
+      let testFiles = parsed.testFiles.map((path) => this.resolveOutputPath(path));
+      // An empty selection means "the whole verification scope": in a scoped
+      // session that is the session's own test files, so a symbol is never
+      // judged red on another symbol's unfinished suite.
+      if (testFiles.length === 0 && this.context.scope !== undefined) {
+        const { outputDir, scope } = this.context;
+        const missingAutogen = scope.symbolNames.filter(
+          (symbolName) => !existsSync(scopeAutogenTestPath(outputDir, symbolName)),
+        );
+        if (missingAutogen.length > 0) {
+          return render({
+            passed: false,
+            output: missingAutogen
+              .map((symbolName) =>
+                `no autogen test file (tests/test_${symbolName}.autogen.ts) found under ${outputDir}. Write the symbol's unit tests, then run the tests again.`,
+              )
+              .join("\n"),
+          });
+        }
+        testFiles = collectScopeTestFiles(outputDir, scope.symbolNames);
+      }
       const injected = this.context.harness?.runTests;
       if (injected !== undefined) return render(await injected(testFiles));
       return render(await runSelectedTests(this.context.outputDir, testFiles));

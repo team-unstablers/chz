@@ -239,7 +239,7 @@ describe("realize command", () => {
     expect(out.join("\n")).not.toContain("private reasoning");
   });
 
-  it("forwards selected test files from the Realizer and uses an empty list for final verification", async () => {
+  it("forwards selected test files, scopes symbol verification, and runs an unscoped final pass", async () => {
     const file = makeFixture();
     const calls: Array<{ baseDir: string; testFiles: readonly string[] }> = [];
     const runTests = async (
@@ -273,6 +273,15 @@ describe("realize command", () => {
         baseDir,
         testFiles: [join(baseDir, "tests", "test_greet.autogen.ts")],
       },
+      {
+        // Independent symbol verification narrows the empty list to the scope.
+        baseDir,
+        testFiles: [
+          join(baseDir, "tests", "test_greet.autogen.ts"),
+          join(baseDir, "tests", "test_greet.ensure.ts"),
+        ],
+      },
+      // The whole-realization pass stays unscoped: empty means every test.
       { baseDir, testFiles: [] },
     ]);
   });

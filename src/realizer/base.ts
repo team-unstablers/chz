@@ -97,12 +97,13 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "RunTests",
     description:
-      "Run the engine-fixed vitest runner. Pass output-directory test files, or an empty array to run all realization tests. This is useful feedback; Finish still triggers independent verification.",
+      "Run the engine-fixed vitest runner. Pass output-directory test files, or an empty array to run every test in this session's scope (this symbol's autogen and ensure tests). This is useful feedback; Finish still triggers independent verification.",
     inputSchema: objectSchema({ testFiles: { type: "array", items: { type: "string" } } }, ["testFiles"]),
   },
   {
     name: "RunTypeCheck",
-    description: "Run the engine-fixed strict TypeScript check over the realization output directory.",
+    description:
+      "Run the engine-fixed strict TypeScript check over this session's scope files and everything they import.",
     inputSchema: objectSchema(),
   },
   {

@@ -452,6 +452,56 @@ class CounterClassRealizer implements ChzRealizer {
   }
 }
 
+class SlugPairRealizer implements ChzRealizer {
+  readonly name = "SlugPairRealizer";
+  readonly supportedSymbolTypes = ["function"] as const;
+
+  async realize(
+    symbol: ChzImagineSymbol,
+    context: ChzRealizeContext,
+  ): Promise<ChzImagineSymbolResolution> {
+    const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+    const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+    mkdirSync(dirname(implementation), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+    writeFileSync(
+      implementation,
+      symbol.name === "slugify"
+        ? "export function slugify(input: string): string { return input.toLowerCase(); }\n"
+        : [
+            'import { slugify } from "./slugify.ts";',
+            "",
+            "export function buildUniqueSlugs(titles: readonly string[]): string[] {",
+            "  return titles.map((title) => slugify(title));",
+            "}",
+            "",
+          ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(
+      test,
+      [
+        "// @ts-expect-error The engine-owned Vitest runner provides this module for the temporary fixture.",
+        'import { expect, it } from "vitest";',
+        `import { ${symbol.name} } from "../implementations/${symbol.name}.ts";`,
+        symbol.name === "slugify"
+          ? "it('lowercases', () => { expect(slugify('AB')).toBe('ab'); });"
+          : "it('maps every title', () => { expect(buildUniqueSlugs(['AB'])).toEqual(['ab']); });",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    return {
+      outcome: "resolved",
+      symbol,
+      resolvedFile: implementation,
+      resolvedTestFiles: [test],
+      resolvedAt: new Date(),
+      resolvedBy: "slug-pair-model",
+    };
+  }
+}
+
 describe("realize engine", () => {
   it("feeds independent verification failures into bounded retry sessions", async () => {
     const data = fixture();
@@ -467,6 +517,7 @@ describe("realize engine", () => {
           ? { passed: false, output: "TS2322 first attempt failed" }
           : { passed: true, output: "green" };
       },
+      verifyRealization: async () => ({ passed: true, output: "green" }),
       now: () => new Date("2026-07-23T00:00:00.000Z"),
     });
 
@@ -514,4 +565,45 @@ describe("realize engine", () => {
     expect(readFileSync(join(result.baseDir, "implementation.ts"), "utf8"))
       .toContain('export { Counter } from "./implementations/Counter.ts";');
   });
+
+  it(
+    "verifies each symbol in its own scope even when the epilogue wires a later symbol",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "chz-scope-realize-"));
+      roots.push(root);
+      const sourceFile = join(root, "slug.chz.ts");
+      const source = [
+        "imagine function slugify(input: string): string {",
+        "  requirements(`입력을 소문자 슬러그로 만듭니다.`);",
+        "  ensure(slugify('AB') === 'ab', '소문자로 변환합니다.');",
+        "}",
+        "",
+        "imagine function buildUniqueSlugs(titles: readonly string[]): string[] {",
+        "  requirements(`각 제목을 slugify로 변환한 목록을 만듭니다.`);",
+        "  ensure('입력 순서를 보존합니다.', () => {",
+        "    assert(buildUniqueSlugs(['AB']).length === 1);",
+        "  });",
+        "}",
+        "",
+        "console.log(buildUniqueSlugs(['Hello']));",
+        "",
+      ].join("\n");
+      writeFileSync(sourceFile, source, "utf8");
+
+      const result = await realize(source, sourceFile, {
+        realizers: [new SlugPairRealizer()],
+        projectRoot: root,
+        now: () => new Date("2026-07-23T00:00:00.000Z"),
+      });
+
+      // Before scoped verification, the first symbol's session was failed by
+      // the epilogue's import of the not-yet-realized second symbol.
+      if (result.outcome !== "resolved") throw new Error(result.reason);
+      expect(result.symbols.map((symbol) => symbol.name)).toEqual([
+        "slugify",
+        "buildUniqueSlugs",
+      ]);
+    },
+    120_000,
+  );
 });
