@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "chz": "file:..",
+    "chz": "file:../../",
     "dotenv": "^17.4.2",
     "vitest": "^4.1.10"
   }
