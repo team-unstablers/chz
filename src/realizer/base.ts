@@ -34,12 +34,7 @@ const pageProperties = {
   limit: { type: "integer", minimum: 1, maximum: 2000, description: "Maximum results." },
 };
 
-/**
- * The complete, fixed harness tool surface from docs/63.
- * NOTE: temporarily diverges from the doc for prompt-tuning experiments —
- * write/verify tools are listed before the exploration tools, and the
- * exploration-tool descriptions carry a usage gate.
- */
+/** The complete, fixed harness tool surface from docs/63, in advertised order. */
 export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "WriteFile",

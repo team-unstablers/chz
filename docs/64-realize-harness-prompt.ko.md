@@ -59,13 +59,19 @@ function buildSystemParts(symbol: ChzImagineSymbol, context: ChzRealizeContext):
   opencode V2가 baseline을 동결하고 변경분을 델타 메시지로 흘리는 것과 같은
   이유로, 프롬프트 캐시를 깨지 않기 위함입니다.
 
+여기에 더해, 세션의 **첫 대화 메시지**로 킥오프 유저 턴 하나가 들어갑니다 —
+초기 메시지 배열은 `[system 고정부, system baseline, user 킥오프]`입니다.
+킥오프는 시스템 프롬프트가 아니라 메시지 주입이므로 별도 절('킥오프 유저
+턴')에서 다룹니다.
+
 ## 결정론 규칙
 
 같은 입력(심볼 스펙, 의존 산출물, CONTEXTS.md)에서는 **항상 같은 baseline
 바이트가 나와야** 합니다:
 
-- 소스 순서는 고정입니다: `<env>` → 대상 심볼 → 의존 산출물 → 결정 기록 →
-  검증 피드백(재시도에만). 소스 사이는 빈 줄(`\n\n`) 하나로 조인합니다.
+- 소스 순서는 고정입니다: `<env>` → 대상 심볼 → 사람 작성 프롤로그 →
+  의존 산출물 → 결정 기록 → 검증 피드백(재시도에만). 소스 사이는 빈
+  줄(`\n\n`) 하나로 조인합니다.
 - 목록 성격의 소스(의존 산출물)는 **이름 사전순**으로 정렬합니다.
 - 내용이 없는 소스는 헤더까지 통째로 생략합니다. 빈 섹션을 남기지 않습니다.
 - 시각 정보는 `<env>`의 날짜 한 줄뿐이며, 그 외 어떤 소스에도 타임스탬프를
@@ -77,7 +83,8 @@ function buildSystemParts(symbol: ChzImagineSymbol, context: ChzRealizeContext):
 
 ## 없는 것과 못 읽는 것의 구분
 
-소스가 **원래 없는 것**(의존이 없는 leaf 심볼, CONTEXTS.md 미존재)은 조용히
+소스가 **원래 없는 것**(의존이 없는 leaf 심볼, 아직 방출되지 않은
+`__prologue__.ts`, CONTEXTS.md 미존재)은 조용히
 생략합니다. 반면 **있어야 하는데 못 읽는 것**(심볼의 `.chz.ts` 파일 읽기
 실패, 의존 산출물 파일 소실)은 불완전한 baseline으로 세션을 시작하는 대신
 **세션 시작 자체를 실패**시킵니다. 반쪽짜리 컨텍스트로 만든 산출물은
@@ -101,11 +108,21 @@ implement is yours to decide; what to build, and any decision that reshapes
 the artifact's structure, belongs to the human. When a decision is the
 human's, escalate it — never bury it in an assumption.
 
+# Your context is pre-assembled
+
+The session context below already carries what realization usually needs:
+the symbol specification, the public surfaces of resolved dependencies, and
+the decisions recorded in previous sessions. You rarely need to explore the
+project to get oriented — when the supplied context covers the task, extra
+survey turns are wasted turns. Reach for ReadFile, ReadDir, Glob, or Grep
+when a specific fact is missing from the context, not as an opening move.
+
 # Quick triage, then code
 
 Triage from the supplied session context. Unless one of the conditions below
-applies, begin the first implementation increment in the first turn. Do not
-spend turns surveying the codebase or only describing a plan.
+applies, begin the first implementation increment in the first turn,
+normally starting with a WriteFile rather than a read. Do not spend turns
+surveying the codebase or only describing a plan.
 
 - Impossible in principle, or inappropriate to fulfill: call Abort now.
 - Materially better with a structural decision only the human can approve
@@ -163,7 +180,10 @@ Realized code targets auditability, not just correctness:
 - Mark every interpretive leap with an `ASSUMPTION:` comment.
 - Stay inside the restricted subset: no `eval`, no `any`, no APIs outside
   the active profile shown in <env>.
-- Import human-written code only from `__prologue__`. Never reference
+- Import human-written code only from `__prologue__`. When the prologue
+  already provides a type or value your implementation needs, import it from
+  `./__prologue__.ts` — never re-declare it in realized code, or the copy
+  will silently drift from the human-owned original. Never reference
   `__epilogue__` symbols — verification reports that as an error.
 - Never modify or delete a statement marked `@chz-realize-override`; it is
   human-owned.
@@ -202,6 +222,18 @@ Realized code targets auditability, not just correctness:
   턴부터 구현합니다. 코드베이스 읽기는 일반적인 구조나 관례를 익히기 위한
   준비 활동이 아니라, 다음 편집을 막는 구체적인 정보가 빠졌을 때 쓰는 복구
   수단입니다.
+- **'컨텍스트는 미리 조립되어 있다'를 프롬프트가 직접 선언합니다.** 코딩
+  에이전트로 훈련된 모델들은 세션을 코드베이스 탐색으로 여는 습관이 강하고,
+  이 습관은 코드로 막을 수 없어 prose가 담당합니다(계층 원칙). 단, 탐색을
+  억제하면 **탐색이 암묵적으로 조달하던 컨텍스트를 하네스가 전부 명시
+  공급할 의무**가 생깁니다 — 산출물 경로는 킥오프 유저 턴이, 사람 소유
+  타입은 baseline의 프롤로그 소스가 공급합니다. 공급 없이 억제만 하면
+  모델은 빈칸을 추측(경로 오기, 타입 재선언)으로 메웁니다.
+- **프롤로그는 'import만 허용'이 아니라 'import하라'입니다.** *"only from
+  `__prologue__`"*는 출처의 제한일 뿐이어서 아무것도 import하지 않아도
+  공허하게 만족됩니다. 재선언된 타입은 구조적 타이핑 덕에 검증을 green으로
+  통과한 채 사람 소유 원본에서 조용히 드리프트하므로, 재선언 금지를
+  명시하고 드리프트라는 이유까지 한 줄로 답니다.
 - **"Do not escalate these."** — 가벼운 애매함까지 AskUser로 올리는
   과잉 에스컬레이션을 막는 문장입니다. 에스컬레이션 사다리는 위로만
   올라가는 것이 아니라, 아래 단으로 처리할 것을 아래 단에 묶어두는
@@ -263,7 +295,30 @@ The following {n} symbols form a dependency cycle and must be realized
 together in this session. All of their tests must pass together.
 ```
 
-## 3. 의존 산출물
+## 3. 사람이 작성한 프롤로그
+
+```text
+# Human-written prologue
+
+Human-written code your implementation may import. When the prologue already
+provides a type or value you need, import it from `./__prologue__.ts` —
+never re-declare it in your implementation.
+
+<prologue file="implementations/__prologue__.ts">
+{outputDir/implementations/__prologue__.ts 전문}
+</prologue>
+```
+
+- realize 시작 시 엔진이 방출한 `__prologue__.ts`([60 문서](60-realize-intro.ko.md))를
+  그대로 넣습니다. 시그니처가 참조하는 사람 소유 타입(예: `Shape`)의 정의는
+  이 소스 없이는 baseline 어디에도 실리지 않아, 모델이 requirements에서
+  타입을 역산해 재선언하게 됩니다.
+- 파일이 아직 없으면 섹션을 생략하고, 있는데 읽지 못하면 세션 시작을
+  실패시킵니다('없는 것과 못 읽는 것의 구분').
+- v0에서는 전문을 포함합니다. 프롤로그가 큰 프로젝트에서의 발췌 전략(공개
+  표면만 추리기)은 미결입니다.
+
+## 4. 의존 산출물
 
 ```text
 # Resolved dependencies
@@ -285,7 +340,7 @@ detail missing from its excerpt blocks the next concrete edit.
   것을 막으면서, 습관적인 사전 탐색 대신 막힌 지점만 좁게 읽도록 유도합니다.
 - 의존이 없으면 이 섹션 전체를 생략합니다.
 
-## 4. 결정 기록
+## 5. 결정 기록
 
 ```text
 # Decisions from previous sessions
@@ -300,7 +355,7 @@ Instructions from: {realizationDir}/CONTEXTS.md
 권위는 고정부의 *"They are settled"* 문장이 이미 부여했습니다. CONTEXTS.md가
 없으면 섹션을 생략합니다.
 
-## 5. 검증 피드백 (재시도 세션에만)
+## 6. 검증 피드백 (재시도 세션에만)
 
 엔진의 독립 검증이 red여서 세션을 재시도할 때([61 문서](61-realize-realizer.ko.md)),
 직전 시도의 실패 내용이 baseline의 마지막 소스로 들어갑니다:
@@ -321,6 +376,58 @@ finish again.
 재시도가 아닌 첫 세션에는 이 섹션이 없습니다. 같은 세션 안에서의 반복
 (모델이 `RunTests`를 돌려 스스로 고치는 루프)은 baseline과 무관하게 대화
 메시지로 쌓입니다 — baseline에 손대는 것은 세션 사이의 재시도뿐입니다.
+
+# 킥오프 유저 턴
+
+시스템 프롬프트 두 파트만으로 세션을 시작하면 첫 생성 시점에 user 지시가
+하나도 없습니다. 행동 지침이 컨텍스트 상단의 system 산문에만 있으면 "가장
+최근 user 지시"에 강하게 반응하는 모델 특성과 어긋나, 고정부의 탐색 억제
+지시가 실측에서 잘 듣지 않았습니다. 그래서 세션의 첫 대화 메시지로 짧은
+**킥오프 유저 턴**을 주입합니다.
+
+첫 세션의 정본 전문:
+
+```text
+Realize {names} now.
+
+Do not open with ReadFile, ReadDir, Glob, or Grep unless realizing {names} requires a specific fact that the supplied context does not contain.
+Save each symbol implementation to
+{outputDir}/implementations/{stem}.ts and its test suite to
+{outputDir}/tests/test_{stem}.autogen.ts.
+```
+
+재시도 세션(baseline에 검증 피드백이 있는 세션)의 정본 전문:
+
+```text
+Fix the failed verification of {names} now. Start from the
+verification feedback above and the artifacts already in the output
+directory.
+```
+
+조립 규칙:
+
+- `{names}`는 세션이 realize하는 심볼 이름들 — 순환 그룹이면 구성원 전원 —
+  을 이름 사전순으로 백틱으로 감싸 콤마로 나열한 것입니다.
+- `{stem}`은 단일 심볼 세션이면 그 심볼 이름, 순환 그룹 세션이면 리터럴
+  `<symbol-name>` 플레이스홀더입니다.
+- 킥오프도 baseline과 같은 결정론 규칙을 따릅니다 — 같은 입력이면 같은
+  바이트가 나옵니다.
+
+설계 근거:
+
+- **금지 + 명시적 탈출 조건.** 순한 권고("확인할 필요가 없으면 바로
+  시작하십시오")는 실측에서 탐색을 막지 못했고, 무조건 금지는 탐색이
+  정당한 경우까지 막습니다. "컨텍스트에 없는 특정 사실이 필요한 경우가
+  아니면 탐색으로 열지 마라"는 형태가 기본 행동을 구현-우선으로 뒤집으면서
+  탈출로를 남깁니다.
+- **경로를 킥오프가 공급합니다.** 탐색을 억제하면 모델이 실제 경로를
+  관찰로 학습할 기회도 함께 사라지므로, 산출물의 기대 경로를 킥오프가
+  명시합니다. 상대 경로 해석이 projectRoot 기준인 현 툴 계약([63
+  문서](63-realize-harness-rules.ko.md))에서 이 명시가 없으면 첫
+  WriteFile이 잘못된 위치로 향합니다.
+- **재시도 세션은 앵커가 다릅니다.** 재시도에서 올바른 첫 행동은 새 구현이
+  아니라 기존 산출물과 피드백을 읽는 것이므로, 같은 킥오프를 재사용하지
+  않고 변형을 씁니다.
 
 # 턴 상한 클로징 프롬프트
 
@@ -386,8 +493,8 @@ Do not attempt any other tool call; it will fail.
 
 - 이 문서의 고정부가 61 문서 예시 코드의 `CHZ_HARNESS_SYSTEM_PROMPT`에
   해당합니다. `ChzRealizerBase`가 두 파트를 조립해 시스템 프롬프트로
-  전달하고, 서브클래스(`chat()`)는 이를 각 벤더의 system 필드 형식으로
-  변환만 합니다.
+  전달하고 킥오프 유저 턴을 첫 메시지로 추가하며, 서브클래스(`chat()`)는
+  이를 각 벤더의 메시지 형식으로 변환만 합니다.
 - `ClaudeCodeRealizer`는 예외입니다(61 문서의 '하네스 속 하네스'). Claude
   Code의 자체 시스템 프롬프트를 대체할 수 없으므로, 이 문서의 고정부·가변부를
   **세션 프롬프트(지시문)로 주입**하고, 경계는 Claude Code의 퍼미션 설정으로

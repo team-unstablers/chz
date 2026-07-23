@@ -84,23 +84,31 @@ imagine class MyFunnyGame {
 
 # 하네스 툴 명세
 
-에이전틱 세션에서 LLM에게 주어지는 툴은 다음이 전부입니다:
+에이전틱 세션에서 LLM에게 주어지는 툴은 다음이 전부입니다 (표의 행 순서는
+모델에게 광고되는 툴 목록의 순서 그대로입니다):
 
 | 분류 | 툴 | 시그니처 | 한 줄 요약 |
 |------|----|----------|-----------|
-| 읽기 | `ReadFile` | `(path, offset?, limit?): string` | 파일을 (부분) 읽기. `projectRoot` 내부만 |
-| 읽기 | `ReadDir` | `(path, offset?, limit?): string` | 디렉토리 목록. `ReadFile`과 동일한 경계·페이징 |
-| 검색 | `Glob` | `(pattern, path?, limit?): string` | 파일명 패턴 검색 |
-| 검색 | `Grep` | `(pattern, path?, include?, limit?): string` | 파일 내용 정규식 검색 |
 | 쓰기 | `WriteFile` | `(path, content): string` | 파일 전체 쓰기. `outputDir` 내부만 |
 | 쓰기 | `FindAndReplace` | `(path, oldString, newString, replaceAll?): string` | 정확 일치 기반 부분 수정. `WriteFile`과 동일한 경계 |
 | 검증 | `RunTests` | `(testFiles: string[]): TestResult[]` | 엔진이 고정된 러너(vitest)로 테스트 실행 |
 | 검증 | `RunTypeCheck` | `(): TypeCheckResult` | 엔진이 tsc를 실행 |
 | 검증 | `RunLinter` | `(): LintResult[]` | 엔진이 린터를 실행 |
+| 읽기 | `ReadFile` | `(path, offset?, limit?): string` | 파일을 (부분) 읽기. `projectRoot` 내부만 |
+| 읽기 | `ReadDir` | `(path, offset?, limit?): string` | 디렉토리 목록. `ReadFile`과 동일한 경계·페이징 |
+| 검색 | `Glob` | `(pattern, path?, limit?): string` | 파일명 패턴 검색 |
+| 검색 | `Grep` | `(pattern, path?, include?, limit?): string` | 파일 내용 정규식 검색 |
 | 대화 | `AskUser` | `(questions: ChzAskUserQuestion[]): ChzAskUserAnswer[]` | 구조를 바꾸는 결정을 사람에게 질문 |
 | 종료 | `Finish` | `(): void` | 완성을 '주장'하고 세션 종료 |
 | 종료 | `Block` | `(reason, todo): void` | 사람의 행동을 기다리는 대기 선언 |
 | 종료 | `Abort` | `(reason): void` | 구현 불가능 선언 |
+
+쓰기·검증 툴이 앞, 읽기·검색(탐색) 툴이 그 뒤인 것은 의도된 순서입니다 —
+모델은 목록 앞쪽의 툴을 선호하는 경향이 있어, 순서 자체가 "기본 행동은
+쓰기, 탐색은 예외 경로"라는 신호가 됩니다([64
+문서](64-realize-harness-prompt.ko.md)의 탐색 억제와 짝을 이룹니다). 아래
+상세 절은 광고 순서가 아니라 분류별(읽기 → 검색 → 쓰기 → 검증 → 대화 →
+종료)로 서술합니다.
 
 각 툴의 상세 명세는 아래 절들에서 정의합니다. 시그니처의 반환 타입 `string`은
 "모델에게 텍스트로 렌더되어 돌아가는 출력"을 뜻합니다 — 하네스 내부에서는
@@ -244,6 +252,21 @@ opencode는 이 규칙을 툴 설명에만 적고 구현하지 않았습니다(�
 수치 파라미터의 범위(`limit`의 최대값 등)는 런타임 클램프가 아니라 **스키마
 레벨에서 강제**합니다. 스키마 상한은 JSON Schema로 모델에게 노출되므로, 모델이
 유효 범위를 애초에 알 수 있습니다.
+
+## 탐색 게이트 — 읽기·검색 툴 공통
+
+읽기·검색 툴 4종(`ReadFile`/`ReadDir`/`Glob`/`Grep`)의 설명에는 공통
+게이트가 들어갑니다: **다음 구체적 편집을 막고 있는 특정 사실을 가져올
+때만 호출**하고, 코드베이스 조망·관례 학습·유사 코드 브라우징을 목적으로
+세션을 열지 말 것. 단 `ReadFile`은 출력 디렉토리 안 자기 산출물에
+대해서는 자유롭게 쓸 수 있다고 명시합니다 — read-before-write(공통 규칙)가
+산출물 재독을 요구하므로, 게이트가 그 경로를 막으면 안 됩니다.
+
+이 게이트는 64 문서의 탐색 억제("컨텍스트는 미리 조립되어 있다", 킥오프
+유저 턴)와 짝을 이루는 결정-지점 안내입니다. 시스템 프롬프트의 지시는
+컨텍스트 상단에 묻히지만 툴 설명은 모델이 툴을 고르는 순간에 읽히므로,
+같은 규칙을 양쪽에 둡니다. 강제가 아니라 유도이며, 원칙 4에 따라
+"실패한다"고 적지 않습니다.
 
 ## 읽기 툴
 

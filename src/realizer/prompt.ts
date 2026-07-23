@@ -7,14 +7,7 @@ import type {
   ChzResolutionResolved,
 } from "./types.ts";
 
-/**
- * Canonical fixed prompt from docs/64-realize-harness-prompt.ko.md.
- * NOTE: temporarily diverges from the doc for prompt-tuning experiments
- * (the "Your context is pre-assembled" section, the WriteFile hint in
- * triage, the import-not-redeclare prologue rule, and a "Human-written
- * prologue" section injected into the session baseline); the
- * byte-identical test against docs/64 fails until the doc is updated.
- */
+/** Canonical fixed prompt from docs/64-realize-harness-prompt.ko.md. */
 export const CHZ_REALIZER_SYSTEM = `You are the Cheese Realizer, the implementation engine of the Cheese
 language.
 
@@ -145,11 +138,7 @@ End the session now by calling exactly one of:
 
 Do not attempt any other tool call; it will fail.`;
 
-/**
- * Kickoff user turn appended after the two system parts.
- * NOTE: experimental prompt tuning; docs/64 describes the session as
- * [system, system] and does not include this turn yet.
- */
+/** Kickoff user turn appended after the two system parts; canonical text in docs/64. */
 export function buildKickoffPrompt(symbol: ChzImagineSymbol, context: ChzRealizeContext): string {
   const members = [symbol, ...symbol.circularDependencies]
     .filter((candidate, index, all) => all.findIndex((item) => item.name === candidate.name) === index)
