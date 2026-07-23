@@ -71,6 +71,17 @@ export async function loadChzConfig(path: string): Promise<LoadedChzConfig> {
   ) {
     throw new Error(`${absolute}: maxCycleSize must be an integer greater than zero.`);
   }
+  if (
+    value.include !== undefined &&
+    (!Array.isArray(value.include) ||
+      value.include.length === 0 ||
+      !value.include.every((item) => typeof item === "string" && item.length > 0))
+  ) {
+    throw new Error(`${absolute}: include must be a non-empty array of glob strings.`);
+  }
+  if (value.jobs !== undefined && (!Number.isInteger(value.jobs) || (value.jobs as number) < 1)) {
+    throw new Error(`${absolute}: jobs must be an integer greater than zero.`);
+  }
 
   return {
     path: absolute,

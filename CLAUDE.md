@@ -21,9 +21,12 @@ invalidation propagates per-hop on public-surface changes, internal-only
 changes trigger the dependents' no-LLM test-re-run safety net, a drifted
 artifact falls back to re-realization, an edited CONTEXTS.md discards the
 cache, and a changed human layer (prologue/epilogue) routes every reused
-symbol through the retest net. Broader syntax, override
-(`@chz-realize-override`) preservation, and cross-file graphs remain future
-work. When code and docs disagree, the docs are more current.
+symbol through the retest net. `chz realize -j N` runs independent graph
+groups concurrently (AskUser batches are serialized FIFO), and the file-less
+form realizes the `include` globs from chz.config.js file by file. Broader
+syntax, override (`@chz-realize-override`) preservation, and cross-file
+graphs remain future work. When code and docs disagree, the docs are more
+current.
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `60` realize output & overrides, `61` Realizer harness,

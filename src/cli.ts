@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** chz command-line entrypoint. */
 
-import { readFileSync } from "node:fs";
+import { existsSync, globSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -64,6 +64,7 @@ interface RealizeArguments {
   json: boolean;
   dryRun: boolean;
   skipTests: boolean;
+  jobs?: number;
   model?: string;
   baseURL?: string;
   configPath?: string;
@@ -71,12 +72,32 @@ interface RealizeArguments {
 
 function parseRealizeArguments(args: string[], io: CliIO): RealizeArguments | null {
   const parsed: RealizeArguments = { json: false, dryRun: false, skipTests: false };
+  const setJobs = (value: string): boolean => {
+    const jobs = Number(value);
+    if (!Number.isInteger(jobs) || jobs < 1) {
+      io.err(`${BIN_NAME} realize: --jobs requires a positive integer, got '${value}'`);
+      return false;
+    }
+    parsed.jobs = jobs;
+    return true;
+  };
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
     if (argument === "--json") parsed.json = true;
     else if (argument === "--dry-run") parsed.dryRun = true;
     else if (argument === "--skip-tests") parsed.skipTests = true;
-    else if (argument === "--model" || argument === "--base-url" || argument === "--config") {
+    else if (argument === "-j" || argument === "--jobs") {
+      const value = args[++index];
+      if (value === undefined) {
+        io.err(`${BIN_NAME} realize: ${argument} requires a value`);
+        return null;
+      }
+      if (!setJobs(value)) return null;
+    } else if (argument.startsWith("--jobs=")) {
+      if (!setJobs(argument.slice("--jobs=".length))) return null;
+    } else if (/^-j\d+$/.test(argument)) {
+      if (!setJobs(argument.slice(2))) return null;
+    } else if (argument === "--model" || argument === "--base-url" || argument === "--config") {
       const value = args[++index];
       if (value === undefined) {
         io.err(`${BIN_NAME} realize: ${argument} requires a value`);
@@ -100,23 +121,92 @@ function parseRealizeArguments(args: string[], io: CliIO): RealizeArguments | nu
   return parsed;
 }
 
+interface ConfiguredProject {
+  config: ChzProjectConfig;
+  projectRoot: string;
+  path?: string;
+}
+
 const realizeCommand: CommandHandler = async (args, io, deps) => {
   const parsed = parseRealizeArguments(args, io);
   if (parsed === null) return 1;
-  if (parsed.file === undefined) {
-    io.err(`${BIN_NAME} realize: missing <file> argument`);
+
+  if (parsed.file !== undefined) {
+    const sourceFile = resolve(parsed.file);
+    let configured: ConfiguredProject | undefined;
+    return realizeSourceFile(sourceFile, parsed.file, parsed, io, deps, async () =>
+      (configured ??= await resolveConfiguration(sourceFile, parsed, deps)),
+    );
+  }
+
+  // Without a file, chz.config.js names the sources through 'include' globs.
+  if (parsed.json) {
+    io.err(`${BIN_NAME} realize: --json requires an explicit <file> argument`);
+    return 1;
+  }
+  let configured: ConfiguredProject;
+  try {
+    configured = await resolveIncludeConfiguration(parsed, deps);
+  } catch (error) {
+    io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
+    return 1;
+  }
+  const include = configured.config.include;
+  if (include === undefined || include.length === 0) {
     io.err(
-      `usage: ${BIN_NAME} realize <file> [--json] [--dry-run] [--skip-tests] [--model <name>] [--base-url <url>] [--config <path>]`,
+      `${BIN_NAME} realize: missing <file> argument and the configuration declares no 'include' globs`,
+    );
+    io.err(
+      `usage: ${BIN_NAME} realize [file] [--json] [--dry-run] [--skip-tests] [-j <n>] [--model <name>] [--base-url <url>] [--config <path>]`,
     );
     return 1;
   }
+  const files = [
+    ...new Set(
+      globSync(include, { cwd: configured.projectRoot }).map((path) =>
+        resolve(configured.projectRoot, path),
+      ),
+    ),
+  ]
+    .filter((path) => existsSync(path) && statSync(path).isFile())
+    .sort();
+  if (files.length === 0) {
+    io.err(`${BIN_NAME} realize: 'include' matched no files (${include.join(", ")})`);
+    return 1;
+  }
+  if (configured.path !== undefined) io.out(`config: ${configured.path}`);
+  let exitCode = 0;
+  for (const file of files) {
+    const displayName = relative(process.cwd(), file) || file;
+    io.out(`==> ${displayName}`);
+    const code = await realizeSourceFile(
+      file,
+      displayName,
+      parsed,
+      io,
+      deps,
+      async () => configured,
+      false,
+    );
+    exitCode = Math.max(exitCode, code);
+  }
+  return exitCode;
+};
 
-  const sourceFile = resolve(parsed.file);
+async function realizeSourceFile(
+  sourceFile: string,
+  displayName: string,
+  parsed: RealizeArguments,
+  io: CliIO,
+  deps: CliDeps,
+  getConfigured: () => Promise<ConfiguredProject>,
+  announceConfig = true,
+): Promise<number> {
   let source: string;
   try {
     source = readFileSync(sourceFile, "utf8");
   } catch (error) {
-    io.err(`${BIN_NAME} realize: cannot read file '${parsed.file}': ${(error as Error).message}`);
+    io.err(`${BIN_NAME} realize: cannot read file '${displayName}': ${(error as Error).message}`);
     return 1;
   }
 
@@ -135,13 +225,13 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 0;
   }
   if (specs.length === 0) {
-    io.out(`${parsed.file}: no imagine symbols to realize`);
+    io.out(`${displayName}: no imagine symbols to realize`);
     return 0;
   }
 
-  let configured: { config: ChzProjectConfig; projectRoot: string; path?: string };
+  let configured: ConfiguredProject;
   try {
-    configured = await resolveConfiguration(sourceFile, parsed, deps);
+    configured = await getConfigured();
   } catch (error) {
     io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
     return 1;
@@ -195,7 +285,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 0;
   }
 
-  if (configured.path !== undefined) io.out(`config: ${configured.path}`);
+  if (announceConfig && configured.path !== undefined) io.out(`config: ${configured.path}`);
   let lastTestOutcome: RealizationTestOutcome | undefined;
   const runTests = deps.runTests ?? runSelectedTests;
   const runVerificationChecks = async (baseDir: string, scope?: ChzRealizationScope) => {
@@ -254,6 +344,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       maxTurns: configured.config.maxTurns,
       maxRetries: configured.config.maxRetries,
       maxCycleSize: configured.config.maxCycleSize,
+      jobs: parsed.jobs ?? configured.config.jobs,
       chzVersion: deps.chzVersion,
       askUser: deps.askUser ?? (process.stdin.isTTY && process.stdout.isTTY ? interactiveAskUser(io) : undefined),
       now: deps.now,
@@ -295,7 +386,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
   const count = result.symbols.length;
   const reusedCount = result.symbols.filter((symbol) => symbol.reused).length;
   const reuseNote = reusedCount === 0 ? "" : ` (${reusedCount} reused from cache)`;
-  io.out(`${parsed.file}: realized ${count} symbol${count === 1 ? "" : "s"}${reuseNote}`);
+  io.out(`${displayName}: realized ${count} symbol${count === 1 ? "" : "s"}${reuseNote}`);
   io.out(`  output: ${result.baseDir}`);
   for (const file of result.files) io.out(`  + ${file.relPath}`);
 
@@ -320,7 +411,30 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     io.out(`  ${countLabel}`);
   }
   return 0;
-};
+}
+
+/** Configuration lookup for the file-less form: search from the cwd. */
+async function resolveIncludeConfiguration(
+  parsed: RealizeArguments,
+  deps: CliDeps,
+): Promise<ConfiguredProject> {
+  if (deps.config !== undefined) {
+    return { config: deps.config, projectRoot: resolve(deps.projectRoot ?? process.cwd()) };
+  }
+  const configPath = parsed.configPath === undefined
+    ? findChzConfig(process.cwd())
+    : resolve(parsed.configPath);
+  if (configPath === null) {
+    throw new Error(
+      "missing <file> argument and no chz.config.js was found to supply 'include' globs.",
+    );
+  }
+  if (parsed.model !== undefined || parsed.baseURL !== undefined) {
+    throw new Error("--model and --base-url configure only the default OpenAI Realizer; configure injected realizers in chz.config.js instead.");
+  }
+  const loaded = await loadChzConfig(configPath);
+  return { config: loaded.config, projectRoot: loaded.projectRoot, path: loaded.path };
+}
 
 async function resolveConfiguration(
   sourceFile: string,
@@ -400,18 +514,23 @@ export function buildUsage(): string {
     `usage: ${BIN_NAME} <command> [options]`,
     "",
     "commands:",
-    "  realize <file>   realize imagine symbols through configured Realizers",
+    "  realize [file]   realize imagine symbols through configured Realizers;",
+    "                   without <file>, the chz.config.js 'include' globs name",
+    "                   the sources",
     "                   [--json]          print extracted specs",
     "                   [--dry-run]       print canonical Realizer prompts",
     "                   [--skip-tests]    skip independent verification",
+    "                   [-j, --jobs <n>]  concurrent realize sessions",
     "                   [--model <name>]  default OpenAI model",
     "                   [--base-url <u>]  OpenAI-compatible API base URL",
     "                   [--config <path>] explicit chz.config.js",
     "",
     "configuration:",
     "  chz.config.js exports { realizers: [...] }; the first Realizer supporting",
-    "  a symbol type is selected. Without it, OPENAI_MODEL/OPENAI_API_KEY/",
-    "  OPENAI_BASE_URL configure the default ChzOpenAIRealizer.",
+    "  a symbol type is selected. Optional keys: include (source globs for the",
+    "  file-less form), jobs, maxTurns, maxRetries, maxCycleSize, profile.",
+    "  Without a config, OPENAI_MODEL/OPENAI_API_KEY/OPENAI_BASE_URL configure",
+    "  the default ChzOpenAIRealizer.",
     "",
     "options:",
     "  -h, --help       show this help and exit",

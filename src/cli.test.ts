@@ -327,6 +327,93 @@ export default {
     expect(cache.symbols.greet.model).toBe("config-model");
   });
 
+  it("realizes every 'include' match when no file argument is given", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-cli-include-"));
+    roots.push(root);
+    for (const name of ["alpha", "beta"]) {
+      const file = join(root, "src", `${name}.chz.ts`);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(
+        file,
+        `imagine function ${name}(input: string): string {\n  requirements(\`${name}를 계산합니다.\`);\n}\n`,
+        "utf8",
+      );
+    }
+    const realizer: ChzRealizer = {
+      name: "IncludeRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        await mkdir(dirname(implementation), { recursive: true });
+        await mkdir(dirname(test), { recursive: true });
+        await writeFile(implementation, `export function ${symbol.name}(input: string): string { return input; }\n`);
+        await writeFile(test, "export {};\n");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date(),
+          resolvedBy: "include-model",
+        };
+      },
+    };
+
+    const out: string[] = [];
+    const code = await run(
+      ["realize"],
+      { out: (message) => out.push(message), err: () => {} },
+      {
+        config: { realizers: [realizer], include: ["src/*.chz.ts"] },
+        projectRoot: root,
+        runTests: greenTests,
+      },
+    );
+
+    expect(code).toBe(0);
+    const printed = out.join("\n");
+    expect(printed).toContain("alpha.chz.ts: realized 1 symbol");
+    expect(printed).toContain("beta.chz.ts: realized 1 symbol");
+    expect(existsSync(join(root, "src", "chz", "realization", "alpha", "implementations", "alpha.ts"))).toBe(true);
+    expect(existsSync(join(root, "src", "chz", "realization", "beta", "implementations", "beta.ts"))).toBe(true);
+  });
+
+  it("rejects the file-less form when the configuration has no include globs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-cli-noinc-"));
+    roots.push(root);
+    const err: string[] = [];
+    const code = await run(
+      ["realize"],
+      { out: () => {}, err: (message) => err.push(message) },
+      { config: { realizers: [new CliRealizer()] }, projectRoot: root },
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("declares no 'include' globs");
+  });
+
+  it("rejects a non-positive --jobs value and accepts the attached -jN form", async () => {
+    const err: string[] = [];
+    expect(
+      await run(
+        ["realize", makeFixture(), "-j", "0"],
+        { out: () => {}, err: (message) => err.push(message) },
+        { config: { realizers: [new CliRealizer()] }, runTests: greenTests },
+      ),
+    ).toBe(1);
+    expect(err.join("\n")).toContain("--jobs requires a positive integer");
+
+    const file = makeFixture();
+    expect(
+      await run(
+        ["realize", file, "-j2"],
+        { out: () => {}, err: () => {} },
+        { config: { realizers: [new CliRealizer()] }, projectRoot: dirname(file), runTests: greenTests },
+      ),
+    ).toBe(0);
+  });
+
   it("dry-run prints canonical harness prompt without invoking the Realizer", async () => {
     const file = makeFixture();
     const realizer = new CliRealizer();

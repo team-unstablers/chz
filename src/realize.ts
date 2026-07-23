@@ -14,6 +14,7 @@ import {
   buildDependencyGraph,
   mentionedSymbols,
   type ChzDependencyGraph,
+  type ChzRealizeGroup,
 } from "./graph.ts";
 import { splitHumanCode } from "./human-code.ts";
 import {
@@ -118,10 +119,34 @@ export interface RealizeOptions {
   retest?: (input: { baseDir: string; scope: ChzRealizationScope }) => Promise<ChzVerificationResult>;
   /** chz tool version gating cache reuse. Defaults to the packaged version. */
   chzVersion?: string;
+  /**
+   * Maximum realize sessions running concurrently (`-j`). Groups become
+   * eligible as soon as every outside dependency has settled; per-symbol
+   * verification scopes keep concurrent sessions from judging each other.
+   * Default 1 (fully sequential).
+   */
+  jobs?: number;
 }
 
 export function realizationBaseDir(fileName: string): string {
   return resolve(dirname(fileName), "chz", "realization", realizationBaseName(fileName));
+}
+
+/**
+ * Serialize AskUser batches: parallel sessions may escalate at the same
+ * moment, but a human answers one question batch at a time. FIFO — the batch
+ * that asked first is answered first, and a rejected batch never wedges the
+ * queue for later questions.
+ */
+export function serializeAskUser(
+  askUser: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>,
+): (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]> {
+  let queue: Promise<unknown> = Promise.resolve();
+  return (questions) => {
+    const turn = queue.then(() => askUser(questions));
+    queue = turn.catch(() => undefined);
+    return turn;
+  };
 }
 
 /** Realize every imagine symbol, selecting the first configured compatible Realizer. */
@@ -213,8 +238,9 @@ export async function realize(
   // test re-run safety net instead (docs/62, per-hop rule).
   const changedSurface = new Set<string>();
   const changedInternal = new Set<string>();
+  const askUser = options.askUser === undefined ? undefined : serializeAskUser(options.askUser);
 
-  for (const group of graph.groups) {
+  const processGroup = async (group: ChzRealizeGroup): Promise<void> => {
     const members = group.symbols;
     const memberNames = new Set(members.map((member) => member.name));
 
@@ -243,7 +269,7 @@ export async function realize(
               },
         );
       }
-      continue;
+      return;
     }
 
     const renderedEnsures = new Map(
@@ -343,7 +369,7 @@ export async function realize(
           });
         }
         emitEvent(`${groupLabel}: unchanged — reused the cached realization`);
-        continue;
+        return;
       }
     }
 
@@ -362,7 +388,7 @@ export async function realize(
             : `No realizer found for symbol '${member.name}' (type: ${member.type}).`,
         });
       }
-      continue;
+      return;
     }
 
     const memberResolution = (
@@ -407,7 +433,7 @@ export async function realize(
         maxTurns,
         maxRetries,
         baseContexts,
-        askUser: options.askUser,
+        askUser,
         attempt,
         verificationFeedback: feedback,
         now: options.now,
@@ -519,7 +545,59 @@ export async function realize(
         );
       }
     }
+  };
+
+  // Ready-queue scheduler (`-j`). A group starts once every outside
+  // dependency has settled (resolved, reused, or unrealized); up to `jobs`
+  // groups run concurrently. jobs = 1 reproduces the sequential order
+  // exactly, because the first ready group in topological order launches
+  // alone each round.
+  const jobs = Math.max(1, Math.floor(options.jobs ?? 1));
+  const pendingGroups = [...graph.groups];
+  const runningGroups = new Map<ChzRealizeGroup, Promise<void>>();
+  const settledSymbol = (name: string): boolean =>
+    resolvedByName.has(name) || unrealized.has(name);
+  while (pendingGroups.length > 0 || runningGroups.size > 0) {
+    for (let index = 0; index < pendingGroups.length && runningGroups.size < jobs; ) {
+      const group = pendingGroups[index]!;
+      const memberNames = new Set(group.symbols.map((member) => member.name));
+      const ready = group.symbols.every((member) =>
+        member.dependencies.every(
+          (dependency) => memberNames.has(dependency.name) || settledSymbol(dependency.name),
+        ),
+      );
+      if (!ready) {
+        index++;
+        continue;
+      }
+      pendingGroups.splice(index, 1);
+      const task = processGroup(group).finally(() => {
+        runningGroups.delete(group);
+      });
+      runningGroups.set(group, task);
+    }
+    if (runningGroups.size === 0) {
+      // Unreachable on a well-formed SCC DAG; fail loudly instead of hanging.
+      for (const group of pendingGroups.splice(0)) {
+        for (const member of group.symbols) {
+          unrealized.set(member.name, "failed");
+          resolutions.push({
+            outcome: "failed",
+            symbol: member,
+            reason: `Scheduler could not start '${member.name}': its dependencies never settled.`,
+          });
+        }
+      }
+      break;
+    }
+    await Promise.race(runningGroups.values());
   }
+
+  // Concurrent completion order is nondeterministic; the reported order and
+  // the cache field order must stay stable, so normalize to source order.
+  const specOrder = new Map(specs.map((spec, index) => [spec.name, index]));
+  realizedSymbols.sort((a, b) => specOrder.get(a.name)! - specOrder.get(b.name)!);
+  resolutions.sort((a, b) => specOrder.get(a.symbol.name)! - specOrder.get(b.symbol.name)!);
 
   if (unrealized.size > 0) {
     const failed = resolutions.filter((resolution) => resolution.outcome === "failed");

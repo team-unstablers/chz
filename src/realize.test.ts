@@ -903,6 +903,163 @@ describe("realize engine", () => {
   });
 });
 
+describe("parallel realize (-j)", () => {
+  const green = async () => ({ passed: true, output: "green" });
+  const wait = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+  function trioFixture(gammaRequirements: string): { root: string; sourceFile: string; source: string } {
+    const root = mkdtempSync(join(tmpdir(), "chz-parallel-"));
+    roots.push(root);
+    const sourceFile = join(root, "trio.chz.ts");
+    const source = ["alpha", "beta", "gamma"]
+      .map((name) => [
+        `imagine function ${name}(input: string): string {`,
+        `  requirements(\`${name === "gamma" ? gammaRequirements : `${name}를 계산합니다.`}\`);`,
+        "}",
+        "",
+      ].join("\n"))
+      .join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+    return { root, sourceFile, source };
+  }
+
+  function writingRealizer(onSession: (name: string) => Promise<void>): ChzRealizer {
+    return {
+      name: "ParallelProbeRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        await onSession(symbol.name);
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+        mkdirSync(dirname(implementation), { recursive: true });
+        mkdirSync(dirname(test), { recursive: true });
+        writeFileSync(implementation, `export function ${symbol.name}(input: string): string { return input; }\n`, "utf8");
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date("2026-07-24T00:00:00.000Z"),
+          resolvedBy: "parallel-model",
+        };
+      },
+    };
+  }
+
+  it("runs independent groups concurrently within the jobs budget, keeping stable output order", async () => {
+    const { root, sourceFile, source } = trioFixture("감마를 계산합니다.");
+    let active = 0;
+    let maxActive = 0;
+    const realizer = writingRealizer(async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await wait(25);
+      active--;
+    });
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      jobs: 2,
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    expect(maxActive).toBe(2);
+    // Completion order is racy; the reported order must stay source order.
+    expect(result.symbols.map((symbol) => symbol.name)).toEqual(["alpha", "beta", "gamma"]);
+    expect(result.resolutions.map((resolution) => resolution.symbol.name)).toEqual([
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+  });
+
+  it("starts a dependent only after its dependency settled, even with spare workers", async () => {
+    const { root, sourceFile, source } = trioFixture("alpha를 사용합니다.");
+    const events: string[] = [];
+    const realizer = writingRealizer(async (name) => {
+      events.push(`start:${name}`);
+      await wait(name === "alpha" ? 30 : 5);
+      events.push(`end:${name}`);
+    });
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      jobs: 4,
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    expect(events.indexOf("end:alpha")).toBeLessThan(events.indexOf("start:gamma"));
+  });
+
+  it("serializes concurrent AskUser batches so the human answers one at a time", async () => {
+    const { root, sourceFile, source } = trioFixture("감마를 계산합니다.");
+    let answering = 0;
+    let maxAnswering = 0;
+    const askUser = async (questions: readonly { question: string }[]) => {
+      answering++;
+      maxAnswering = Math.max(maxAnswering, answering);
+      await wait(15);
+      answering--;
+      return questions.map(() => ["첫 번째 선택"]);
+    };
+
+    const realizer: ChzRealizer = {
+      name: "AskingRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        const answers = await context.askUser?.([
+          {
+            question: `${symbol.name}의 정책은?`,
+            header: "정책",
+            options: [
+              { label: "첫 번째 선택", description: "기본" },
+              { label: "두 번째 선택", description: "대안" },
+            ],
+          },
+        ]);
+        expect(answers).toEqual([["첫 번째 선택"]]);
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+        mkdirSync(dirname(implementation), { recursive: true });
+        mkdirSync(dirname(test), { recursive: true });
+        writeFileSync(implementation, `export function ${symbol.name}(input: string): string { return input; }\n`, "utf8");
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date("2026-07-24T00:00:00.000Z"),
+          resolvedBy: "asking-model",
+        };
+      },
+    };
+
+    const result = await realize(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      jobs: 3,
+      askUser,
+      verify: green,
+      verifyRealization: green,
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (result.outcome !== "resolved") throw new Error(result.reason);
+    // Three sessions asked concurrently; the human saw one batch at a time.
+    expect(maxAnswering).toBe(1);
+  });
+});
+
 /** Two-symbol re-run fixture: buildUniqueSlugs depends on slugify. */
 function makeSlugSource(slugifyRequirements: string, slugifyEnsure: string): string {
   return [

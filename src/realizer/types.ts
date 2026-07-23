@@ -180,4 +180,8 @@ export interface ChzProjectConfig {
   profile?: string;
   /** Maximum symbols one dependency cycle may contain (docs/62). */
   maxCycleSize?: number;
+  /** Source globs realized by the file-less `chz realize`, project-relative. */
+  include?: string[];
+  /** Concurrent realize sessions (`-j`); the CLI flag overrides this. */
+  jobs?: number;
 }
