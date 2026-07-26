@@ -206,12 +206,17 @@ as well as imagine ones, and human relative specifiers are rewritten against
 the realization directory. Obligation promotion is decided by the owner of
 the symbol a diagnostic points at, never by the diagnostic code alone.
 
-Status: Phase 0 (fixture corpus + projection spike, `src/compiler/spike/`,
-`src/compiler/__fixtures__/`) is done and its findings are recorded in
-sketch `260726-01`. `src/compiler/ts-api.ts` is the boundary module that all
-`typescript/unstable/*` access is being collapsed onto. Phases 1–5
-(compiler core, preflight ordering, consumer migration, legacy preprocessor
-removal, docs) are still ahead.
+Status: phases 0–1 are done. `src/compiler/` holds the core —
+`ts-api.ts` (the only file importing `typescript/unstable/*`), `syntax.ts`,
+`parser.ts`, `projection.ts`, `typescript.ts`, `diagnostics.ts`, and
+`analyze.ts` behind a single `analyzeChzSource()` entry — with the grammar
+fixture corpus in `src/compiler/__fixtures__/` and the spike's findings in
+sketch `260726-01`. `extractImagineSpecs()` is now an adapter that rebuilds
+the old `ImagineSpec` strings by slicing AST node spans, so consumers still
+see the v0 shape while the brace-depth scanner is gone from the parse path.
+Still ahead: preflight ordering (nothing written before diagnostics are
+green), owner-based obligation promotion, the consumer migration off the
+remaining regexes, deleting the legacy preprocessor, and the docs.
 
 ## v0 scope
 
