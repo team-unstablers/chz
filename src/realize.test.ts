@@ -8,7 +8,6 @@ import { analyzeChzSource } from "./compiler/index.ts";
 import { API } from "./compiler/ts-api.ts";
 import { splitHumanCode } from "./human-code.ts";
 import {
-  extractImagineSpecs,
   imagineSpecsFromChzSource,
 } from "./preprocessor.ts";
 import {
@@ -22,7 +21,6 @@ import {
   ChzRealizerBase,
   buildEstimatedRealizeOrder,
   buildSessionBaseline,
-  imagineSpecToSymbol,
   realize,
   renderEnsureHarness,
   renderEntryPoint,
@@ -85,6 +83,32 @@ async function realizeSource(
   }
 }
 
+function symbolsOf(source: string, fileName: string): ChzImagineSymbol[] {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildEstimatedRealizeOrder(analysis);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function firstSpecAndSymbol(
+  source: string,
+  fileName: string,
+) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return {
+      spec: imagineSpecsFromChzSource(analysis)[0]!,
+      symbol: buildEstimatedRealizeOrder(analysis)[0]!,
+    };
+  } finally {
+    analysis.dispose();
+  }
+}
+
 function typeCheckProject(configPath: string, projectRoot: string): string[] {
   const api = new API({ cwd: projectRoot });
   let snapshot: ReturnType<API["updateSnapshot"]> | undefined;
@@ -138,8 +162,10 @@ function response(toolCalls: ChzChatResponse["message"]["toolCalls"]): ChzChatRe
 describe("canonical prompt and symbol graph", () => {
   it("uses the canonical fixed prompt and deterministic baseline", () => {
     const data = fixture();
-    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const { spec, symbol } = firstSpecAndSymbol(
+      data.source,
+      data.sourceFile,
+    );
     const context = contextFor(data.root, data.outputDir);
     const first = buildSessionBaseline(symbol, context, "gpt-test");
     const second = buildSessionBaseline(symbol, context, "gpt-test");
@@ -159,8 +185,7 @@ describe("canonical prompt and symbol graph", () => {
 
   it("uses dependency surfaces before falling back to dependency file reads", () => {
     const data = fixture();
-    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
     const dependencyFile = join(data.root, "chz", "realization", "dependency.ts");
     const dependencySymbol: ChzImagineSymbol = {
       ...symbol,
@@ -211,7 +236,7 @@ describe("canonical prompt and symbol graph", () => {
       "imagine function leaf(): number { requirements(`leaf`); }",
       "imagine function parentNode(): number { requirements(`Use leaf to calculate.`); }",
     ].join("\n");
-    const order = buildEstimatedRealizeOrder(extractImagineSpecs(source, "graph.chz.ts"), source, "graph.chz.ts");
+    const order = symbolsOf(source, "graph.chz.ts");
     expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parentNode"]);
     expect(order[1]!.dependencies.map((symbol) => symbol.name)).toEqual(["leaf"]);
   });
@@ -320,7 +345,7 @@ describe("canonical prompt and symbol graph", () => {
     const analysis = analyzeChzSource(source, "counter.chz.ts");
     try {
       const spec = imagineSpecsFromChzSource(analysis)[0]!;
-      const symbol = imagineSpecToSymbol(spec, analysis);
+      const symbol = buildEstimatedRealizeOrder(analysis)[0]!;
       const harness = renderEnsureHarness(analysis, spec);
 
       expect(symbol.type).toBe("class");
@@ -346,7 +371,7 @@ describe("canonical prompt and symbol graph", () => {
       const specs = imagineSpecsFromChzSource(analysis);
       const entry = renderEntryPoint(
         analysis,
-        splitHumanCode(analysis, specs),
+        splitHumanCode(analysis),
         specs,
       );
 
@@ -382,7 +407,7 @@ describe("canonical prompt and symbol graph", () => {
     try {
       expect(analysis.diagnostics).toEqual([]);
       const specs = imagineSpecsFromChzSource(analysis);
-      const humanCode = splitHumanCode(analysis, specs);
+      const humanCode = splitHumanCode(analysis);
       const entryPoint = renderEntryPoint(analysis, humanCode, specs);
 
       expect(entryPoint).toContain(
@@ -477,7 +502,7 @@ describe("canonical prompt and symbol graph", () => {
     try {
       expect(analysis.diagnostics).toEqual([]);
       const specs = imagineSpecsFromChzSource(analysis);
-      const humanCode = splitHumanCode(analysis, specs);
+      const humanCode = splitHumanCode(analysis);
       const entryPoint = renderEntryPoint(analysis, humanCode, specs);
 
       expect(humanCode.epilogue).toContain(
@@ -499,11 +524,7 @@ describe("ChzRealizerBase", () => {
   it("owns the tool loop and resolves files after Finish", async () => {
     const data = fixture();
     const events: string[] = [];
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     const realizer = new ScriptedRealizer([
@@ -539,11 +560,7 @@ describe("ChzRealizerBase", () => {
   it("logs verification outcomes without leaking diagnostic output", async () => {
     const data = fixture();
     const events: string[] = [];
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -571,7 +588,7 @@ describe("ChzRealizerBase", () => {
 
   it("retries provider failures in the base class", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -590,7 +607,7 @@ describe("ChzRealizerBase", () => {
 
   it("returns the three-way blocked/failed outcomes", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const blocked = new ScriptedRealizer([
       response([{ id: "block", name: "Block", arguments: { reason: "dependency missing", todo: "npm install package" } }]),
     ]);
@@ -607,7 +624,7 @@ describe("ChzRealizerBase", () => {
 
   it("does not mistake the engine-owned ensure harness for an LLM-authored test", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const ensure = join(data.outputDir, "tests", "test_greet.ensure.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -630,11 +647,7 @@ describe("ChzRealizerBase", () => {
 
   it("does not accept an arbitrarily named test that independent verification will ignore", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const noncanonicalTest = join(data.outputDir, "tests", "greet.test.ts");
     mkdirSync(dirname(implementation), { recursive: true });

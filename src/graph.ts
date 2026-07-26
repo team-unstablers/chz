@@ -19,7 +19,6 @@
 import { resolve } from "node:path";
 
 import {
-  analyzeChzSource,
   collectModuleSpecifiersFromSource,
   collectSymbolReferences,
   collectTypeSymbolReferences,
@@ -28,10 +27,6 @@ import {
   type ChzImagineDeclaration,
   type ChzSourceFile,
 } from "./compiler/index.ts";
-import {
-  imagineSpecsFromChzSource,
-  type ImagineSpec,
-} from "./preprocessor.ts";
 import type { ChzImagineSymbol } from "./realizer/types.ts";
 import { mentionedSymbols } from "./requirements-mentions.ts";
 
@@ -113,51 +108,27 @@ export class ChzCycleError extends Error {
   }
 }
 
-function imagineSpecToAnalyzedSymbol(
-  spec: ImagineSpec,
+function imagineDeclarationToSymbol(
+  declaration: ChzImagineDeclaration,
   analysis: ChzSourceFile,
 ): ChzImagineSymbol {
   const position =
-    analysis.typescript.sourceFile.getLineAndCharacterOfPosition(spec.start);
+    analysis.typescript.sourceFile.getLineAndCharacterOfPosition(
+      declaration.span.start,
+    );
   return {
-    name: spec.name,
-    type: spec.type,
-    definition: spec.originalText,
+    name: declaration.name,
+    type: declaration.kind === "ImagineFunction" ? "function" : "class",
+    definition: analysis.source.slice(
+      declaration.span.start,
+      declaration.span.end,
+    ),
     file: resolve(analysis.fileName),
     posLine: position.line + 1,
     posCol: position.character + 1,
     dependencies: [],
     circularDependencies: [],
   };
-}
-
-/** Lift a compatibility spec with positions from the canonical SourceFile. */
-export function imagineSpecToSymbol(
-  spec: ImagineSpec,
-  analysis: ChzSourceFile,
-): ChzImagineSymbol;
-export function imagineSpecToSymbol(
-  spec: ImagineSpec,
-  source: string,
-  fileName: string,
-): ChzImagineSymbol;
-export function imagineSpecToSymbol(
-  spec: ImagineSpec,
-  sourceOrAnalysis: string | ChzSourceFile,
-  fileName?: string,
-): ChzImagineSymbol {
-  if (typeof sourceOrAnalysis !== "string") {
-    return imagineSpecToAnalyzedSymbol(spec, sourceOrAnalysis);
-  }
-  if (fileName === undefined) {
-    throw new Error("A file name is required when lifting an unanalyzed spec.");
-  }
-  const analysis = analyzeChzSource(sourceOrAnalysis, fileName);
-  try {
-    return imagineSpecToAnalyzedSymbol(spec, analysis);
-  } finally {
-    analysis.dispose();
-  }
 }
 
 function imagineSymbolsById(
@@ -248,12 +219,11 @@ const EDGE_SOURCE_ORDER: readonly ChzDependencyEdgeSource[] = [
 
 function buildAnalyzedDependencyGraph(
   analysis: ChzSourceFile,
-  specs: readonly ImagineSpec[],
   options: BuildDependencyGraphOptions,
 ): ChzDependencyGraph {
   const maxCycleSize = options.maxCycleSize ?? DEFAULT_MAX_CYCLE_SIZE;
-  const symbols = specs.map((spec) =>
-    imagineSpecToAnalyzedSymbol(spec, analysis)
+  const symbols = analysis.imagineDeclarations.map((declaration) =>
+    imagineDeclarationToSymbol(declaration, analysis)
   );
   const estimated = collectEstimatedDependencySources(analysis);
   const sourcesByDependent = new Map<
@@ -369,46 +339,9 @@ function buildAnalyzedDependencyGraph(
  */
 export function buildDependencyGraph(
   analysis: ChzSourceFile,
-  options?: BuildDependencyGraphOptions,
-): ChzDependencyGraph;
-export function buildDependencyGraph(
-  specs: readonly ImagineSpec[],
-  source: string,
-  fileName: string,
-  options?: BuildDependencyGraphOptions,
-): ChzDependencyGraph;
-export function buildDependencyGraph(
-  analysisOrSpecs: ChzSourceFile | readonly ImagineSpec[],
-  sourceOrOptions: string | BuildDependencyGraphOptions = {},
-  fileName?: string,
-  legacyOptions: BuildDependencyGraphOptions = {},
+  options: BuildDependencyGraphOptions = {},
 ): ChzDependencyGraph {
-  if (!Array.isArray(analysisOrSpecs)) {
-    const analysis = analysisOrSpecs as ChzSourceFile;
-    const options = typeof sourceOrOptions === "string"
-      ? {}
-      : sourceOrOptions;
-    return buildAnalyzedDependencyGraph(
-      analysis,
-      imagineSpecsFromChzSource(analysis),
-      options,
-    );
-  }
-  if (typeof sourceOrOptions !== "string" || fileName === undefined) {
-    throw new Error(
-      "Legacy dependency graph input requires source text and a file name.",
-    );
-  }
-  const analysis = analyzeChzSource(sourceOrOptions, fileName);
-  try {
-    return buildAnalyzedDependencyGraph(
-      analysis,
-      analysisOrSpecs,
-      legacyOptions,
-    );
-  } finally {
-    analysis.dispose();
-  }
+  return buildAnalyzedDependencyGraph(analysis, options);
 }
 
 /**
@@ -419,28 +352,11 @@ export function buildDependencyGraph(
  */
 export function buildEstimatedRealizeOrder(
   analysis: ChzSourceFile,
-): ChzImagineSymbol[];
-export function buildEstimatedRealizeOrder(
-  specs: ImagineSpec[],
-  source: string,
-  fileName: string,
-): ChzImagineSymbol[];
-export function buildEstimatedRealizeOrder(
-  analysisOrSpecs: ChzSourceFile | ImagineSpec[],
-  source?: string,
-  fileName?: string,
 ): ChzImagineSymbol[] {
-  const graph = Array.isArray(analysisOrSpecs)
-    ? buildDependencyGraph(
-        analysisOrSpecs,
-        source ?? "",
-        fileName ?? "",
-        { maxCycleSize: Number.POSITIVE_INFINITY },
-      )
-    : buildDependencyGraph(
-        analysisOrSpecs as ChzSourceFile,
-        { maxCycleSize: Number.POSITIVE_INFINITY },
-      );
+  const graph = buildDependencyGraph(
+    analysis,
+    { maxCycleSize: Number.POSITIVE_INFINITY },
+  );
   return graph.groups.flatMap((group) => group.symbols);
 }
 

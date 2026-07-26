@@ -5,8 +5,8 @@ import { join } from "node:path";
 import OpenAI from "openai";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { extractImagineSpecs } from "../preprocessor.ts";
-import { imagineSpecToSymbol } from "../realize.ts";
+import { analyzeChzSource } from "../compiler/index.ts";
+import { buildEstimatedRealizeOrder } from "../realize.ts";
 import { ChzOpenAIRealizer } from "./openai.ts";
 import type { ChzRealizeContext } from "./types.ts";
 
@@ -22,7 +22,9 @@ describe("ChzOpenAIRealizer", () => {
     const sourceFile = join(root, "demo.chz.ts");
     const source = "imagine function answer(): number { ensure(answer() === 42, '42를 반환합니다.'); }\n";
     writeFileSync(sourceFile, source, "utf8");
-    const symbol = imagineSpecToSymbol(extractImagineSpecs(source, sourceFile)[0]!, source, sourceFile);
+    const analysis = analyzeChzSource(source, sourceFile);
+    const symbol = buildEstimatedRealizeOrder(analysis)[0]!;
+    analysis.dispose();
     const outputDir = join(root, "chz", "realization", "demo");
     const implementation = join(outputDir, "implementations", "answer.ts");
     const test = join(outputDir, "tests", "test_answer.autogen.ts");

@@ -38,7 +38,6 @@ import {
 
 import {
   realizationBaseName,
-  type ImagineSpec,
 } from "./preprocessor.ts";
 
 export interface HumanCodeSplit {
@@ -107,10 +106,11 @@ interface OmittedSourceSpan {
  */
 export function splitHumanCode(
   analysis: ChzSourceFile,
-  specs: readonly ImagineSpec[],
 ): HumanCodeSplit {
   const { source } = analysis;
-  const orderedSpecs = [...specs].sort((left, right) => left.start - right.start);
+  const orderedImagineNames = [...analysis.imagineDeclarations]
+    .sort((left, right) => left.span.start - right.span.start)
+    .map((declaration) => declaration.name);
   const imagineStatements = new Set<Statement>(
     analysis.imagineDeclarations.map((declaration) =>
       declaration.declaration
@@ -206,7 +206,7 @@ export function splitHumanCode(
     epilogue: renderEpilogue(
       epilogueBody,
       prologueBindings,
-      orderedSpecs,
+      orderedImagineNames,
     ),
     entryPoint: collectEntryPointExports(
       analysis,
@@ -650,7 +650,7 @@ function renderPrologue(
 function renderEpilogue(
   body: string,
   prologueBindings: readonly TopLevelBinding[],
-  specs: readonly ImagineSpec[],
+  imagineNames: readonly string[],
 ): string {
   if (body.trim() === "") return "export {};\n";
   const prologueValues = prologueBindings
@@ -666,7 +666,7 @@ function renderEpilogue(
     ...(prologueTypes.length === 0
       ? []
       : [`import type { ${prologueTypes.join(", ")} } from "./__prologue__.ts";`]),
-    ...specs.map((spec) => `import { ${spec.name} } from "./${spec.name}.ts";`),
+    ...imagineNames.map((name) => `import { ${name} } from "./${name}.ts";`),
   ];
   return `${imports.join("\n")}\n\n${body.replace(/^\s+/, "")}`;
 }

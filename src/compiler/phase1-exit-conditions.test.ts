@@ -78,7 +78,7 @@ describe("Phase 1 compiler-core exit conditions", () => {
     }
   });
 
-  it("exit condition 2: parses every legacy preprocessor known limitation", () => {
+  it("exit condition 2: parses syntax the removed scanner could not handle", () => {
     const source = String.raw`
 const regex = /[{}] imagine function ghost\(\): void \{\}/u;
 const division = 20 / 4;

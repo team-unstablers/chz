@@ -31,6 +31,7 @@ import {
 import {
   collectTypeSymbolReferences,
   declarationEnsureScopes,
+  renderChzDiagnostics,
   symbolComesOnlyFromTypeScriptLib,
   type ChzSourceFile,
 } from "./compiler/index.ts";
@@ -169,8 +170,14 @@ export async function realize(
   options: RealizeOptions,
 ): Promise<RealizeResult> {
   // The caller owns the analyzer snapshot and must keep it alive until this
-  // promise settles. Adapting the already-bound AST here performs no parse and
-  // throws before any write if a direct caller bypassed CLI preflight.
+  // promise settles. A direct caller bypassing CLI preflight still sees the
+  // complete diagnostic set before any output directory or file is created.
+  if (analysis.diagnostics.length > 0) {
+    throw new Error(
+      renderChzDiagnostics(analysis.diagnostics, "human").join("\n"),
+    );
+  }
+  // Adapting the already-bound AST performs no additional parse.
   const specs = imagineSpecsFromChzSource(analysis);
   const { fileName } = analysis;
   const specByName = new Map(specs.map((spec) => [spec.name, spec]));
@@ -183,7 +190,7 @@ export async function realize(
     options.activeProfile ?? analysis.profile?.name ?? "console";
   mkdirSync(join(baseDir, "implementations"), { recursive: true });
   mkdirSync(join(baseDir, "tests"), { recursive: true });
-  const humanCode = splitHumanCode(analysis, specs);
+  const humanCode = splitHumanCode(analysis);
   const writeHumanCode = (): void => {
     writeFileSync(join(baseDir, "implementations", "__prologue__.ts"), humanCode.prologue, "utf8");
     writeFileSync(join(baseDir, "implementations", "__epilogue__.ts"), humanCode.epilogue, "utf8");
@@ -755,7 +762,7 @@ export function renderEnsureHarness(
   analysis: ChzSourceFile,
   spec: ImagineSpec,
   allSpecs: readonly ImagineSpec[] = imagineSpecsFromChzSource(analysis),
-  humanCode: HumanCodeSplit = splitHumanCode(analysis, allSpecs),
+  humanCode: HumanCodeSplit = splitHumanCode(analysis),
 ): string {
   const fileName = analysis.fileName;
   const base = realizationBaseName(fileName);

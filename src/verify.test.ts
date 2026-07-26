@@ -6,7 +6,6 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { analyzeChzSource } from "./compiler/index.ts";
 import {
-  extractImagineSpecs,
   imagineSpecsFromChzSource,
   publicSurfaceText,
 } from "./preprocessor.ts";
@@ -35,6 +34,16 @@ function makeTempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "chz-verify-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function specsOf(source: string, fileName: string) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return imagineSpecsFromChzSource(analysis);
+  } finally {
+    analysis.dispose();
+  }
 }
 afterAll(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
@@ -313,7 +322,7 @@ describe("buildRealizationCache", () => {
     expect(cache.sourceHash).toBe(sha256(SOURCE));
     expect(cache.testsSkipped).toBe(false);
 
-    const spec = extractImagineSpecs(SOURCE, FILE)[0]!;
+    const spec = specsOf(SOURCE, FILE)[0]!;
     const sym = cache.symbols[NAME]!;
     expect(sym.name).toBe(NAME);
     expect(sym.model).toBe("fake-model");
@@ -349,8 +358,10 @@ describe("buildRealizationCache", () => {
       "두 점이 같은 위치인지 판정합니다.",
       "두 점이 완전히 동일한 좌표인지 판정합니다.",
     );
-    const editedSpec = extractImagineSpecs(editedSource, FILE)[0]!;
-    expect(editedSpec.originalText).not.toBe(extractImagineSpecs(SOURCE, FILE)[0]!.originalText);
+    const editedSpec = specsOf(editedSource, FILE)[0]!;
+    expect(editedSpec.originalText).not.toBe(
+      specsOf(SOURCE, FILE)[0]!.originalText,
+    );
     // The spec hash moves with the edit, the public surface does not — this
     // is the docs/62 distinction that stops invalidation from propagating.
     expect(sha256(editedSpec.originalText)).not.toBe(cache.symbols[NAME]!.specHash);

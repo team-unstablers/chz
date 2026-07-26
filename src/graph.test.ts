@@ -8,14 +8,32 @@ import {
   extractModuleSpecifiers,
 } from "./graph.ts";
 import { analyzeChzSource } from "./compiler/index.ts";
-import { extractImagineSpecs } from "./preprocessor.ts";
 import {
   mentionedSymbols,
   mentionsSymbol,
 } from "./requirements-mentions.ts";
 
-function specsOf(source: string) {
-  return extractImagineSpecs(source, "graph-test.chz.ts");
+function graphOf(
+  source: string,
+  options?: Parameters<typeof buildDependencyGraph>[1],
+) {
+  const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildDependencyGraph(analysis, options);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function orderOf(source: string) {
+  const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildEstimatedRealizeOrder(analysis);
+  } finally {
+    analysis.dispose();
+  }
 }
 
 function imagineFunction(name: string, requirements: string): string {
@@ -152,7 +170,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("데미지_계산", "크리티컬_판정을 사용합니다."),
       imagineFunction("크리티컬_판정", "운에 따라 판정합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     expect(graph.groups.map((group) => group.symbols.map((symbol) => symbol.name))).toEqual([
       ["크리티컬_판정"],
@@ -170,7 +188,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("slug", "한 단어를 정규화합니다."),
       imagineFunction("slugify", "문자열 전체를 슬러그로 만듭니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     for (const symbol of graph.symbols) {
       expect(symbol.dependencies).toEqual([]);
@@ -185,7 +203,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("판정", "판정기를 사용해 결과를 집계합니다."),
       imagineFunction("판정기", "단일 입력을 판별합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     const 판정 = graph.symbols.find((symbol) => symbol.name === "판정")!;
     const 판정기 = graph.symbols.find((symbol) => symbol.name === "판정기")!;
@@ -200,7 +218,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("짝수_판정", "0이면 참, 아니면 홀수_판정(n - 1)을 반환합니다."),
       imagineFunction("홀수_판정", "0이면 거짓, 아니면 짝수_판정(n - 1)을 반환합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     expect(graph.groups).toHaveLength(1);
     const [group] = graph.groups;
@@ -222,13 +240,13 @@ describe("buildDependencyGraph", () => {
       )
       .join("\n");
 
-    expect(() => buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts")).toThrow(
+    expect(() => graphOf(source)).toThrow(
       ChzCycleError,
     );
-    expect(() => buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts")).toThrow(
+    expect(() => graphOf(source)).toThrow(
       "human-owned interface",
     );
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts", {
+    const graph = graphOf(source, {
       maxCycleSize: 4,
     });
     expect(graph.groups).toHaveLength(1);
@@ -243,7 +261,7 @@ describe("buildDependencyGraph", () => {
       )
       .join("\n");
 
-    const order = buildEstimatedRealizeOrder(specsOf(source), source, "graph-test.chz.ts");
+    const order = orderOf(source);
     expect(order.map((symbol) => symbol.name)).toEqual(names);
   });
 });

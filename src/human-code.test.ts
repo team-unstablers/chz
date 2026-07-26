@@ -12,7 +12,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { analyzeChzSource } from "./compiler/index.ts";
 import { splitHumanCode } from "./human-code.ts";
-import { imagineSpecsFromChzSource } from "./preprocessor.ts";
 import { renderEntryPoint } from "./realize.ts";
 
 const roots: string[] = [];
@@ -27,7 +26,7 @@ function split(source: string) {
   const fileName = "/project/example.chz.ts";
   const analysis = analyzeChzSource(source, fileName);
   try {
-    return splitHumanCode(analysis, imagineSpecsFromChzSource(analysis));
+    return splitHumanCode(analysis);
   } finally {
     analysis.dispose();
   }
@@ -171,7 +170,7 @@ describe("splitHumanCode", () => {
     ].join("\n");
     const analysis = analyzeChzSource(source, fileName);
     try {
-      const result = splitHumanCode(analysis, []);
+      const result = splitHumanCode(analysis);
       const prologueFile = join(
         root,
         "nested",
@@ -222,10 +221,7 @@ describe("splitHumanCode", () => {
     const analysis = analyzeChzSource(source, sourceFile);
     try {
       expect(analysis.diagnostics).toEqual([]);
-      const result = splitHumanCode(
-        analysis,
-        imagineSpecsFromChzSource(analysis),
-      );
+      const result = splitHumanCode(analysis);
       const prologueFile = join(
         root,
         "chz",
@@ -261,10 +257,7 @@ describe("splitHumanCode", () => {
     ].join("\n");
     const analysis = analyzeChzSource(source, fileName);
     try {
-      const result = splitHumanCode(
-        analysis,
-        imagineSpecsFromChzSource(analysis),
-      );
+      const result = splitHumanCode(analysis);
       const epilogueFile = join(
         root,
         "chz",
@@ -312,7 +305,7 @@ describe("splitHumanCode", () => {
     ].join("\n");
     const analysis = analyzeChzSource(source, fileName);
     try {
-      const result = splitHumanCode(analysis, []);
+      const result = splitHumanCode(analysis);
       expect(result.entryPoint.named).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -396,7 +389,7 @@ describe("splitHumanCode", () => {
     const fileName = "/project/default-export.chz.ts";
     const analysis = analyzeChzSource(source, fileName);
     try {
-      const result = splitHumanCode(analysis, []);
+      const result = splitHumanCode(analysis);
       const entryPoint = renderEntryPoint(analysis, result, []);
 
       expect(result.prologue).toContain(

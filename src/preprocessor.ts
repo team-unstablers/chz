@@ -1,9 +1,16 @@
+/**
+ * AST-backed compatibility and final-emission boundary.
+ *
+ * Cheese syntax is parsed only by `src/compiler/`. This module does not scan
+ * source structure: it slices the compiler-owned AST spans into the legacy
+ * string-shaped `ImagineSpec` consumed by prompts, deterministic emitters, and
+ * realization-cache hashing. Plain-TypeScript stripping likewise runs only on
+ * a diagnostic-free `ChzSourceFile`.
+ */
 import { basename } from "node:path";
 
 import {
-  analyzeChzSource,
-  renderChzDiagnostic,
-  type ChzDiagnostic,
+  renderChzDiagnostics,
   type ChzEnsure,
   type ChzImagineClassMember,
   type ChzImagineDeclaration,
@@ -58,41 +65,6 @@ export interface ImagineSpec {
   originalText: string;
   start: number;
   end: number;
-}
-
-export interface PreprocessResult {
-  specs: ImagineSpec[];
-  code: string;
-}
-
-/**
- * Compatibility error for callers that still expect one thrown diagnostic.
- * The diagnostic itself comes from the shared compiler model; analysis APIs
- * retain all recoverable diagnostics instead of throwing at the first one.
- */
-export class ChzSyntaxError extends Error {
-  readonly fileName: string;
-  readonly line: number;
-  readonly column: number;
-  readonly diagnostic: ChzDiagnostic;
-
-  constructor(diagnostic: ChzDiagnostic) {
-    const deferredResource =
-      diagnostic.code === "CHZ1008"
-        ? " 'imagine resource' is intentionally deferred to a future language version."
-        : "";
-    super(`${renderChzDiagnostic(diagnostic)}${deferredResource}`);
-    this.name = "ChzSyntaxError";
-    this.fileName = diagnostic.file;
-    this.line = diagnostic.line;
-    this.column = diagnostic.column;
-    this.diagnostic = diagnostic;
-  }
-}
-
-function throwFirstDiagnostic(analysis: ChzSourceFile): void {
-  const diagnostic = analysis.diagnostics[0];
-  if (diagnostic !== undefined) throw new ChzSyntaxError(diagnostic);
 }
 
 function nodeText(source: string, node: Node): string {
@@ -218,11 +190,13 @@ function adaptDeclaration(
   };
 }
 
-/** Build the legacy string model from the AST-backed source analysis. */
+/**
+ * Build the legacy string model from a diagnostic-free AST-backed analysis.
+ * Callers own preflight and the analysis snapshot lifetime.
+ */
 export function imagineSpecsFromChzSource(
   analysis: ChzSourceFile,
 ): ImagineSpec[] {
-  throwFirstDiagnostic(analysis);
   return analysis.imagineDeclarations.map((declaration) =>
     adaptDeclaration(
       analysis.source,
@@ -232,40 +206,25 @@ export function imagineSpecsFromChzSource(
   );
 }
 
-/**
- * Compatibility entry point. Every signature and contract string is sliced
- * from an AST node; no source structure is reparsed here.
- */
-export function extractImagineSpecs(
-  source: string,
-  fileName: string,
-): ImagineSpec[] {
-  const analysis = analyzeChzSource(source, fileName);
-  try {
-    return imagineSpecsFromChzSource(analysis);
-  } finally {
-    analysis.dispose();
-  }
-}
-
 function emitPlainTypeScript(
-  source: string,
-  fileName: string,
-  specs: readonly ImagineSpec[],
+  analysis: ChzSourceFile,
 ): string {
-  if (specs.length === 0) return source;
+  const declarations = analysis.imagineDeclarations;
+  if (declarations.length === 0) return analysis.source;
 
-  const names = specs.map((spec) => spec.name);
+  const names = declarations.map((declaration) => declaration.name);
   const importLine =
-    `import { ${names.join(", ")} } from "${realizationImportSpecifier(fileName)}";\n`;
-  const ordered = [...specs].sort((left, right) => left.start - right.start);
+    `import { ${names.join(", ")} } from "${realizationImportSpecifier(analysis.fileName)}";\n`;
+  const ordered = [...declarations].sort(
+    (left, right) => left.span.start - right.span.start,
+  );
   let body = "";
   let cursor = 0;
-  for (const spec of ordered) {
-    body += source.slice(cursor, spec.start);
-    cursor = spec.end;
+  for (const declaration of ordered) {
+    body += analysis.source.slice(cursor, declaration.span.start);
+    cursor = declaration.span.end;
   }
-  body += source.slice(cursor);
+  body += analysis.source.slice(cursor);
   return importLine + body;
 }
 
@@ -275,41 +234,13 @@ function emitPlainTypeScript(
  */
 export function stripAnalyzedSource(
   analysis: ChzSourceFile,
-  specs: ImagineSpec[] = imagineSpecsFromChzSource(analysis),
 ): string {
-  throwFirstDiagnostic(analysis);
-  return emitPlainTypeScript(analysis.source, analysis.fileName, specs);
-}
-
-/** Compatibility wrapper around the separate analyze → final emit stages. */
-export function transformToPlainTs(
-  source: string,
-  fileName: string,
-  specs?: ImagineSpec[],
-): string {
-  const analysis = analyzeChzSource(source, fileName);
-  try {
-    const compatibleSpecs = specs ?? imagineSpecsFromChzSource(analysis);
-    return stripAnalyzedSource(analysis, compatibleSpecs);
-  } finally {
-    analysis.dispose();
+  if (analysis.diagnostics.length > 0) {
+    throw new Error(
+      renderChzDiagnostics(analysis.diagnostics, "human").join("\n"),
+    );
   }
-}
-
-export function preprocess(
-  source: string,
-  fileName: string,
-): PreprocessResult {
-  const analysis = analyzeChzSource(source, fileName);
-  try {
-    const specs = imagineSpecsFromChzSource(analysis);
-    return {
-      specs,
-      code: stripAnalyzedSource(analysis, specs),
-    };
-  } finally {
-    analysis.dispose();
-  }
+  return emitPlainTypeScript(analysis);
 }
 
 export function publicSurfaceText(spec: ImagineSpec): string {
