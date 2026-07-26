@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 
+import { analyzeChzSource } from "./compiler/index.ts";
 import { splitHumanCode } from "./human-code.ts";
-import { extractImagineSpecs } from "./preprocessor.ts";
+import { imagineSpecsFromChzSource } from "./preprocessor.ts";
 
 function split(source: string) {
   const fileName = "/project/example.chz.ts";
-  return splitHumanCode(source, fileName, extractImagineSpecs(source, fileName));
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return splitHumanCode(analysis, imagineSpecsFromChzSource(analysis));
+  } finally {
+    analysis.dispose();
+  }
 }
 
 describe("splitHumanCode", () => {

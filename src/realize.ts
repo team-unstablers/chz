@@ -18,11 +18,12 @@ import {
 } from "./graph.ts";
 import { splitHumanCode } from "./human-code.ts";
 import {
-  extractImagineSpecs,
+  imagineSpecsFromChzSource,
   publicSurfaceText,
   realizationBaseName,
   type ImagineSpec,
 } from "./preprocessor.ts";
+import type { ChzSourceFile } from "./compiler/index.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import {
   humanCodeHash,
@@ -153,11 +154,14 @@ export function serializeAskUser(
 
 /** Realize every imagine symbol, selecting the first configured compatible Realizer. */
 export async function realize(
-  source: string,
-  fileName: string,
+  analysis: ChzSourceFile,
   options: RealizeOptions,
 ): Promise<RealizeResult> {
-  const specs = extractImagineSpecs(source, fileName);
+  // The caller owns the analyzer snapshot and must keep it alive until this
+  // promise settles. Adapting the already-bound AST here performs no parse and
+  // throws before any write if a direct caller bypassed CLI preflight.
+  const specs = imagineSpecsFromChzSource(analysis);
+  const { source, fileName } = analysis;
   const specByName = new Map(specs.map((spec) => [spec.name, spec]));
   const baseName = realizationBaseName(fileName);
   const baseDir = realizationBaseDir(fileName);
@@ -167,7 +171,7 @@ export async function realize(
   const activeProfile = options.activeProfile ?? extractProfile(source) ?? "console";
   mkdirSync(join(baseDir, "implementations"), { recursive: true });
   mkdirSync(join(baseDir, "tests"), { recursive: true });
-  const humanCode = splitHumanCode(source, fileName, specs);
+  const humanCode = splitHumanCode(analysis, specs);
   const writeHumanCode = (): void => {
     writeFileSync(join(baseDir, "implementations", "__prologue__.ts"), humanCode.prologue, "utf8");
     writeFileSync(join(baseDir, "implementations", "__epilogue__.ts"), humanCode.epilogue, "utf8");

@@ -1,5 +1,3 @@
-import { dirname, resolve } from "node:path";
-
 import {
   isArrayBindingPattern,
   isClassDeclaration,
@@ -17,17 +15,14 @@ import {
   isObjectBindingPattern,
   isTypeAliasDeclaration,
   isVariableStatement,
+  type Checker,
   type Identifier,
   type Node,
-  type Project,
   type SourceFile,
   type Statement,
   type TypeScriptSymbol,
 } from "./compiler/ts-api.ts";
-import {
-  API,
-  createVirtualFileSystem,
-} from "./compiler/ts-api.ts";
+import type { ChzSourceFile } from "./compiler/index.ts";
 
 import type { ImagineSpec } from "./preprocessor.ts";
 
@@ -48,121 +43,72 @@ interface HumanStatement {
  * transitively references another human statement that had to move there.
  */
 export function splitHumanCode(
-  source: string,
-  fileName: string,
+  analysis: ChzSourceFile,
   specs: readonly ImagineSpec[],
 ): HumanCodeSplit {
+  const { source } = analysis;
   const orderedSpecs = [...specs].sort((left, right) => left.start - right.start);
-  const parseableSource = replaceImagineDeclarations(source, orderedSpecs);
-  const absoluteFile = resolve(fileName);
-  const api = new API({
-    cwd: dirname(absoluteFile),
-    fs: createVirtualFileSystem({ [absoluteFile]: parseableSource }),
-  });
-  let snapshot: ReturnType<API["updateSnapshot"]> | undefined;
+  const sourceFile = analysis.typescript.sourceFile;
+  const checker = analysis.typescript.checker;
 
-  try {
-    snapshot = api.updateSnapshot({ openFiles: [absoluteFile] });
-    const project = snapshot.getDefaultProjectForFile(absoluteFile);
-    const sourceFile = project?.program.getSourceFile(absoluteFile);
-    if (project === undefined || sourceFile === undefined) {
-      throw new Error(`Could not parse human-owned code from ${fileName}.`);
+  const placeholderStatements = new Set<Statement>();
+  const placeholderSpec = new Map<Statement, ImagineSpec>();
+  const humanStatements: HumanStatement[] = [];
+  const humanIndex = new Map<Statement, number>();
+
+  for (const statement of sourceFile.statements) {
+    const start = statement.getStart(sourceFile);
+    const spec = orderedSpecs.find((candidate) => start >= candidate.start && start < candidate.end);
+    if (spec !== undefined) {
+      placeholderStatements.add(statement);
+      placeholderSpec.set(statement, spec);
+      continue;
     }
-
-    const placeholderStatements = new Set<Statement>();
-    const placeholderSpec = new Map<Statement, ImagineSpec>();
-    const humanStatements: HumanStatement[] = [];
-    const humanIndex = new Map<Statement, number>();
-
-    for (const statement of sourceFile.statements) {
-      const start = statement.getStart(sourceFile);
-      const spec = orderedSpecs.find((candidate) => start >= candidate.start && start < candidate.end);
-      if (spec !== undefined) {
-        placeholderStatements.add(statement);
-        placeholderSpec.set(statement, spec);
-        continue;
-      }
-      humanIndex.set(statement, humanStatements.length);
-      humanStatements.push({ node: statement, identifiers: collectIdentifiers(statement), content: "" });
-    }
-
-    const imagineSymbolIds = collectImagineSymbolIds(
-      [...placeholderStatements],
-      placeholderSpec,
-      project,
-    );
-    const symbolsByStatement = humanStatements.map((statement) =>
-      project.checker.getSymbolAtLocation(statement.identifiers),
-    );
-    const ownersBySymbol = collectSymbolOwners(symbolsByStatement, humanStatements, sourceFile, project);
-    const epilogueStatements = classifyEpilogueStatements(
-      symbolsByStatement,
-      imagineSymbolIds,
-      ownersBySymbol,
-    );
-
-    const standaloneTrivia = assignOriginalStatementContent(
-      source,
-      sourceFile,
-      orderedSpecs,
-      placeholderStatements,
-      humanStatements,
-      humanIndex,
-    );
-
-    const prologueStatements = humanStatements.filter((_, index) => !epilogueStatements.has(index));
-    const epilogueBody = humanStatements
-      .filter((_, index) => epilogueStatements.has(index))
-      .map((statement) => statement.content)
-      .join("");
-    const prologueBody = standaloneTrivia + prologueStatements.map((statement) => statement.content).join("");
-    const prologueNames = collectTopLevelNames(prologueStatements.map((statement) => statement.node));
-    const namedExports = collectNamedExports(prologueStatements.map((statement) => statement.node));
-
-    return {
-      prologue: renderPrologue(prologueBody, prologueNames, namedExports),
-      epilogue: renderEpilogue(epilogueBody, prologueNames, orderedSpecs),
-    };
-  } finally {
-    snapshot?.dispose();
-    api.close();
-  }
-}
-
-function replaceImagineDeclarations(source: string, specs: readonly ImagineSpec[]): string {
-  let result = "";
-  let cursor = 0;
-  for (const spec of specs) {
-    const declaration = renderImaginePlaceholder(spec);
-    if (declaration.length > spec.originalText.length) {
-      throw new Error(`Could not create a parser placeholder for imagine symbol '${spec.name}'.`);
-    }
-    const blanked = spec.originalText.replace(/[^\r\n]/g, " ");
-    result += source.slice(cursor, spec.start);
-    result += declaration + blanked.slice(declaration.length);
-    cursor = spec.end;
-  }
-  return result + source.slice(cursor);
-}
-
-function renderImaginePlaceholder(spec: ImagineSpec): string {
-  if (spec.type === "function") {
-    return `declare function ${spec.name}(${spec.parameters})${spec.returnType === "" ? "" : `: ${spec.returnType}`};`;
+    humanIndex.set(statement, humanStatements.length);
+    humanStatements.push({ node: statement, identifiers: collectIdentifiers(statement), content: "" });
   }
 
-  const members = spec.members.map((member) => {
-    const staticModifier = member.modifiers.includes("static") ? "static " : "";
-    if (member.type === "property") {
-      const readonlyModifier = member.modifiers.includes("readonly") ? "readonly " : "";
-      return `  ${staticModifier}${readonlyModifier}${member.name}: ${member.returnType};`;
-    }
-    const returnType = member.returnType || (member.modifiers.includes("async") ? "Promise<void>" : "void");
-    if (member.name === "constructor") return `  constructor(${member.parameters});`;
-    return `  ${staticModifier}${member.name}(${member.parameters}): ${returnType};`;
-  });
-  return members.length === 0
-    ? `declare class ${spec.name} {}`
-    : `declare class ${spec.name} {\n${members.join("\n")}\n}`;
+  const imagineSymbolIds = collectImagineSymbolIds(
+    [...placeholderStatements],
+    placeholderSpec,
+    checker,
+  );
+  const symbolsByStatement = humanStatements.map((statement) =>
+    checker.getSymbolAtLocation(statement.identifiers),
+  );
+  const ownersBySymbol = collectSymbolOwners(
+    symbolsByStatement,
+    humanStatements,
+    sourceFile,
+  );
+  const epilogueStatements = classifyEpilogueStatements(
+    symbolsByStatement,
+    imagineSymbolIds,
+    ownersBySymbol,
+  );
+
+  const standaloneTrivia = assignOriginalStatementContent(
+    source,
+    sourceFile,
+    orderedSpecs,
+    placeholderStatements,
+    humanStatements,
+    humanIndex,
+  );
+
+  const prologueStatements = humanStatements.filter((_, index) => !epilogueStatements.has(index));
+  const epilogueBody = humanStatements
+    .filter((_, index) => epilogueStatements.has(index))
+    .map((statement) => statement.content)
+    .join("");
+  const prologueBody = standaloneTrivia + prologueStatements.map((statement) => statement.content).join("");
+  const prologueNames = collectTopLevelNames(prologueStatements.map((statement) => statement.node));
+  const namedExports = collectNamedExports(prologueStatements.map((statement) => statement.node));
+
+  return {
+    prologue: renderPrologue(prologueBody, prologueNames, namedExports),
+    epilogue: renderEpilogue(epilogueBody, prologueNames, orderedSpecs),
+  };
 }
 
 function collectIdentifiers(root: Node): Identifier[] {
@@ -178,7 +124,7 @@ function collectIdentifiers(root: Node): Identifier[] {
 function collectImagineSymbolIds(
   statements: readonly Statement[],
   specs: ReadonlyMap<Statement, ImagineSpec>,
-  project: Project,
+  checker: Checker,
 ): Set<number> {
   const identifiers = statements.flatMap((statement) => {
     const spec = specs.get(statement);
@@ -191,7 +137,7 @@ function collectImagineSymbolIds(
       : [];
   });
   return new Set(
-    project.checker.getSymbolAtLocation(identifiers)
+    checker.getSymbolAtLocation(identifiers)
       .flatMap((symbol) => symbol === undefined ? [] : [symbol.id]),
   );
 }
@@ -200,7 +146,6 @@ function collectSymbolOwners(
   symbolGroups: readonly (TypeScriptSymbol | undefined)[][],
   statements: readonly HumanStatement[],
   sourceFile: SourceFile,
-  project: Project,
 ): Map<number, Set<number>> {
   const owners = new Map<number, Set<number>>();
   const symbols = new Map<number, TypeScriptSymbol>();
@@ -212,7 +157,9 @@ function collectSymbolOwners(
 
   for (const symbol of symbols.values()) {
     for (const declarationHandle of symbol.declarations) {
-      const declaration = declarationHandle.resolve(project);
+      // Handles retain their canonical Project, so resolving them reuses the
+      // analyzer snapshot without exposing or constructing another Program.
+      const declaration = declarationHandle.resolve();
       if (declaration === undefined || declaration.getSourceFile().fileName !== sourceFile.fileName) continue;
       const position = declaration.getStart(sourceFile);
       const owner = statements.findIndex(

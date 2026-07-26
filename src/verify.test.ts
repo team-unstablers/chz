@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
+import { analyzeChzSource } from "./compiler/index.ts";
 import { extractImagineSpecs, publicSurfaceText } from "./preprocessor.ts";
 import {
   realize,
@@ -42,6 +43,19 @@ function writeTree(baseDir: string, files: Record<string, string>): void {
     const abs = join(baseDir, relPath);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, "utf8");
+  }
+}
+
+async function realizeSource(
+  source: string,
+  fileName: string,
+  options: Parameters<typeof realize>[1],
+): Promise<Awaited<ReturnType<typeof realize>>> {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return await realize(analysis, options);
+  } finally {
+    analysis.dispose();
   }
 }
 
@@ -263,7 +277,7 @@ class FixtureRealizer implements ChzRealizer {
 async function realizeFixture(): Promise<Awaited<ReturnType<typeof realize>>> {
   const file = join(makeTempDir(), FILE);
   writeFileSync(file, SOURCE, "utf8");
-  return realize(SOURCE, file, {
+  return realizeSource(SOURCE, file, {
     realizers: [new FixtureRealizer()],
     now: () => new Date("2026-07-23T12:34:56.000Z"),
     skipVerification: true,
@@ -344,7 +358,7 @@ describe("buildRealizationCache", () => {
     ].join("\n");
     const file = join(makeTempDir(), "slugs.chz.ts");
     writeFileSync(file, source, "utf8");
-    const result = await realize(source, file, {
+    const result = await realizeSource(source, file, {
       realizers: [new ImportingSlugRealizer()],
       now: () => new Date("2026-07-23T12:34:56.000Z"),
       skipVerification: true,

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { BIN_NAME, buildUsage, run } from "./cli.ts";
+import type { ChzDiagnostic } from "./compiler/index.ts";
 import type {
   ChzImagineSymbol,
   ChzImagineSymbolResolution,
@@ -39,6 +40,26 @@ function makeClassFixture(name = "game.chz.ts"): string {
       "  requirements(`테스트 가능한 게임을 구현합니다.`);",
       "  imagine async start() {}",
       "  imagine async cleanup() { requirements(`리소스를 정리합니다.`); }",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return file;
+}
+
+function makeFatalIslandFixture(name = "fatal-island.chz.ts"): string {
+  const root = mkdtempSync(join(tmpdir(), "chz-cli-fatal-"));
+  roots.push(root);
+  const file = join(root, name);
+  writeFileSync(
+    file,
+    [
+      "imagine class Counter {",
+      "  ensure(value === );",
+      "  imagine readonly score: number {",
+      "    requirements(limit);",
+      "  }",
       "}",
       "",
     ].join("\n"),
@@ -454,6 +475,95 @@ export default {
     expect(realizer.calls).toBe(0);
     expect(out.join("\n")).toContain("You are the Cheese Realizer");
     expect(out.join("\n")).toContain("# Symbol to realize");
+  });
+
+  it("creates no realization directory or file when source preflight is fatal", async () => {
+    const file = makeFatalIslandFixture();
+    const code = await run(
+      ["realize", file],
+      { out: () => {}, err: () => {} },
+      {
+        config: { realizers: [new ClassCliRealizer()] },
+        projectRoot: dirname(file),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(existsSync(join(dirname(file), "chz"))).toBe(false);
+  });
+
+  it("starts no Realizer session when source preflight is fatal", async () => {
+    const file = makeFatalIslandFixture();
+    const realizer = new ClassCliRealizer();
+    const code = await run(
+      ["realize", file],
+      { out: () => {}, err: () => {} },
+      {
+        config: { realizers: [realizer] },
+        projectRoot: dirname(file),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(realizer.calls).toBe(0);
+  });
+
+  it("reports the same complete diagnostics in JSON, dry-run, and realize paths", async () => {
+    const file = makeFatalIslandFixture();
+    const jsonOut: string[] = [];
+    const dryRunErr: string[] = [];
+    const realizeErr: string[] = [];
+    const realizer = new ClassCliRealizer();
+
+    const jsonCode = await run(
+      ["realize", "--json", file],
+      { out: (message) => jsonOut.push(message), err: () => {} },
+    );
+    const dryRunCode = await run(
+      ["realize", "--dry-run", file],
+      { out: () => {}, err: (message) => dryRunErr.push(message) },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file) },
+    );
+    const realizeCode = await run(
+      ["realize", file],
+      { out: () => {}, err: (message) => realizeErr.push(message) },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file) },
+    );
+
+    const diagnostics = JSON.parse(jsonOut.join("\n")) as ChzDiagnostic[];
+    const humanDiagnostics = diagnostics.map(
+      (diagnostic) =>
+        `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}`,
+    );
+    expect([jsonCode, dryRunCode, realizeCode]).toEqual([1, 1, 1]);
+    expect(diagnostics.map((diagnostic) => diagnostic.code))
+      .toEqual(["CHZ1003", "CHZ2001"]);
+    expect(dryRunErr).toEqual(humanDiagnostics);
+    expect(realizeErr).toEqual(humanDiagnostics);
+    expect(realizer.calls).toBe(0);
+  });
+
+  it("maps class-contract and property-contract island diagnostics to exact original positions", async () => {
+    const file = makeFatalIslandFixture();
+    const out: string[] = [];
+    const code = await run(
+      ["realize", "--json", file],
+      { out: (message) => out.push(message), err: () => {} },
+    );
+
+    const diagnostics = JSON.parse(out.join("\n")) as ChzDiagnostic[];
+    expect(code).toBe(1);
+    expect(
+      diagnostics.map(({ code: diagnosticCode, offset, line, column }) => ({
+        code: diagnosticCode,
+        offset,
+        line,
+        column,
+      })),
+    ).toEqual([
+      { code: "CHZ1003", offset: 43, line: 2, column: 20 },
+      { code: "CHZ2001", offset: 98, line: 4, column: 18 },
+    ]);
   });
 
   it("requires a configured model when no config exists", async () => {

@@ -6,7 +6,15 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
-import { ChzSyntaxError, extractImagineSpecs, type ImagineSpec } from "./preprocessor.ts";
+import {
+  analyzeChzSource,
+  renderChzDiagnostics,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
+import {
+  imagineSpecsFromChzSource,
+  type ImagineSpec,
+} from "./preprocessor.ts";
 import {
   buildDependencyGraph,
   realize,
@@ -213,16 +221,55 @@ async function realizeSourceFile(
     return 1;
   }
 
-  let specs: ImagineSpec[];
+  let analysis: ChzSourceFile;
   try {
-    specs = extractImagineSpecs(source, sourceFile);
+    analysis = analyzeChzSource(source, sourceFile);
   } catch (error) {
-    if (error instanceof ChzSyntaxError) {
-      io.err(`${BIN_NAME} realize: ${error.message}`);
-      return 1;
-    }
-    throw error;
+    io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
+    return 1;
   }
+
+  // realizeSourceFile owns the compiler snapshot. Every command path consumes
+  // this exact analysis, and disposal happens only after dry-run/JSON output or
+  // the asynchronous realization has completely finished.
+  try {
+    return await realizeAnalyzedSourceFile(
+      analysis,
+      displayName,
+      parsed,
+      io,
+      deps,
+      getConfigured,
+      announceConfig,
+    );
+  } finally {
+    analysis.dispose();
+  }
+}
+
+async function realizeAnalyzedSourceFile(
+  analysis: ChzSourceFile,
+  displayName: string,
+  parsed: RealizeArguments,
+  io: CliIO,
+  deps: CliDeps,
+  getConfigured: () => Promise<ConfiguredProject>,
+  announceConfig: boolean,
+): Promise<number> {
+  // Phase 2 analysis contains Cheese grammar/contract diagnostics and
+  // TypeScript syntactic diagnostics only. Semantic diagnostics are not
+  // collected here, so obligation classification remains untouched.
+  if (analysis.diagnostics.length > 0) {
+    const format = parsed.json ? "json" : "human";
+    const write = parsed.json ? io.out : io.err;
+    for (const rendered of renderChzDiagnostics(analysis.diagnostics, format)) {
+      write(rendered);
+    }
+    return 1;
+  }
+  const source = analysis.source;
+  const sourceFile = analysis.fileName;
+  const specs: ImagineSpec[] = imagineSpecsFromChzSource(analysis);
   if (parsed.json) {
     io.out(JSON.stringify(specs, null, 2));
     return 0;
@@ -363,7 +410,7 @@ async function realizeSourceFile(
 
   let result: RealizeResult;
   try {
-    result = await realize(source, sourceFile, {
+    result = await realize(analysis, {
       realizers: configured.config.realizers,
       projectRoot: configured.projectRoot,
       activeProfile: configured.config.profile,

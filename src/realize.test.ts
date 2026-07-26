@@ -4,8 +4,13 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { analyzeChzSource } from "./compiler/index.ts";
 import { extractImagineSpecs } from "./preprocessor.ts";
-import { buildRealizationCache, writeRealizationCache } from "./verify.ts";
+import {
+  buildRealizationCache,
+  writeRealizationCache,
+  type RealizationCache,
+} from "./verify.ts";
 import {
   CHZ_HARNESS_TOOLS,
   CHZ_REALIZER_SYSTEM,
@@ -60,6 +65,19 @@ function contextFor(root: string, outputDir: string): ChzRealizeContext {
     baseContexts: "",
     now: () => new Date("2026-07-23T00:00:00.000Z"),
   };
+}
+
+async function realizeSource(
+  source: string,
+  fileName: string,
+  options: Parameters<typeof realize>[1],
+): Promise<Awaited<ReturnType<typeof realize>>> {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return await realize(analysis, options);
+  } finally {
+    analysis.dispose();
+  }
 }
 
 class ScriptedRealizer extends ChzRealizerBase {
@@ -521,7 +539,7 @@ describe("realize engine", () => {
     const data = fixture();
     const realizer = new RetryingEngineRealizer();
     let verificationCalls = 0;
-    const result = await realize(data.source, data.sourceFile, {
+    const result = await realizeSource(data.source, data.sourceFile, {
       realizers: [realizer],
       projectRoot: data.root,
       maxRetries: 1,
@@ -565,7 +583,7 @@ describe("realize engine", () => {
     ].join("\n");
     writeFileSync(sourceFile, source, "utf8");
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [new CounterClassRealizer()],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -604,7 +622,7 @@ describe("realize engine", () => {
       ].join("\n");
       writeFileSync(sourceFile, source, "utf8");
 
-      const result = await realize(source, sourceFile, {
+      const result = await realizeSource(source, sourceFile, {
         realizers: [new SlugPairRealizer()],
         projectRoot: root,
         now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -668,7 +686,7 @@ describe("realize engine", () => {
 
     const warnings: string[] = [];
     const verifiedScopes: string[][] = [];
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       verify: async (input) => {
@@ -744,7 +762,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       verify: async () => ({ passed: true, output: "green" }),
@@ -795,7 +813,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -856,7 +874,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -891,7 +909,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -958,7 +976,7 @@ describe("parallel realize (-j)", () => {
       active--;
     });
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 2,
@@ -987,7 +1005,7 @@ describe("parallel realize (-j)", () => {
       events.push(`end:${name}`);
     });
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 4,
@@ -1044,7 +1062,7 @@ describe("parallel realize (-j)", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 3,
@@ -1123,7 +1141,7 @@ describe("realize re-runs (docs/62)", () => {
 
   async function firstRun(source: string, root: string, sourceFile: string) {
     const realizer = new CountingSlugRealizer();
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1154,10 +1172,11 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, source, "utf8");
     const first = await firstRun(source, root, sourceFile);
     const firstCache = readFileSync(join(first.baseDir, "realization-cache.json"), "utf8");
+    const firstCacheData = JSON.parse(firstCache) as RealizationCache;
 
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1185,6 +1204,10 @@ describe("realize re-runs (docs/62)", () => {
       realizedAt: "2026-07-24T00:00:00.000Z",
       testsPassed: true,
     });
+    expect(rewritten.symbols.slugify?.publicSurfaceHash)
+      .toBe(firstCacheData.symbols.slugify?.publicSurfaceHash);
+    expect(rewritten.symbols.buildUniqueSlugs?.publicSurfaceHash)
+      .toBe(firstCacheData.symbols.buildUniqueSlugs?.publicSurfaceHash);
     expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(firstCache);
   });
 
@@ -1200,7 +1223,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1233,7 +1256,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1261,7 +1284,7 @@ describe("realize re-runs (docs/62)", () => {
     const edited = makeSlugSource("소문자 슬러그로 만듭니다.", ensureLine);
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1292,7 +1315,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, shifted, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(shifted, sourceFile, {
+    const second = await realizeSource(shifted, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1325,7 +1348,7 @@ describe("realize re-runs (docs/62)", () => {
       "utf8",
     );
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1351,7 +1374,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1381,7 +1404,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1416,7 +1439,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}\n`, "utf8");
 
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1437,7 +1460,7 @@ describe("realize re-runs (docs/62)", () => {
     await firstRun(source, root, sourceFile);
 
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: "another-version",
@@ -1462,7 +1485,7 @@ describe("realize re-runs (docs/62)", () => {
 
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,

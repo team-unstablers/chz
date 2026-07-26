@@ -149,3 +149,20 @@ export function createTypeScriptDiagnostic(
 export function renderChzDiagnostic(diagnostic: ChzDiagnostic): string {
   return `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}`;
 }
+
+export type ChzDiagnosticRenderFormat = "human" | "json";
+
+/**
+ * Render a complete preflight diagnostic set through one boundary. Human
+ * output deliberately keeps the established file:line:column format, while
+ * JSON preserves every structured field from the shared diagnostic model.
+ */
+export function renderChzDiagnostics(
+  diagnostics: readonly ChzDiagnostic[],
+  format: ChzDiagnosticRenderFormat,
+): readonly string[] {
+  if (format === "json") {
+    return [JSON.stringify(diagnostics, null, 2)];
+  }
+  return diagnostics.map(renderChzDiagnostic);
+}

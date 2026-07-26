@@ -9,6 +9,8 @@ export {
   createChzDiagnostic,
   createTypeScriptDiagnostic,
   renderChzDiagnostic,
+  renderChzDiagnostics,
+  type ChzDiagnosticRenderFormat,
   type ChzKnownDiagnosticCode,
 } from "./diagnostics.ts";
 export {
