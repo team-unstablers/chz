@@ -38,7 +38,8 @@ projection and an AST overlay — and drives it in phases (see
 
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `10` imagine declaration grammar, `20` module
-resolution & the no-build principle, `60`
+resolution & the no-build principle, `21` projection, preflight ordering &
+obligation promotion, `60`
 realize output & overrides, `61` Realizer harness,
 `62` dependency graph, `63` harness rules & tool spec, `64` harness system
 prompt — and `docs/idea-sketches/` for open questions, rationale, and
