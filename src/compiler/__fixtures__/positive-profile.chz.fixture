@@ -1,0 +1,6 @@
+// The profile directive is a Cheese shell production and is neutralized before TypeScript parsing.
+@profile console
+
+imagine function runProfiled(): void {
+  requirements("Run under the console profile.");
+}

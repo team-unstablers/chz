@@ -1,0 +1,16 @@
+// Generic declarations and object, mapped, and conditional return types are delegated to TypeScript.
+type Projected<T> = {
+  readonly [K in keyof T]: T[K];
+};
+
+imagine function wrap<T extends object>(value: T): Promise<{ value: T }> {
+  requirements("Wrap the value.");
+}
+
+imagine class GenericBox<T> {
+  requirements(`Retain one generic value.`);
+
+  imagine map<U>(convert: (value: T) => U): Projected<{ value: U }> extends infer R ? R : never {
+    requirements("Map the retained value.");
+  }
+}

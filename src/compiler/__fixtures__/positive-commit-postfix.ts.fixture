@@ -1,0 +1,6 @@
+// Postfix increment/decrement and non-null assertion continuations cancel commit.
+declare let imagine: number | undefined;
+
+imagine++;
+imagine--;
+imagine!;

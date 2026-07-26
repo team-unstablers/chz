@@ -1,0 +1,2 @@
+// A misspelled declaration kind is diagnosed at the following token.
+imagine functon x(): void {}

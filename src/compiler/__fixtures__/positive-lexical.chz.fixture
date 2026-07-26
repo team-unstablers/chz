@@ -1,0 +1,11 @@
+// Regex, division, nested templates, and fake contextual keywords must remain lexically distinct.
+const ratio = 10 / 2;
+const text = "imagine function stringGhost(): void {}";
+const nested = `outer ${`inner ${"imagine class TemplateGhost {}"}`}`;
+const matcher = /imagine function regexGhost\(\) \{\}/u;
+// imagine function commentGhost(): void {}
+
+imagine function lexicalResult(): number {
+  requirements(`Return the precomputed division result.`);
+  ensure(matcher.test(text) === false || nested.length > 0);
+}

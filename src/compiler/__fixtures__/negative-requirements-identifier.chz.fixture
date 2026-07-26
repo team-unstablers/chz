@@ -1,0 +1,5 @@
+// requirements cannot refer to a runtime identifier.
+declare const text: string;
+imagine function f(): void {
+  requirements(text);
+}

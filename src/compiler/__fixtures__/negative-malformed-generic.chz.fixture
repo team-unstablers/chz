@@ -1,0 +1,2 @@
+// Malformed generic syntax is mapped from TypeScript back into the CHZ grammar namespace.
+imagine function f<T(: void {}

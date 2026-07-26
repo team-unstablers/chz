@@ -1,0 +1,3 @@
+// EOF immediately after imagine cancels contextual-keyword commit.
+declare const imagine: unknown;
+imagine

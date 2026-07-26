@@ -1,0 +1,10 @@
+// Type-related operator continuations cancel commit.
+interface Factory {}
+declare const Factory: { new (): Factory };
+declare const imagine: unknown;
+declare const object: object;
+
+imagine as Factory;
+imagine satisfies Factory;
+imagine instanceof Factory;
+imagine in object;

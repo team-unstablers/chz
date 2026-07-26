@@ -1,0 +1,2 @@
+// declare is forbidden on an imagine declaration.
+declare imagine function f(): void {}

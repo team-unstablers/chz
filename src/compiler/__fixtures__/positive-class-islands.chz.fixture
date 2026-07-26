@@ -1,0 +1,17 @@
+// Direct class contracts and property contract bodies exercise origin-mapped islands.
+imagine class Counter<T> {
+  requirements("Manage a typed counter.");
+  ensure("A scenario callback may contain ordinary TypeScript.", () => {
+    const initial = 0;
+    assert(initial === 0);
+  });
+
+  imagine readonly score: { value: T; flags: { readonly dirty: boolean } } {
+    requirements(`Expose the current score.`);
+    ensure(true);
+  }
+
+  imagine map<U>(convert: (value: T) => U): U {
+    requirements("Map the score.");
+  }
+}

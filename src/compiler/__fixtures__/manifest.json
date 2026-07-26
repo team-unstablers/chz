@@ -1,0 +1,214 @@
+{
+  "fixtures": [
+    {
+      "file": "positive-lexical.chz.fixture",
+      "description": "Distinguishes regex from division and ignores fake imagine text in comments, strings, templates, and regex.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["lexicalResult"] }
+    },
+    {
+      "file": "positive-complex-types.chz.fixture",
+      "description": "Delegates generic function/class/method and object/mapped/conditional types to TypeScript.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["wrap", "GenericBox"] }
+    },
+    {
+      "file": "positive-unicode-escaped.chz.fixture",
+      "description": "Accepts a Unicode imagine name while preserving an escaped ordinary identifier.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["충돌판정_2D"] }
+    },
+    {
+      "file": "positive-class-islands.chz.fixture",
+      "description": "Projects class-level contracts and an imagined property body through mapped islands.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["Counter"], "islands": 3 }
+    },
+    {
+      "file": "positive-profile.chz.fixture",
+      "description": "Recognizes and neutralizes a top-level profile directive.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["runProfiled"] }
+    },
+    {
+      "file": "positive-commit-call-access.ts.fixture",
+      "description": "Covers the call/access row of the contextual keyword commit-cancel table.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-assignment-operators.ts.fixture",
+      "description": "Covers the assignment/operator row of the contextual keyword commit-cancel table.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-type-operators.ts.fixture",
+      "description": "Covers the type-operator row of the contextual keyword commit-cancel table.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-postfix.ts.fixture",
+      "description": "Covers the postfix/assertion row of the contextual keyword commit-cancel table.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-boundaries.ts.fixture",
+      "description": "Covers semicolon, comma, closing-delimiter, and block statement boundaries.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-eof.ts.fixture",
+      "description": "Covers EOF as a contextual keyword commit canceler.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-commit-linebreak.ts.fixture",
+      "description": "Covers the restricted-production line terminator rule.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "positive-typescript-parity.ts.fixture",
+      "description": "Keeps overloads, modifiers, import attributes, and dynamic import as plain TypeScript.",
+      "expect": { "success": true, "diagnostics": [], "declarations": [] }
+    },
+    {
+      "file": "unsupported-jsx.chz.tsx.fixture",
+      "logicalExtension": ".chz.tsx",
+      "description": "Records JSX/generic ambiguity while explicitly rejecting Phase 0 Cheese TSX.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1006", "line": 1, "column": 1 }],
+        "declarations": []
+      }
+    },
+    {
+      "file": "negative-duplicate-imagine.chz.fixture",
+      "description": "Commits at the first imagine and diagnoses the second token deterministically.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1001", "line": 2, "column": 9 }],
+        "declarations": []
+      }
+    },
+    {
+      "file": "negative-misspelled-kind.chz.fixture",
+      "description": "Rejects an unknown declaration kind after commit.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1001", "line": 2, "column": 9 }],
+        "declarations": []
+      }
+    },
+    {
+      "file": "negative-missing-name.chz.fixture",
+      "description": "Rejects a function declaration without a name.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1002", "line": 2, "column": 18 }],
+        "declarations": []
+      }
+    },
+    {
+      "file": "negative-malformed-generic.chz.fixture",
+      "description": "Maps malformed TypeScript generic syntax into a Cheese grammar diagnostic.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1003", "line": 2, "column": 21 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-contract-typo.chz.fixture",
+      "description": "Rejects a misspelled contract statement.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1004", "line": 3, "column": 3 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-implementation-statement.chz.fixture",
+      "description": "Rejects an implementation statement at contract-body top level.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1004", "line": 4, "column": 3 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-class-contract-statement.chz.fixture",
+      "description": "Rejects a non-contract statement at imagined-class top level.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1004", "line": 3, "column": 3 }],
+        "declarations": ["C"]
+      }
+    },
+    {
+      "file": "negative-export-default.chz.fixture",
+      "description": "Rejects export default with the documented named-export recovery.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1005", "line": 2, "column": 8 }],
+        "declarations": ["C"]
+      }
+    },
+    {
+      "file": "negative-imagine-export.chz.fixture",
+      "description": "Rejects a modifier after the committed contextual keyword.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1001", "line": 2, "column": 9 }],
+        "declarations": []
+      }
+    },
+    {
+      "file": "negative-requirements-substitution.chz.fixture",
+      "description": "Rejects a template substitution in requirements.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ2001", "line": 4, "column": 16 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-requirements-identifier.chz.fixture",
+      "description": "Rejects an identifier argument to requirements.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ2001", "line": 4, "column": 16 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-requirements-concatenation.chz.fixture",
+      "description": "Rejects a concatenated requirements expression.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ2001", "line": 3, "column": 16 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-requirements-multiple.chz.fixture",
+      "description": "Rejects multiple requirements arguments.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ2001", "line": 3, "column": 16 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-declare-imagine.chz.fixture",
+      "description": "Rejects declare imagine.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1005", "line": 2, "column": 1 }],
+        "declarations": ["f"]
+      }
+    },
+    {
+      "file": "negative-abstract-imagine.chz.fixture",
+      "description": "Rejects abstract imagine.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1005", "line": 2, "column": 1 }],
+        "declarations": ["C"]
+      }
+    }
+  ]
+}

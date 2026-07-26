@@ -1,0 +1,4 @@
+// requirements cannot concatenate strings.
+imagine function f(): void {
+  requirements("left" + "right");
+}

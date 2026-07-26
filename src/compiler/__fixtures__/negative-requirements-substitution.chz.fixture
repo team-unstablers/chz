@@ -1,0 +1,5 @@
+// requirements must be a static string with no substitutions.
+declare const limit: number;
+imagine function f(): void {
+  requirements(`value ${limit}`);
+}

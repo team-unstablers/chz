@@ -1,0 +1,4 @@
+// A direct class-level statement must be a requirements or ensure contract.
+imagine class C {
+  const implementation = 1;
+}

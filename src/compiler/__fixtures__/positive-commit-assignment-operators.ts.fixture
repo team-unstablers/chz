@@ -1,0 +1,12 @@
+// Assignment, arithmetic, comparison, logical, and conditional continuations cancel commit.
+declare let imagine: unknown;
+declare const value: unknown;
+declare const left: unknown;
+declare const right: unknown;
+
+imagine = value;
+imagine += 1;
+imagine + 1;
+imagine === value;
+imagine && value;
+imagine ? left : right;
