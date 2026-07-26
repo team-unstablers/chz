@@ -109,6 +109,7 @@ describe("splitHumanCode", () => {
         star: [],
         default: null,
       },
+      humanSymbolLayers: new Map(),
     });
   });
 

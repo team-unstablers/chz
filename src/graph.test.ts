@@ -6,10 +6,13 @@ import {
   buildEstimatedRealizeOrder,
   extractConfirmedDependencies,
   extractModuleSpecifiers,
+} from "./graph.ts";
+import { analyzeChzSource } from "./compiler/index.ts";
+import { extractImagineSpecs } from "./preprocessor.ts";
+import {
   mentionedSymbols,
   mentionsSymbol,
-} from "./graph.ts";
-import { extractImagineSpecs } from "./preprocessor.ts";
+} from "./requirements-mentions.ts";
 
 function specsOf(source: string) {
   return extractImagineSpecs(source, "graph-test.chz.ts");
@@ -34,6 +37,7 @@ describe("mentionsSymbol", () => {
 
   it("matches Korean names even with an attached particle", () => {
     expect(mentionsSymbol("크리티컬_판정을 사용하여 판정하십시오.", "크리티컬_판정")).toBe(true);
+    expect(mentionsSymbol("크리티컬_판정이 결과를 바꿉니다.", "크리티컬_판정")).toBe(true);
     expect(mentionsSymbol("`크리티컬_판정`을 사용하십시오.", "크리티컬_판정")).toBe(true);
   });
 
@@ -56,6 +60,92 @@ describe("mentionedSymbols", () => {
 });
 
 describe("buildDependencyGraph", () => {
+  it("records signature, ensure, and requirements-prose edges separately", () => {
+    const source = [
+      "imagine class DependencyModel {",
+      "  requirements(`A dependency model.`);",
+      "}",
+      "imagine function bySignature(value: DependencyModel): void {",
+      "  requirements(`Accept a model value.`);",
+      "}",
+      "imagine function byEnsure(): boolean {",
+      "  ensure(new DependencyModel() instanceof DependencyModel);",
+      "}",
+      "imagine function byProse(): void {",
+      "  requirements(`DependencyModel을 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const graph = buildDependencyGraph(analysis);
+
+      expect(graph.edges).toEqual([
+        {
+          dependent: "bySignature",
+          dependency: "DependencyModel",
+          sources: ["signature"],
+        },
+        {
+          dependent: "byEnsure",
+          dependency: "DependencyModel",
+          sources: ["ensure"],
+        },
+        {
+          dependent: "byProse",
+          dependency: "DependencyModel",
+          sources: ["requirements-prose"],
+        },
+      ]);
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("uses Checker identity instead of aliases, shadowing, or property text", () => {
+    const source = [
+      "export imagine function dependency(): number {",
+      "  requirements(`Return one.`);",
+      "}",
+      "export imagine function noFalseEdge(): boolean {",
+      "  ensure('local names stay local', () => {",
+      "    const dependency = 1;",
+      "    const holder = { dependency: true };",
+      "    const alias = holder.dependency;",
+      "    assert(alias && dependency === 1);",
+      "  });",
+      "}",
+      "export imagine function actualEdge(): boolean {",
+      "  ensure(dependency() === 1);",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const graph = buildDependencyGraph(analysis);
+      const falseEdge = graph.symbols.find((symbol) =>
+        symbol.name === "noFalseEdge"
+      )!;
+      const actualEdge = graph.symbols.find((symbol) =>
+        symbol.name === "actualEdge"
+      )!;
+
+      expect(falseEdge.dependencies).toEqual([]);
+      expect(actualEdge.dependencies.map((dependency) => dependency.name))
+        .toEqual(["dependency"]);
+      expect(graph.edges.find((edge) => edge.dependent === "actualEdge"))
+        .toEqual({
+          dependent: "actualEdge",
+          dependency: "dependency",
+          sources: ["ensure"],
+        });
+    } finally {
+      analysis.dispose();
+    }
+  });
+
   it("orders groups dependencies-first from requirements mentions", () => {
     const source = [
       imagineFunction("전투_시뮬레이션", "데미지_계산을 반복 호출합니다."),

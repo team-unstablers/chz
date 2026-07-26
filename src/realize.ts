@@ -12,7 +12,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import {
   ChzCycleError,
   buildDependencyGraph,
-  mentionedSymbols,
+  collectEstimatedDependencySources,
   type ChzDependencyGraph,
   type ChzRealizeGroup,
 } from "./graph.ts";
@@ -28,7 +28,12 @@ import {
   realizationBaseName,
   type ImagineSpec,
 } from "./preprocessor.ts";
-import type { ChzSourceFile } from "./compiler/index.ts";
+import {
+  collectTypeSymbolReferences,
+  declarationEnsureScopes,
+  symbolComesOnlyFromTypeScriptLib,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
 import { SyntaxKind } from "./compiler/ts-api.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import {
@@ -167,7 +172,7 @@ export async function realize(
   // promise settles. Adapting the already-bound AST here performs no parse and
   // throws before any write if a direct caller bypassed CLI preflight.
   const specs = imagineSpecsFromChzSource(analysis);
-  const { source, fileName } = analysis;
+  const { fileName } = analysis;
   const specByName = new Map(specs.map((spec) => [spec.name, spec]));
   const baseName = realizationBaseName(fileName);
   const baseDir = realizationBaseDir(fileName);
@@ -234,7 +239,7 @@ export async function realize(
 
   let graph: ChzDependencyGraph;
   try {
-    graph = buildDependencyGraph(specs, source, fileName, {
+    graph = buildDependencyGraph(analysis, {
       maxCycleSize: options.maxCycleSize,
       confirmedEdges,
     });
@@ -337,7 +342,12 @@ export async function realize(
     const renderedEnsures = new Map(
       members.map((member) => [
         member.name,
-        renderEnsureHarness(specByName.get(member.name)!, fileName, specs),
+        renderEnsureHarness(
+          analysis,
+          specByName.get(member.name)!,
+          specs,
+          humanCode,
+        ),
       ]),
     );
     const writeEnsures = (): void => {
@@ -742,10 +752,12 @@ export async function realize(
 
 /** Deterministic executable tests for human-authored ensures; engine-owned. */
 export function renderEnsureHarness(
+  analysis: ChzSourceFile,
   spec: ImagineSpec,
-  fileName: string,
-  allSpecs: readonly ImagineSpec[] = [spec],
+  allSpecs: readonly ImagineSpec[] = imagineSpecsFromChzSource(analysis),
+  humanCode: HumanCodeSplit = splitHumanCode(analysis, allSpecs),
 ): string {
+  const fileName = analysis.fileName;
   const base = realizationBaseName(fileName);
   const contracts = [
     ...spec.ensures.map((ensure) => ({ scope: spec.name, ensure })),
@@ -753,12 +765,11 @@ export function renderEnsureHarness(
       member.ensures.map((ensure) => ({ scope: `${spec.name}.${member.name}`, ensure })),
     ),
   ];
-  const contractSource = contracts.map(({ ensure }) => ensure.source).join("\n");
-  // The same boundary-aware matcher builds the dependency graph; using it here
-  // keeps the harness imports consistent with the realize order (an imported
-  // symbol without a graph edge could be realized after this one).
+  // Ensure imports and graph edges share the same Checker-symbol analysis. A
+  // property name or shadowing local therefore cannot manufacture an import
+  // that has no dependency edge.
   const mentioned = new Set(
-    mentionedSymbols(contractSource, allSpecs.map((candidate) => candidate.name)),
+    collectEstimatedDependencySources(analysis).get(spec.name)?.ensure ?? [],
   );
   const importedSymbols = allSpecs
     .filter((candidate) => candidate.name === spec.name || mentioned.has(candidate.name))
@@ -768,7 +779,12 @@ export function renderEnsureHarness(
     : importedSymbols
         .map((name) => `import { ${name} } from "../implementations/${name}.ts";`)
         .join("\n") + "\n";
-  const externalTypes = collectExternalTypeNames(spec, new Set(importedSymbols));
+  const externalTypes = collectExternalTypeNames(
+    analysis,
+    spec,
+    humanCode,
+    new Set(importedSymbols),
+  );
   const typeImports = externalTypes.length === 0
     ? ""
     : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n`;
@@ -830,75 +846,51 @@ function indentSource(source: string, spaces: number): string {
 }
 
 function collectExternalTypeNames(
+  analysis: ChzSourceFile,
   spec: ImagineSpec,
+  humanCode: HumanCodeSplit,
   valueImports: ReadonlySet<string>,
 ): string[] {
-  const builtins = new Set([
-    "Array",
-    "BigInt",
-    "Boolean",
-    "Date",
-    "Error",
-    "Function",
-    "Map",
-    "Number",
-    "Object",
-    "Promise",
-    "Readonly",
-    "ReadonlyArray",
-    "Record",
-    "RegExp",
-    "Set",
-    "String",
-    "Symbol",
-    "Uint8Array",
-    "WeakMap",
-    "WeakSet",
-  ]);
-  const typeText = [
-    spec.parameters,
-    spec.returnType,
-    ...spec.ensures.map((ensure) => ensure.source),
-    ...spec.members.flatMap((member) => [
-      member.parameters,
-      member.returnType,
-      ...member.ensures.map((ensure) => ensure.source),
-    ]),
-  ].join("\n");
-  const names = maskNonCodeText(typeText).match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
-  return [...new Set(names.filter((name) => !valueImports.has(name) && !builtins.has(name)))].sort();
-}
-
-function maskNonCodeText(source: string): string {
-  let result = "";
-  let i = 0;
-  while (i < source.length) {
-    const start = i;
-    if (source[i] === "/" && source[i + 1] === "/") {
-      i += 2;
-      while (i < source.length && source[i] !== "\n") i++;
-    } else if (source[i] === "/" && source[i + 1] === "*") {
-      i += 2;
-      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
-      i = Math.min(source.length, i + 2);
-    } else if (source[i] === "'" || source[i] === '"' || source[i] === "`") {
-      const quote = source[i]!;
-      i++;
-      while (i < source.length) {
-        if (source[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        const ch = source[i++];
-        if (ch === quote) break;
-      }
-    } else {
-      result += source[i++];
-      continue;
-    }
-    result += source.slice(start, i).replace(/[^\r\n]/g, " ");
+  const declaration = analysis.imagineDeclarations.find((candidate) =>
+    candidate.name === spec.name
+  );
+  if (declaration === undefined) {
+    throw new Error(
+      `The analyzed declaration for '${spec.name}' disappeared before ensure emission.`,
+    );
   }
-  return result;
+
+  const symbols = new Map<number, string>();
+  const addReferences = (
+    references: ReturnType<typeof collectTypeSymbolReferences>,
+  ): void => {
+    for (const { symbol } of references) {
+      if (symbolComesOnlyFromTypeScriptLib(symbol)) continue;
+      if (humanCode.humanSymbolLayers.get(symbol.id) !== "prologue") {
+        continue;
+      }
+      if (!valueImports.has(symbol.name)) {
+        symbols.set(symbol.id, symbol.name);
+      }
+    }
+  };
+  addReferences(
+    collectTypeSymbolReferences(
+      analysis,
+      declaration.declaration,
+      declaration.declaration,
+    ),
+  );
+  for (const scope of declarationEnsureScopes(declaration)) {
+    addReferences(
+      collectTypeSymbolReferences(
+        analysis,
+        scope.ensure.conditionOrScenario,
+        scope.owner,
+      ),
+    );
+  }
+  return [...new Set(symbols.values())].sort();
 }
 
 function renderForwardName(item: EntryPointNamedExport): string {

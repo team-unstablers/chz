@@ -36,6 +36,16 @@ export {
   createTypeScriptProjection,
   scriptKindForFileName,
 } from "./projection.ts";
+export {
+  collectSymbolReferences,
+  collectTypeSymbolReferences,
+  declarationEnsureScopes,
+  resolveReferenceSymbol,
+  symbolComesOnlyFromTypeScriptLib,
+  unaliasSymbol,
+  type ChzEnsureScope,
+  type SymbolReference,
+} from "./symbol-references.ts";
 export type {
   ChzDiagnostic,
   ChzEnsure,

@@ -31,6 +31,8 @@ import {
 import {
   collectModuleReferences,
   isRelativeModuleSpecifier,
+  unaliasSymbol,
+  type ChzImagineDeclaration,
   type ChzSourceFile,
 } from "./compiler/index.ts";
 
@@ -43,6 +45,12 @@ export interface HumanCodeSplit {
   prologue: string;
   epilogue: string;
   entryPoint: HumanEntryPointExports;
+  /**
+   * Human declaration symbols classified by the same AST/Checker pass as the
+   * split. Consumers such as ensure type-import emission must not infer the
+   * prologue from source text or from generated output.
+   */
+  humanSymbolLayers: ReadonlyMap<number, HumanCodeLayer>;
 }
 
 export type HumanCodeLayer = "prologue" | "epilogue";
@@ -103,8 +111,13 @@ export function splitHumanCode(
 ): HumanCodeSplit {
   const { source } = analysis;
   const orderedSpecs = [...specs].sort((left, right) => left.start - right.start);
+  const imagineStatements = new Set<Statement>(
+    analysis.imagineDeclarations.map((declaration) =>
+      declaration.declaration
+    ),
+  );
   const omittedSpans: OmittedSourceSpan[] = [
-    ...orderedSpecs,
+    ...analysis.imagineDeclarations.map((declaration) => declaration.span),
     ...(analysis.profile === null ? [] : [analysis.profile.span]),
   ].sort((left, right) => left.start - right.start);
   const sourceFile = analysis.typescript.sourceFile;
@@ -122,16 +135,12 @@ export function splitHumanCode(
   );
 
   const placeholderStatements = new Set<Statement>();
-  const placeholderSpec = new Map<Statement, ImagineSpec>();
   const humanStatements: HumanStatement[] = [];
   const humanIndex = new Map<Statement, number>();
 
   for (const statement of sourceFile.statements) {
-    const start = statement.getStart(sourceFile);
-    const spec = orderedSpecs.find((candidate) => start >= candidate.start && start < candidate.end);
-    if (spec !== undefined) {
+    if (imagineStatements.has(statement)) {
       placeholderStatements.add(statement);
-      placeholderSpec.set(statement, spec);
       continue;
     }
     humanIndex.set(statement, humanStatements.length);
@@ -139,8 +148,7 @@ export function splitHumanCode(
   }
 
   const imagineSymbols = collectImagineSymbols(
-    [...placeholderStatements],
-    placeholderSpec,
+    analysis.imagineDeclarations,
     checker,
   );
   const symbolsByStatement = humanStatements.map((statement) =>
@@ -156,6 +164,10 @@ export function splitHumanCode(
     symbolsByStatement,
     new Set(imagineSymbols.keys()),
     ownersBySymbol,
+  );
+  const humanSymbolLayers = collectHumanSymbolLayers(
+    ownersBySymbol,
+    epilogueStatements,
   );
 
   const standaloneTrivia = assignOriginalStatementContent(
@@ -203,6 +215,7 @@ export function splitHumanCode(
       imagineSymbols,
       join(baseDir, "implementation.ts"),
     ),
+    humanSymbolLayers,
   };
 }
 
@@ -217,19 +230,14 @@ function collectIdentifiers(root: Node): Identifier[] {
 }
 
 function collectImagineSymbols(
-  statements: readonly Statement[],
-  specs: ReadonlyMap<Statement, ImagineSpec>,
+  declarations: readonly ChzImagineDeclaration[],
   checker: Checker,
 ): Map<number, string> {
-  const identifiers = statements.flatMap((statement) => {
-    const spec = specs.get(statement);
-    return (
-      (isFunctionDeclaration(statement) || isClassDeclaration(statement)) &&
-      statement.name !== undefined &&
-      statement.name.text === spec?.name
-    )
-      ? [{ identifier: statement.name, name: spec.name }]
-      : [];
+  const identifiers = declarations.flatMap((declaration) => {
+    const identifier = declaration.declaration.name;
+    return identifier === undefined
+      ? []
+      : [{ identifier, name: declaration.name }];
   });
   const symbols = checker.getSymbolAtLocation(
     identifiers.map(({ identifier }) => identifier),
@@ -239,6 +247,22 @@ function collectImagineSymbols(
     if (symbol !== undefined) result.set(symbol.id, identifiers[index]!.name);
   });
   return result;
+}
+
+function collectHumanSymbolLayers(
+  ownersBySymbol: ReadonlyMap<number, ReadonlySet<number>>,
+  epilogueStatements: ReadonlySet<number>,
+): ReadonlyMap<number, HumanCodeLayer> {
+  const layers = new Map<number, HumanCodeLayer>();
+  for (const [symbolId, owners] of ownersBySymbol) {
+    layers.set(
+      symbolId,
+      [...owners].some((owner) => epilogueStatements.has(owner))
+        ? "epilogue"
+        : "prologue",
+    );
+  }
+  return layers;
 }
 
 function collectSymbolOwners(
@@ -645,16 +669,6 @@ function renderEpilogue(
     ...specs.map((spec) => `import { ${spec.name} } from "./${spec.name}.ts";`),
   ];
   return `${imports.join("\n")}\n\n${body.replace(/^\s+/, "")}`;
-}
-
-function unaliasSymbol(
-  checker: Checker,
-  symbol: TypeScriptSymbol | undefined,
-): TypeScriptSymbol | undefined {
-  if (symbol === undefined) return undefined;
-  return (symbol.flags & SymbolFlags.Alias) !== 0
-    ? checker.getAliasedSymbol(symbol)
-    : symbol;
 }
 
 function resolvedSymbol(

@@ -319,7 +319,7 @@ async function realizeAnalyzedSourceFile(
   if (parsed.dryRun) {
     let graph: ChzDependencyGraph;
     try {
-      graph = buildDependencyGraph(specs, source, sourceFile, {
+      graph = buildDependencyGraph(analysis, {
         maxCycleSize: configured.config.maxCycleSize,
       });
     } catch (error) {

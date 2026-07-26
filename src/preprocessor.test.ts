@@ -134,6 +134,41 @@ describe("extractImagineSpecs", () => {
     expect(spec.requirements).toBeNull();
   });
 
+  it("classifies static templates and function-expression scenarios by AST shape", () => {
+    const source = [
+      "imagine function inspect(value: number): boolean {",
+      "  ensure(inspect(1) === true, `assertion message`);",
+      "  ensure(`scenario message`, function () {",
+      "    const nested = { value: inspect(2) };",
+      "    assert(nested.value === true);",
+      "  });",
+      "}",
+    ].join("\n");
+    const [spec] = extractImagineSpecs(source, "ensure-shape.chz.ts");
+
+    expect(spec!.ensures).toEqual([
+      {
+        kind: "assertion",
+        source: "inspect(1) === true",
+        messageSource: "`assertion message`",
+        line: 2,
+        column: 3,
+      },
+      {
+        kind: "scenario",
+        source: [
+          "function () {",
+          "    const nested = { value: inspect(2) };",
+          "    assert(nested.value === true);",
+          "  }",
+        ].join("\n"),
+        messageSource: "`scenario message`",
+        line: 3,
+        column: 3,
+      },
+    ]);
+  });
+
   it("finds multiple top-level imagine functions while preserving order", () => {
     const source = [
       "const before = 1;",

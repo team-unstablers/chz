@@ -219,14 +219,29 @@ describe("canonical prompt and symbol graph", () => {
   it("renders ensure harnesses independent of file position and checkout path", () => {
     const data = fixture();
     const shifted = `// a comment moving every symbol down one line\n\n${data.source}`;
-    const specAtOrigin = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const specShifted = extractImagineSpecs(shifted, "/entirely/other/path/sample.chz.ts")[0]!;
+    const originAnalysis = analyzeChzSource(data.source, data.sourceFile);
+    const shiftedAnalysis = analyzeChzSource(
+      shifted,
+      "/entirely/other/path/sample.chz.ts",
+    );
+    try {
+      const specAtOrigin = imagineSpecsFromChzSource(originAnalysis)[0]!;
+      const specShifted = imagineSpecsFromChzSource(shiftedAnalysis)[0]!;
 
-    expect(specShifted.ensures[0]!.line).not.toBe(specAtOrigin.ensures[0]!.line);
-    // Identical harness bytes: cache reuse must not break when an edit
-    // elsewhere shifts the block, or when the repo lives at another path.
-    expect(renderEnsureHarness(specShifted, "/entirely/other/path/sample.chz.ts", [specShifted]))
-      .toBe(renderEnsureHarness(specAtOrigin, data.sourceFile, [specAtOrigin]));
+      expect(specShifted.ensures[0]!.line).not.toBe(
+        specAtOrigin.ensures[0]!.line,
+      );
+      // Identical harness bytes: cache reuse must not break when an edit
+      // elsewhere shifts the block, or when the repo lives at another path.
+      expect(
+        renderEnsureHarness(shiftedAnalysis, specShifted, [specShifted]),
+      ).toBe(
+        renderEnsureHarness(originAnalysis, specAtOrigin, [specAtOrigin]),
+      );
+    } finally {
+      originAnalysis.dispose();
+      shiftedAnalysis.dispose();
+    }
   });
 
   it("imports external signature types into the engine-owned ensure harness", () => {
@@ -236,9 +251,59 @@ describe("canonical prompt and symbol graph", () => {
       "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }",
       "",
     ].join("\n");
-    const spec = extractImagineSpecs(source, "types.chz.ts")[0]!;
-    const harness = renderEnsureHarness(spec, "types.chz.ts");
-    expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');
+    const analysis = analyzeChzSource(source, "types.chz.ts");
+    try {
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const harness = renderEnsureHarness(analysis, spec);
+      expect(harness).toContain(
+        'import type { Result, Widget } from "../implementations/__prologue__.ts";',
+      );
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("collects lowercase and Unicode prologue types but excludes lib and imported declarations", () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-external-types-"));
+    roots.push(root);
+    const fileName = join(root, "types.chz.ts");
+    writeFileSync(
+      join(root, "external.ts"),
+      "export interface ImportedType { external: boolean }\n",
+      "utf8",
+    );
+    const source = [
+      'import type { ImportedType as importedAlias } from "./external.ts";',
+      "type lowercase = { value: number };",
+      "interface 유니코드타입 { ok: boolean }",
+      "imagine function inspect(",
+      "  value: lowercase,",
+      "  imported: importedAlias,",
+      "): Promise<유니코드타입> {",
+      "  ensure('type references remain available', () => {",
+      "    const local: lowercase = { value: 1 };",
+      "    const unicode = { ok: true } as 유니코드타입;",
+      "    const external = { external: true } as importedAlias;",
+      "    assert(local.value === 1 && unicode.ok && external.external);",
+      "  });",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, fileName);
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const harness = renderEnsureHarness(analysis, spec);
+
+      expect(
+        harness.split("\n").find((line) => line.startsWith("import type")),
+      ).toBe(
+        'import type { lowercase, 유니코드타입 } from "../implementations/__prologue__.ts";',
+      );
+      expect(harness).not.toContain("Promise } from");
+    } finally {
+      analysis.dispose();
+    }
   });
 
   it("turns an imagine class into a class symbol and executable ensure tests", () => {
@@ -252,16 +317,25 @@ describe("canonical prompt and symbol graph", () => {
       "  }",
       "}",
     ].join("\n");
-    const spec = extractImagineSpecs(source, "counter.chz.ts")[0]!;
-    const symbol = imagineSpecToSymbol(spec, source, "counter.chz.ts");
-    const harness = renderEnsureHarness(spec, "counter.chz.ts");
+    const analysis = analyzeChzSource(source, "counter.chz.ts");
+    try {
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const symbol = imagineSpecToSymbol(spec, analysis);
+      const harness = renderEnsureHarness(analysis, spec);
 
-    expect(symbol.type).toBe("class");
-    expect(symbol.definition).toContain("imagine increment");
-    expect(harness).toContain('import { Counter } from "../implementations/Counter.ts";');
-    expect(harness).toContain("it('increment는 number를 반환합니다.'");
-    expect(harness).toContain("typeof counter.increment(1) === 'number'");
-    expect(harness).not.toContain("assertEnsures");
+      expect(symbol.type).toBe("class");
+      expect(symbol.definition).toContain("imagine increment");
+      expect(harness).toContain(
+        'import { Counter } from "../implementations/Counter.ts";',
+      );
+      expect(harness).toContain("it('increment는 number를 반환합니다.'");
+      expect(harness).toContain(
+        "typeof counter.increment(1) === 'number'",
+      );
+      expect(harness).not.toContain("assertEnsures");
+    } finally {
+      analysis.dispose();
+    }
   });
 
   it("connects prologue, realized symbols, and epilogue in entry-point order", () => {

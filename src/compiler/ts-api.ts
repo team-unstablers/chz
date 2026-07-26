@@ -35,9 +35,11 @@ export {
   isObjectBindingPattern,
   isPropertyAccessExpression,
   isPropertyDeclaration,
+  isQualifiedName,
   isStringLiteral,
   isStringLiteralLikeNode,
   isTypeAliasDeclaration,
+  isTypeNode,
   isVariableStatement,
 } from "typescript/unstable/ast";
 export { createVirtualFileSystem } from "typescript/unstable/fs";

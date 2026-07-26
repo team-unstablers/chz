@@ -5,7 +5,11 @@ import { basename, dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { analyzeChzSource } from "./compiler/index.ts";
-import { extractImagineSpecs, publicSurfaceText } from "./preprocessor.ts";
+import {
+  extractImagineSpecs,
+  imagineSpecsFromChzSource,
+  publicSurfaceText,
+} from "./preprocessor.ts";
 import {
   realize,
   renderEnsureHarness,
@@ -119,11 +123,19 @@ describe("runRealizationTests", () => {
       const baseDir = join(makeTempDir(), "human-assertion");
       const source =
         "imagine function answer(): number { ensure(answer() === 42, '정답은 42입니다.'); }\n";
-      const spec = extractImagineSpecs(source, "answer.chz.ts")[0]!;
+      const analysis = analyzeChzSource(source, "answer.chz.ts");
+      let ensureHarness: string;
+      try {
+        const specs = imagineSpecsFromChzSource(analysis);
+        const spec = specs[0]!;
+        ensureHarness = renderEnsureHarness(analysis, spec, specs);
+      } finally {
+        analysis.dispose();
+      }
 
       writeTree(baseDir, {
         "implementations/answer.ts": "export function answer(): number { return 41; }\n",
-        "tests/test_answer.ensure.ts": renderEnsureHarness(spec, "answer.chz.ts"),
+        "tests/test_answer.ensure.ts": ensureHarness,
         "tests/test_answer.autogen.ts":
           'import { it, expect } from "vitest";\n' +
           'it("unrelated autogen check", () => { expect(true).toBe(true); });\n',
