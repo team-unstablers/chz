@@ -14,15 +14,10 @@ import { dirname, extname, join, relative, sep } from "node:path";
 import {
   SyntaxKind,
   isCallExpression,
-  isExportDeclaration,
-  isExternalModuleReference,
   isIdentifier,
-  isImportDeclaration,
-  isImportEqualsDeclaration,
-  isImportExpression,
   isNewExpression,
   isPropertyAccessExpression,
-  isStringLiteral,
+  type Checker,
   type Node,
   type Program,
   type SourceFile,
@@ -32,6 +27,7 @@ import {
   API,
   DiagnosticCategory,
 } from "../../compiler/ts-api.ts";
+import { moduleReferenceForNode } from "../../compiler/index.ts";
 
 import { runRealizationTests } from "../../verify.ts";
 import type {
@@ -206,7 +202,7 @@ function createCompilerConfig(
 function withTypeScriptProgram<T>(
   projectRoot: string,
   rootFiles: readonly string[],
-  action: (program: Program) => T,
+  action: (program: Program, checker: Checker) => T,
 ): T {
   const configDir = mkdtempSync(join(tmpdir(), "chz-realizer-ts-"));
   const configPath = join(configDir, "tsconfig.json");
@@ -222,7 +218,7 @@ function withTypeScriptProgram<T>(
         "TypeScript did not create a project for the realization. Check that the output files are readable and try again.",
       );
     }
-    return action(project.program);
+    return action(project.program, project.checker);
   } finally {
     snapshot?.dispose();
     api.close();
@@ -321,31 +317,6 @@ function lintDiagnostic(
   };
 }
 
-function importedModule(node: Node): string | undefined {
-  if (isImportDeclaration(node) || isExportDeclaration(node)) {
-    return node.moduleSpecifier !== undefined && isStringLiteral(node.moduleSpecifier)
-      ? node.moduleSpecifier.text
-      : undefined;
-  }
-  if (isImportEqualsDeclaration(node) && isExternalModuleReference(node.moduleReference)) {
-    const expression = node.moduleReference.expression;
-    return expression !== undefined && isStringLiteral(expression) ? expression.text : undefined;
-  }
-  if (isCallExpression(node) && isImportExpression(node.expression)) {
-    const expression = node.arguments[0];
-    return expression !== undefined && isStringLiteral(expression) ? expression.text : undefined;
-  }
-  if (
-    isCallExpression(node) &&
-    isIdentifier(node.expression) &&
-    node.expression.text === "require"
-  ) {
-    const expression = node.arguments[0];
-    return expression !== undefined && isStringLiteral(expression) ? expression.text : undefined;
-  }
-  return undefined;
-}
-
 function importsEpilogue(moduleName: string): boolean {
   return moduleName.split(/[\\/]/).some((segment) =>
     /^__epilogue__(?:\.[cm]?[jt]sx?)?$/.test(segment),
@@ -392,7 +363,11 @@ function usesConsoleForbiddenNetworkApi(node: Node): boolean {
   return isNewExpression(node) && isGlobalNetworkApi(node.expression, "WebSocket");
 }
 
-function lintSourceFile(sourceFile: SourceFile, activeProfile: string): ChzDiagnostic[] {
+function lintSourceFile(
+  sourceFile: SourceFile,
+  checker: Checker,
+  activeProfile: string,
+): ChzDiagnostic[] {
   const diagnostics: ChzDiagnostic[] = [];
   const visit = (node: Node): void => {
     if (
@@ -419,7 +394,7 @@ function lintSourceFile(sourceFile: SourceFile, activeProfile: string): ChzDiagn
         ),
       );
     }
-    const moduleName = importedModule(node);
+    const moduleName = moduleReferenceForNode(node, checker)?.specifier?.text;
     if (moduleName !== undefined && importsEpilogue(moduleName)) {
       diagnostics.push(
         lintDiagnostic(
@@ -466,10 +441,12 @@ function runDefaultLinter(context: ChzRealizeContext): VerificationOutput {
   const files = candidates.filter((file) => isModelAuthoredFile(context.outputDir, file));
   if (files.length === 0) return { passed: true, diagnostics: [] };
 
-  return withTypeScriptProgram(context.projectRoot, files, (program) => {
+  return withTypeScriptProgram(context.projectRoot, files, (program, checker) => {
     const diagnostics = files.flatMap((file) => {
       const sourceFile = program.getSourceFile(file);
-      return sourceFile === undefined ? [] : lintSourceFile(sourceFile, context.activeProfile);
+      return sourceFile === undefined
+        ? []
+        : lintSourceFile(sourceFile, checker, context.activeProfile);
     });
     return { passed: diagnostics.length === 0, diagnostics };
   });

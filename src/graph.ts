@@ -18,6 +18,7 @@
 
 import { resolve } from "node:path";
 
+import { collectModuleSpecifiersFromSource } from "./compiler/index.ts";
 import type { ImagineSpec } from "./preprocessor.ts";
 import type { ChzImagineSymbol } from "./realizer/types.ts";
 
@@ -307,13 +308,9 @@ function tarjanComponents(symbols: readonly ChzImagineSymbol[]): ChzImagineSymbo
  * layout every cross-symbol use must be imported from a sibling module
  * (`./<name>.ts`), so import specifiers are the complete usage record.
  *
- * The scan is lexical but comment/string/template/regex aware, mirroring the
- * preprocessor: realized files have already passed the strict type check, so
- * their syntax is well-formed. Handles static `import`/`export ... from`,
- * side-effect `import "…"`, dynamic `import("…")`, and `require("…")`.
- * Regex literals are recognized with the usual lexical heuristic (a `/` after
- * an identifier, number, `)`, `]`, or literal is division) so a quote inside
- * a character class can never desynchronize the scan.
+ * Realized files have already passed the strict type check. The shared
+ * compiler traversal handles static imports, re-exports, dynamic imports,
+ * import-equals, and unshadowed CommonJS require calls.
  */
 export function extractConfirmedDependencies(
   implementationSource: string,
@@ -347,149 +344,7 @@ function specifierToSymbolName(specifier: string): string | null {
   return name;
 }
 
-/** Keywords after which a `/` starts a regex literal rather than division. */
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  "await",
-  "case",
-  "delete",
-  "do",
-  "else",
-  "in",
-  "instanceof",
-  "new",
-  "of",
-  "return",
-  "throw",
-  "typeof",
-  "void",
-  "yield",
-]);
-
-/**
- * `pos` is at a `/` believed to open a regex literal. Returns the index just
- * past the literal (including flags), or -1 when no closing `/` appears on
- * the same line — the caller then treats the `/` as a division operator.
- */
-function scanRegexLiteral(source: string, pos: number): number {
-  let i = pos + 1;
-  let inClass = false;
-  for (; i < source.length; i++) {
-    const ch = source[i]!;
-    if (ch === "\\") {
-      i++;
-      continue;
-    }
-    if (ch === "\n") return -1;
-    if (ch === "[") inClass = true;
-    else if (ch === "]") inClass = false;
-    else if (ch === "/" && !inClass) {
-      i++;
-      while (i < source.length && isAsciiIdentifierPart(source[i]!)) i++;
-      return i;
-    }
-  }
-  return -1;
-}
-
 /** Every string literal used as a module specifier, in source order. */
 export function extractModuleSpecifiers(source: string): string[] {
-  const specifiers: string[] = [];
-  let i = 0;
-  /** Last significant token: an identifier word, or a single character. */
-  let lastWord = "";
-  let lastChar = "";
-  /** The word immediately before the most recent `(` (for import()/require()). */
-  let callee = "";
-
-  const isWordStart = (ch: string): boolean =>
-    isAsciiIdentifierPart(ch) && !(ch >= "0" && ch <= "9");
-
-  while (i < source.length) {
-    const ch = source[i]!;
-
-    if (ch === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i += 2;
-      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
-      i = Math.min(source.length, i + 2);
-      continue;
-    }
-    if (ch === "/") {
-      const afterExpression =
-        (lastWord !== "" && !REGEX_PRECEDING_KEYWORDS.has(lastWord)) ||
-        lastChar === ")" ||
-        lastChar === "]" ||
-        lastChar === "'" ||
-        lastChar === '"' ||
-        lastChar === "`" ||
-        (lastChar >= "0" && lastChar <= "9");
-      const regexEnd = afterExpression ? -1 : scanRegexLiteral(source, i);
-      if (regexEnd >= 0) {
-        i = regexEnd;
-        // A regex literal ends an expression, exactly like a closing paren.
-        lastWord = "";
-        lastChar = ")";
-        continue;
-      }
-      lastWord = "";
-      lastChar = "/";
-      i++;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const start = i + 1;
-      i++;
-      while (i < source.length && source[i] !== ch) {
-        if (source[i] === "\\") i++;
-        i++;
-      }
-      const value = source.slice(start, i);
-      i = Math.min(source.length, i + 1);
-      const isFromClause = lastWord !== "" && lastChar === "" && lastWord === "from";
-      const isBareImport = lastWord !== "" && lastChar === "" && lastWord === "import";
-      const isCallArgument = lastChar === "(" && (callee === "import" || callee === "require");
-      if (isFromClause || isBareImport || isCallArgument) specifiers.push(value);
-      lastWord = "";
-      lastChar = ch;
-      continue;
-    }
-    if (ch === "`") {
-      // Template literals never carry a static import specifier; skip whole.
-      i++;
-      while (i < source.length && source[i] !== "`") {
-        if (source[i] === "\\") i++;
-        i++;
-      }
-      i = Math.min(source.length, i + 1);
-      lastWord = "";
-      lastChar = "`";
-      continue;
-    }
-    if (isWordStart(ch)) {
-      let end = i + 1;
-      while (end < source.length && isAsciiIdentifierPart(source[end]!)) end++;
-      // A member access like `foo.import` is not the import keyword.
-      lastWord = lastChar === "." ? "" : source.slice(i, end);
-      lastChar = "";
-      i = end;
-      continue;
-    }
-    if (ch === "(") {
-      callee = lastWord;
-      lastWord = "";
-      lastChar = "(";
-      i++;
-      continue;
-    }
-    if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
-      lastWord = "";
-      lastChar = ch;
-    }
-    i++;
-  }
-
-  return specifiers;
+  return collectModuleSpecifiersFromSource(source);
 }

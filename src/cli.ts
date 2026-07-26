@@ -347,7 +347,8 @@ async function realizeAnalyzedSourceFile(
       const context = {
         projectRoot: configured.projectRoot,
         outputDir: realizationBaseDir(sourceFile),
-        activeProfile: configured.config.profile ?? "console",
+        activeProfile:
+          configured.config.profile ?? analysis.profile?.name ?? "console",
         resolvedDependencies: [],
         maxTurns: configured.config.maxTurns ?? 24,
         maxRetries: configured.config.maxRetries ?? 2,
@@ -371,7 +372,8 @@ async function realizeAnalyzedSourceFile(
     const verificationContext = {
       projectRoot: configured.projectRoot,
       outputDir: baseDir,
-      activeProfile: configured.config.profile ?? "console",
+      activeProfile:
+        configured.config.profile ?? analysis.profile?.name ?? "console",
       scope,
       resolvedDependencies: [],
       maxTurns: configured.config.maxTurns ?? 24,

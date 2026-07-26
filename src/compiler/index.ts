@@ -22,6 +22,16 @@ export {
   type ChzToken,
 } from "./parser.ts";
 export {
+  collectModuleReferences,
+  collectModuleSpecifiersFromSource,
+  isRelativeModuleSpecifier,
+  moduleReferenceForNode,
+  type ModuleReference,
+  type ModuleReferenceKind,
+  type NonStaticDynamicImport,
+  type StaticModuleReference,
+} from "./module-specifiers.ts";
+export {
   applyProjectionReplacements,
   createTypeScriptProjection,
   scriptKindForFileName,

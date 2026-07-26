@@ -29,6 +29,7 @@ import {
   createHumanTypeScriptDiagnostic,
   createTypeScriptDiagnostic,
 } from "./diagnostics.ts";
+import { collectModuleReferences } from "./module-specifiers.ts";
 import {
   parseCheeseExtensions,
   type CheeseParseResult,
@@ -111,6 +112,8 @@ function declarationContains(
 }
 
 function contractCall(statement: Statement): CallExpression | undefined {
+  // Relocation is a Cheese emit rule. Plain .ts parity fixtures must retain
+  // TypeScript's native allowance for computed dynamic imports.
   if (
     !isExpressionStatement(statement) ||
     !isCallExpression(statement.expression)
@@ -801,6 +804,37 @@ function collectSemanticDiagnostics(
   return { obligations, humanErrors };
 }
 
+function collectStaticRuleDiagnostics(
+  compiler: TypeScriptProgramFile,
+  fileName: string,
+  diagnostics: ChzDiagnostic[],
+): void {
+  const sourceFiles = [
+    compiler.sourceFile,
+    ...compiler.islandSourceFiles.values(),
+  ];
+  for (const sourceFile of sourceFiles) {
+    for (
+      const reference of collectModuleReferences(
+        sourceFile,
+        compiler.checker,
+      )
+    ) {
+      if (reference.specifier !== null) continue;
+      const argument = reference.node.arguments[0];
+      diagnostics.push(
+        createChzDiagnostic(
+          "CHZ3001",
+          fileName,
+          argument?.getStart(sourceFile) ??
+            reference.node.getStart(sourceFile),
+          compiler.sourceFile,
+        ),
+      );
+    }
+  }
+}
+
 function collectTypeScriptDiagnostics(
   parsed: CheeseParseResult,
   projected: ProjectedChzSource,
@@ -956,6 +990,17 @@ function analyzeParsedInput(
       declaration.kind === "function"
         ? declaration.declaration
         : declaration.bound.declaration,
+    );
+  }
+
+  if (
+    diagnostics.length === 0 &&
+    input.fileName.toLowerCase().endsWith(".chz.ts")
+  ) {
+    collectStaticRuleDiagnostics(
+      compiler,
+      input.fileName,
+      diagnostics,
     );
   }
 

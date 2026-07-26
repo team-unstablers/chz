@@ -16,7 +16,12 @@ import {
   type ChzDependencyGraph,
   type ChzRealizeGroup,
 } from "./graph.ts";
-import { splitHumanCode } from "./human-code.ts";
+import {
+  splitHumanCode,
+  type EntryPointNamedExport,
+  type HumanCodeLayer,
+  type HumanCodeSplit,
+} from "./human-code.ts";
 import {
   imagineSpecsFromChzSource,
   publicSurfaceText,
@@ -24,6 +29,7 @@ import {
   type ImagineSpec,
 } from "./preprocessor.ts";
 import type { ChzSourceFile } from "./compiler/index.ts";
+import { SyntaxKind } from "./compiler/ts-api.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import {
   humanCodeHash,
@@ -168,7 +174,8 @@ export async function realize(
   const projectRoot = resolve(options.projectRoot ?? dirname(resolve(fileName)));
   const maxTurns = options.maxTurns ?? 24;
   const maxRetries = options.maxRetries ?? 2;
-  const activeProfile = options.activeProfile ?? extractProfile(source) ?? "console";
+  const activeProfile =
+    options.activeProfile ?? analysis.profile?.name ?? "console";
   mkdirSync(join(baseDir, "implementations"), { recursive: true });
   mkdirSync(join(baseDir, "tests"), { recursive: true });
   const humanCode = splitHumanCode(analysis, specs);
@@ -673,7 +680,11 @@ export async function realize(
   }
 
   if (realizedSymbols.length > 0) {
-    writeFileSync(join(baseDir, "implementation.ts"), renderEntryPoint(specs, fileName), "utf8");
+    writeFileSync(
+      join(baseDir, "implementation.ts"),
+      renderEntryPoint(analysis, humanCode, specs),
+      "utf8",
+    );
   }
 
   // Per-symbol verification is scoped, so the human epilogue wiring, the entry
@@ -890,19 +901,113 @@ function maskNonCodeText(source: string): string {
   return result;
 }
 
-export function renderEntryPoint(specs: ImagineSpec[], fileName: string): string {
-  const base = realizationBaseName(fileName);
-  const exports = specs
-    .map((spec) => `export { ${spec.name} } from "./implementations/${spec.name}.ts";`)
-    .join("\n");
+function renderForwardName(item: EntryPointNamedExport): string {
+  return item.importedName === item.exportedName
+    ? item.importedName
+    : `${item.importedName} as ${item.exportedName}`;
+}
+
+function renderNamedForwards(
+  items: readonly EntryPointNamedExport[],
+  moduleName: string,
+): string[] {
+  const value = items
+    .filter((item) => !item.typeOnly)
+    .map(renderForwardName);
+  const type = items
+    .filter((item) => item.typeOnly)
+    .map(renderForwardName);
+  return [
+    ...(value.length === 0
+      ? []
+      : [`export { ${value.join(", ")} } from ${JSON.stringify(moduleName)};`]),
+    ...(type.length === 0
+      ? []
+      : [`export type { ${type.join(", ")} } from ${JSON.stringify(moduleName)};`]),
+  ];
+}
+
+function layerExports(
+  humanCode: HumanCodeSplit,
+  layer: HumanCodeLayer,
+): string[] {
+  const moduleName = `./implementations/__${layer}__.ts`;
+  const named = humanCode.entryPoint.named.filter(
+    (item) =>
+      item.source.kind === "layer" &&
+      item.source.layer === layer,
+  );
+  const star = humanCode.entryPoint.star
+    .filter((item) => item.layer === layer)
+    .map((item) => item.rendered);
+  const defaultExport = humanCode.entryPoint.default?.layer === layer
+    ? [
+        humanCode.entryPoint.default.typeOnly
+          ? `export type { default } from ${JSON.stringify(moduleName)};`
+          : `export { default } from ${JSON.stringify(moduleName)};`,
+      ]
+    : [];
+  return [
+    ...renderNamedForwards(named, moduleName),
+    ...star,
+    ...defaultExport,
+  ];
+}
+
+export function renderEntryPoint(
+  analysis: ChzSourceFile,
+  humanCode: HumanCodeSplit,
+  specs: readonly ImagineSpec[] = imagineSpecsFromChzSource(analysis),
+): string {
+  const base = realizationBaseName(analysis.fileName);
+  const declarationExported = new Set(
+    analysis.imagineDeclarations
+      .filter((declaration) =>
+        declaration.declaration.modifiers?.some((modifier) =>
+          modifier.kind === SyntaxKind.ExportKeyword
+        ) === true
+      )
+      .map((declaration) => declaration.name),
+  );
+  const explicitImagineExports = humanCode.entryPoint.named.filter(
+    (item) => item.source.kind === "imagine",
+  );
+  const imagineLines = specs.flatMap((spec) => {
+    const forwards: EntryPointNamedExport[] = [
+      ...(declarationExported.has(spec.name)
+        ? [{
+            source: { kind: "imagine" as const, name: spec.name },
+            importedName: spec.name,
+            exportedName: spec.name,
+            typeOnly: false,
+          }]
+        : []),
+      ...explicitImagineExports.filter(
+        (item) =>
+          item.source.kind === "imagine" &&
+          item.source.name === spec.name,
+      ),
+    ];
+    const moduleName = `./implementations/${spec.name}.ts`;
+    const rendered = renderNamedForwards(forwards, moduleName);
+    const hasRuntimeForward = forwards.some((item) => !item.typeOnly);
+    return hasRuntimeForward
+      ? rendered
+      : [`import ${JSON.stringify(moduleName)};`, ...rendered];
+  });
+  const prologueExports = layerExports(humanCode, "prologue");
+  const epilogueExports = layerExports(humanCode, "epilogue");
+  const sections = [
+    'import "./implementations/__prologue__.ts";',
+    ...prologueExports,
+    ...imagineLines,
+    'import "./implementations/__epilogue__.ts";',
+    ...epilogueExports,
+  ];
   return `/// implementation.ts — realization entry point for ${base}.chz.ts (AUTO-GENERATED by chz-realize).
 /// Loads human prologue, realized symbols, then human epilogue. Do not edit; re-run \`chz realize\` instead.
 
-import "./implementations/__prologue__.ts";
-
-${exports}
-
-import "./implementations/__epilogue__.ts";
+${sections.join("\n")}
 `;
 }
 
@@ -964,10 +1069,6 @@ function collectAllEmittedFiles(baseDir: string, directory = baseDir): EmittedFi
 function readContexts(baseDir: string): string {
   const path = join(baseDir, "CONTEXTS.md");
   return existsSync(path) ? readFileSync(path, "utf8") : "";
-}
-
-function extractProfile(source: string): string | null {
-  return /^\s*@profile\s+([\p{L}_$][\p{L}\p{N}_$]*)/mu.exec(source)?.[1] ?? null;
 }
 
 function boundVerificationFeedback(output: string): string {

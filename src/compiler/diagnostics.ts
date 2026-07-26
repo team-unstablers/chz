@@ -101,6 +101,11 @@ export const DIAGNOSTIC_DEFINITIONS = {
     message: "The optional assertion message passed to ensure() must be a static string literal.",
     recovery: "Replace the message with a string literal or a template literal without substitutions.",
   },
+  CHZ3001: {
+    namespace: "static-rule",
+    message: "Dynamic import() module specifiers must be static strings in Cheese source.",
+    recovery: "Use a string literal or a template literal without substitutions so realize can rewrite relative module paths.",
+  },
 } as const satisfies Record<string, DiagnosticDefinition>;
 
 export type ChzKnownDiagnosticCode = keyof typeof DIAGNOSTIC_DEFINITIONS;

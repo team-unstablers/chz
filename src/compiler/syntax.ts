@@ -131,7 +131,8 @@ export interface TypeScriptProjection {
 export type ChzDiagnosticNamespace =
   | "grammar"
   | "typescript"
-  | "contract";
+  | "contract"
+  | "static-rule";
 
 export interface ChzDiagnostic {
   code: string;

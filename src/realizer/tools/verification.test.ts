@@ -277,6 +277,27 @@ describe("ChzVerificationToolRuntime default restricted-subset linter", () => {
       diagnostics: [],
     });
   });
+
+  it("does not treat shadowed require or a require property as module loading", async () => {
+    const { context, resolveOutputPath } = makeContext();
+    writeTree(context.outputDir, {
+      "implementations/shadowed.ts": [
+        "export function useLocal(",
+        "  require: (name: string) => unknown,",
+        "  loader: { require(name: string): unknown },",
+        "): unknown[] {",
+        '  return [require("node:https"), loader.require("node:net")];',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const runtime = new ChzVerificationToolRuntime(context, resolveOutputPath);
+
+    expect(parseOutput(await runtime.execute("RunLinter", {}))).toEqual({
+      passed: true,
+      diagnostics: [],
+    });
+  });
 });
 
 describe("ChzVerificationToolRuntime verification scope", () => {

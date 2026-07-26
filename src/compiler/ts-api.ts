@@ -13,6 +13,7 @@ export {
   isClassDeclaration,
   isEnumDeclaration,
   isElementAccessExpression,
+  isExportAssignment,
   isExportDeclaration,
   isExpressionStatement,
   isExternalModuleReference,
@@ -27,6 +28,7 @@ export {
   isModuleDeclaration,
   isNamedExports,
   isNamedImports,
+  isNamespaceExport,
   isNamespaceImport,
   isNewExpression,
   isNoSubstitutionTemplateLiteral,
@@ -43,6 +45,7 @@ export type { FileSystem } from "typescript/unstable/fs";
 export {
   API,
   DiagnosticCategory,
+  SymbolFlags,
 } from "typescript/unstable/sync";
 
 export type {
@@ -56,6 +59,8 @@ export type {
   FunctionExpression,
   FunctionDeclaration,
   Identifier,
+  ImportDeclaration,
+  ImportEqualsDeclaration,
   MethodDeclaration,
   Node,
   NodeArray,
@@ -67,6 +72,7 @@ export type {
   Statement,
   StringLiteralLikeNode,
   TypeNode,
+  VariableStatement,
 } from "typescript/unstable/ast";
 export type {
   Checker,

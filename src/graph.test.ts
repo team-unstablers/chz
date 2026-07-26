@@ -165,6 +165,7 @@ describe("extractModuleSpecifiers", () => {
       'import type { Title } from "./__prologue__.ts";',
       'import "./side-effect.ts";',
       'export { helper } from "../implementations/helper.ts";',
+      'import legacyEquals = require("./import-equals.ts");',
       'const lazy = await import("./lazy.ts");',
       'const legacy = require("./legacy.ts");',
       "",
@@ -175,6 +176,7 @@ describe("extractModuleSpecifiers", () => {
       "./__prologue__.ts",
       "./side-effect.ts",
       "../implementations/helper.ts",
+      "./import-equals.ts",
       "./lazy.ts",
       "./legacy.ts",
     ]);
@@ -204,6 +206,19 @@ describe("extractModuleSpecifiers", () => {
     ].join("\n");
 
     expect(extractModuleSpecifiers(source)).toEqual([]);
+  });
+
+  it("ignores require calls whose identifier is shadowed", () => {
+    const source = [
+      'const real = require("./real.ts");',
+      "function local(require: (name: string) => unknown): unknown {",
+      '  return require("./shadowed.ts");',
+      "}",
+      'const member = loader.require("./member.ts");',
+      "",
+    ].join("\n");
+
+    expect(extractModuleSpecifiers(source)).toEqual(["./real.ts"]);
   });
 });
 
