@@ -31,7 +31,9 @@ interface FixtureManifest {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value);
 }
 
 function readManifest(path: string): FixtureManifest {
@@ -42,27 +44,41 @@ function readManifest(path: string): FixtureManifest {
   return parsed as unknown as FixtureManifest;
 }
 
-function logicalFileName(root: string, fixture: FixtureEntry): string {
+function logicalFileName(
+  root: string,
+  fixture: FixtureEntry,
+): string {
   const path = join(root, fixture.file);
-  if (fixture.logicalExtension === ".chz.tsx" || fixture.file.endsWith(".ts.fixture")) {
+  if (
+    fixture.logicalExtension === ".chz.tsx" ||
+    fixture.file.endsWith(".ts.fixture")
+  ) {
     return path.slice(0, -".fixture".length);
   }
   return `${path.slice(0, -".fixture".length)}.ts`;
 }
 
-const fixtureRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "__fixtures__");
+const fixtureRoot = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "__fixtures__",
+);
 const manifest = readManifest(join(fixtureRoot, "manifest.json"));
 
-describe("Phase 0 grammar fixture corpus", () => {
+describe("compiler grammar fixture corpus", () => {
   for (const fixture of manifest.fixtures) {
     it(fixture.description, () => {
-      const source = readFileSync(join(fixtureRoot, fixture.file), "utf8");
+      const source = readFileSync(
+        join(fixtureRoot, fixture.file),
+        "utf8",
+      );
       const analysis = analyzeChzSource(
         source,
         logicalFileName(fixtureRoot, fixture),
       );
       try {
-        expect(analysis.diagnostics.length === 0).toBe(fixture.expect.success);
+        expect(analysis.diagnostics.length === 0).toBe(
+          fixture.expect.success,
+        );
         expect(
           analysis.diagnostics.map(({ code, line, column }) => ({
             code,
@@ -71,10 +87,14 @@ describe("Phase 0 grammar fixture corpus", () => {
           })),
         ).toEqual(fixture.expect.diagnostics);
         expect(
-          analysis.imagineDeclarations.map((declaration) => declaration.name),
+          analysis.imagineDeclarations.map(
+            (declaration) => declaration.name,
+          ),
         ).toEqual(fixture.expect.declarations);
         if (fixture.expect.islands !== undefined) {
-          expect(analysis.projection.islands).toHaveLength(fixture.expect.islands);
+          expect(analysis.typescript.islands).toHaveLength(
+            fixture.expect.islands,
+          );
         }
       } finally {
         analysis.dispose();
@@ -82,3 +102,4 @@ describe("Phase 0 grammar fixture corpus", () => {
     });
   }
 });
+

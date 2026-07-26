@@ -1,9 +1,5 @@
 /**
  * The single import boundary for TypeScript 7's unstable compiler API.
- *
- * Phase 0 intentionally leaves the two existing production consumers on their
- * current imports. New compiler work must import through this module so Phase 1
- * can move those consumers without spreading the unstable surface any further.
  */
 export {
   LanguageVariant,
@@ -11,6 +7,7 @@ export {
   SyntaxKind,
   createScanner,
   isArrayBindingPattern,
+  isArrowFunction,
   isBlock,
   isCallExpression,
   isClassDeclaration,
@@ -18,6 +15,7 @@ export {
   isExportDeclaration,
   isExpressionStatement,
   isExternalModuleReference,
+  isFunctionExpression,
   isFunctionDeclaration,
   isIdentifier,
   isImportDeclaration,
@@ -35,6 +33,7 @@ export {
   isPropertyAccessExpression,
   isPropertyDeclaration,
   isStringLiteral,
+  isStringLiteralLikeNode,
   isTypeAliasDeclaration,
   isVariableStatement,
 } from "typescript/unstable/ast";
@@ -45,19 +44,25 @@ export {
 } from "typescript/unstable/sync";
 
 export type {
+  ArrowFunction,
   Block,
   CallExpression,
   ClassDeclaration,
   Expression,
   ExpressionStatement,
+  FunctionExpression,
   FunctionDeclaration,
   Identifier,
   MethodDeclaration,
   Node,
+  NodeArray,
+  ParameterDeclaration,
   PropertyDeclaration,
   Scanner,
   SourceFile,
   Statement,
+  StringLiteralLikeNode,
+  TypeNode,
 } from "typescript/unstable/ast";
 export type {
   Checker,

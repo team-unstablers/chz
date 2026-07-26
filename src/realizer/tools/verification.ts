@@ -24,14 +24,14 @@ import {
   isPropertyAccessExpression,
   isStringLiteral,
   type Node,
+  type Program,
   type SourceFile,
-} from "typescript/unstable/ast";
+  type TypeScriptDiagnostic,
+} from "../../compiler/ts-api.ts";
 import {
   API,
   DiagnosticCategory,
-  type Diagnostic as TypeScriptDiagnostic,
-  type Program,
-} from "typescript/unstable/sync";
+} from "../../compiler/ts-api.ts";
 
 import { runRealizationTests } from "../../verify.ts";
 import type {

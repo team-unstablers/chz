@@ -19,11 +19,15 @@ import {
   isVariableStatement,
   type Identifier,
   type Node,
+  type Project,
   type SourceFile,
   type Statement,
-} from "typescript/unstable/ast";
-import { createVirtualFileSystem } from "typescript/unstable/fs";
-import { API, type Project, type Symbol as TypeScriptSymbol } from "typescript/unstable/sync";
+  type TypeScriptSymbol,
+} from "./compiler/ts-api.ts";
+import {
+  API,
+  createVirtualFileSystem,
+} from "./compiler/ts-api.ts";
 
 import type { ImagineSpec } from "./preprocessor.ts";
 
