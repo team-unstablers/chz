@@ -3,22 +3,30 @@ import {
   isArrowFunction,
   isCallExpression,
   isClassDeclaration,
+  isElementAccessExpression,
   isExpressionStatement,
   isFunctionDeclaration,
   isFunctionExpression,
   isIdentifier,
   isMethodDeclaration,
   isPropertyDeclaration,
+  isPropertyAccessExpression,
   isStringLiteralLikeNode,
   type CallExpression,
   type Expression,
+  type ElementAccessExpression,
   type Node,
+  type PropertyAccessExpression,
   type SourceFile,
   type Statement,
   type StringLiteralLikeNode,
+  type TypeScriptDiagnostic,
+  type TypeScriptSymbol,
+  type TypeScriptType,
 } from "./ts-api.ts";
 import {
   createChzDiagnostic,
+  createHumanTypeScriptDiagnostic,
   createTypeScriptDiagnostic,
 } from "./diagnostics.ts";
 import {
@@ -60,6 +68,11 @@ export interface ChzSourceInput {
 
 export interface ChzAnalysisBatch {
   sourceFiles: readonly ChzSourceFile[];
+  /**
+   * Releases the one snapshot shared by every source file in this batch.
+   * Batch callers own this lifetime and must not dispose an individual source
+   * while another source still needs its Program or Checker.
+   */
   dispose(): void;
 }
 
@@ -306,9 +319,20 @@ function bindFunction(
   sourceFile: SourceFile,
   fileName: string,
   diagnostics: ChzDiagnostic[],
+  validateTypeAnnotation: boolean,
 ): ChzImagineFunction | undefined {
   const node = findFunctionNode(shell, sourceFile);
   if (node === undefined || !isFunctionDeclaration(node)) return undefined;
+  if (validateTypeAnnotation && node.type === undefined) {
+    diagnostics.push(
+      createChzDiagnostic(
+        "CHZ1009",
+        fileName,
+        node.parameters.end + 1,
+        sourceFile,
+      ),
+    );
+  }
   const contracts = node.body === undefined
     ? emptyContractState()
     : validateContractStatements(
@@ -320,13 +344,8 @@ function bindFunction(
     );
   return {
     ...shell,
-    span: {
-      start: shell.span.start,
-      end: node.end,
-    },
-    bodySpan: node.body === undefined
-      ? shell.bodySpan
-      : sourceSpan(node.body, sourceFile),
+    span: shell.span,
+    bodySpan: shell.bodySpan,
     declaration: node,
     parameters: node.parameters,
     returnType: node.type ?? null,
@@ -377,10 +396,21 @@ function bindMethod(
   sourceFile: SourceFile,
   fileName: string,
   diagnostics: ChzDiagnostic[],
+  validateTypeAnnotation: boolean,
 ): ChzImagineMethod | undefined {
   if (shell.kind !== "ImagineMethod") return undefined;
   const node = findClassMemberNode(shell, classNode, sourceFile);
   if (node === undefined || !isMethodDeclaration(node)) return undefined;
+  if (validateTypeAnnotation && node.type === undefined) {
+    diagnostics.push(
+      createChzDiagnostic(
+        "CHZ1009",
+        fileName,
+        node.parameters.end + 1,
+        sourceFile,
+      ),
+    );
+  }
   const contracts = node.body === undefined
     ? emptyContractState()
     : validateContractStatements(
@@ -392,10 +422,8 @@ function bindMethod(
     );
   return {
     ...shell,
-    span: { start: shell.span.start, end: node.end },
-    bodySpan: node.body === undefined
-      ? shell.bodySpan
-      : sourceSpan(node.body, sourceFile),
+    span: shell.span,
+    bodySpan: shell.bodySpan,
     declaration: node,
     parameters: node.parameters,
     returnType: node.type ?? null,
@@ -408,10 +436,23 @@ function bindProperty(
   shell: ParsedImagineClassMemberShell,
   classNode: ChzImagineClass["declaration"],
   sourceFile: SourceFile,
+  fileName: string,
+  diagnostics: ChzDiagnostic[],
+  validateTypeAnnotation: boolean,
 ): ChzImagineProperty | undefined {
   if (shell.kind !== "ImagineProperty") return undefined;
   const node = findClassMemberNode(shell, classNode, sourceFile);
   if (node === undefined || !isPropertyDeclaration(node)) return undefined;
+  if (validateTypeAnnotation && node.type === undefined) {
+    diagnostics.push(
+      createChzDiagnostic(
+        "CHZ1009",
+        fileName,
+        node.name.end,
+        sourceFile,
+      ),
+    );
+  }
   return {
     ...shell,
     declaration: node,
@@ -426,14 +467,29 @@ function bindClass(
   sourceFile: SourceFile,
   fileName: string,
   diagnostics: ChzDiagnostic[],
+  validateTypeAnnotations: boolean,
 ): BoundClass | undefined {
   const node = findClassNode(shell, sourceFile);
   if (node === undefined || !isClassDeclaration(node)) return undefined;
   const members = new Map<number, ChzImagineClassMember>();
   for (const [index, memberShell] of shell.members.entries()) {
     const member =
-      bindMethod(memberShell, node, sourceFile, fileName, diagnostics) ??
-      bindProperty(memberShell, node, sourceFile);
+      bindMethod(
+        memberShell,
+        node,
+        sourceFile,
+        fileName,
+        diagnostics,
+        validateTypeAnnotations,
+      ) ??
+      bindProperty(
+        memberShell,
+        node,
+        sourceFile,
+        fileName,
+        diagnostics,
+        validateTypeAnnotations,
+      );
     if (member !== undefined) members.set(index, member);
   }
   return {
@@ -458,6 +514,7 @@ function bindDeclarations(
   sourceFile: SourceFile,
   fileName: string,
   diagnostics: ChzDiagnostic[],
+  malformedDeclarations: ReadonlySet<number>,
 ): ReadonlyMap<number, BoundDeclaration> {
   const bound = new Map<number, BoundDeclaration>();
   for (const [index, shell] of parsed.declarations.entries()) {
@@ -467,6 +524,7 @@ function bindDeclarations(
         sourceFile,
         fileName,
         diagnostics,
+        !malformedDeclarations.has(index),
       );
       if (declaration !== undefined) {
         bound.set(index, { kind: "function", declaration });
@@ -477,6 +535,7 @@ function bindDeclarations(
         sourceFile,
         fileName,
         diagnostics,
+        !malformedDeclarations.has(index),
       );
       if (classDeclaration !== undefined) {
         bound.set(index, { kind: "class", bound: classDeclaration });
@@ -499,9 +558,28 @@ function validateIslands(
     );
     if (sourceFile === undefined) continue;
     const declaration = bound.get(island.owner.declarationIndex);
-    if (declaration?.kind !== "class") continue;
+    if (declaration === undefined) continue;
 
-    if (island.owner.memberIndex === null) {
+    if (
+      island.kind === "callable-contract-body" &&
+      declaration.kind === "function"
+    ) {
+      const target = declaration.declaration;
+      const state = validateContractStatements(
+        sourceFile.statements,
+        sourceFile,
+        compiler.sourceFile,
+        fileName,
+        diagnostics,
+      );
+      target.requirements = state.requirements;
+      target.ensures = state.ensures;
+      continue;
+    }
+
+    if (declaration.kind !== "class") continue;
+
+    if (island.kind === "class-contract-statement") {
       const target = declaration.bound.declaration;
       const state = validateContractStatements(
         sourceFile.statements,
@@ -519,10 +597,9 @@ function validateIslands(
       continue;
     }
 
-    const member = declaration.bound.members.get(
-      island.owner.memberIndex,
-    );
-    if (member?.kind !== "ImagineProperty") continue;
+    if (island.owner.memberIndex === null) continue;
+    const member = declaration.bound.members.get(island.owner.memberIndex);
+    if (member === undefined) continue;
     const state = validateContractStatements(
       sourceFile.statements,
       sourceFile,
@@ -535,26 +612,218 @@ function validateIslands(
   }
 }
 
+type DiagnosticMemberAccess =
+  | PropertyAccessExpression
+  | ElementAccessExpression;
+
+const OBLIGATION_DIAGNOSTIC_CODES = new Set([2339, 2551]);
+
+function diagnosticNode(
+  diagnostic: TypeScriptDiagnostic,
+  sourceFile: SourceFile,
+): Node | undefined {
+  const start = Math.max(0, diagnostic.pos);
+  const end = Math.max(start, diagnostic.end);
+  let deepest: Node | undefined;
+  const visit = (node: Node): void => {
+    const nodeStart = node.getStart(sourceFile);
+    if (start < nodeStart || end > node.end) return;
+    deepest = node;
+    node.forEachChild(visit);
+  };
+  visit(sourceFile);
+  return deepest;
+}
+
+function diagnosticMemberAccess(
+  diagnostic: TypeScriptDiagnostic,
+  sourceFile: SourceFile,
+): DiagnosticMemberAccess | undefined {
+  let node = diagnosticNode(diagnostic, sourceFile);
+  while (node !== undefined && node !== sourceFile) {
+    if (isPropertyAccessExpression(node)) return node;
+    if (
+      isElementAccessExpression(node) &&
+      isStringLiteralLikeNode(node.argumentExpression)
+    ) {
+      return node;
+    }
+    node = node.parent;
+  }
+  return undefined;
+}
+
+function imagineSymbols(
+  declarations: readonly ChzImagineDeclaration[],
+  compiler: TypeScriptProgramFile,
+): {
+  ids: ReadonlySet<number>;
+  declarationKeys: ReadonlySet<string>;
+} {
+  const ids = new Set<number>();
+  const declarationKeys = new Set<string>();
+  for (const declaration of declarations) {
+    const name = declaration.declaration.name;
+    if (name !== undefined) {
+      const symbol = compiler.checker.getSymbolAtLocation(name);
+      if (symbol !== undefined) ids.add(symbol.id);
+    }
+    declarationKeys.add(
+      `${compiler.absoluteFileName}:${declaration.declaration.getStart(compiler.sourceFile)}`,
+    );
+  }
+  return { ids, declarationKeys };
+}
+
+function symbolOwnedByImagine(
+  symbol: TypeScriptSymbol,
+  owners: ReturnType<typeof imagineSymbols>,
+): boolean {
+  if (owners.ids.has(symbol.id)) return true;
+  for (const handle of symbol.declarations) {
+    const declaration = handle.resolve();
+    if (declaration === undefined) continue;
+    const key =
+      `${declaration.getSourceFile().fileName}:${declaration.getStart(declaration.getSourceFile())}`;
+    if (owners.declarationKeys.has(key)) return true;
+  }
+  return false;
+}
+
+function typeOwnedByImagine(
+  type: TypeScriptType,
+  checker: TypeScriptProgramFile["checker"],
+  owners: ReturnType<typeof imagineSymbols>,
+  visited = new Set<number>(),
+): boolean {
+  if (visited.has(type.id)) return false;
+  visited.add(type.id);
+
+  // A union/intersection is only imagine-owned when every branch is. Treating
+  // one nested imagine type as ownership would leak human-object TS2339 errors
+  // into the obligation list.
+  if (type.isUnionType() || type.isIntersectionType()) {
+    const branches = type.getTypes();
+    return branches.length > 0 &&
+      branches.every((branch) =>
+        typeOwnedByImagine(branch, checker, owners, visited)
+      );
+  }
+
+  const symbol = type.getSymbol();
+  if (symbol !== undefined && symbolOwnedByImagine(symbol, owners)) {
+    return true;
+  }
+  const alias = type.getAliasSymbol();
+  if (alias !== undefined && symbolOwnedByImagine(alias, owners)) {
+    return true;
+  }
+
+  if (type.isTypeReference()) {
+    const target = type.getTarget();
+    if (
+      target.id !== type.id &&
+      typeOwnedByImagine(target, checker, owners, visited)
+    ) {
+      return true;
+    }
+  }
+
+  for (const base of type.getBaseTypes() ?? []) {
+    if (typeOwnedByImagine(base, checker, owners, visited)) return true;
+  }
+
+  const apparent = checker.getApparentType(type);
+  return apparent !== undefined &&
+    apparent.id !== type.id &&
+    typeOwnedByImagine(apparent, checker, owners, visited);
+}
+
+function isImagineObligation(
+  diagnostic: TypeScriptDiagnostic,
+  compiler: TypeScriptProgramFile,
+  owners: ReturnType<typeof imagineSymbols>,
+): boolean {
+  if (!OBLIGATION_DIAGNOSTIC_CODES.has(diagnostic.code)) return false;
+  const access = diagnosticMemberAccess(diagnostic, compiler.sourceFile);
+  if (access === undefined) return false;
+  const objectType = compiler.checker.getTypeAtLocation(access.expression);
+  if (objectType === undefined) return false;
+
+  // Ownership, not TS2339/TS2551 alone, is the contract boundary. A code-only
+  // allowlist would silently hand an ordinary human object typo to the LLM.
+  // Explicit `required imagine func/var` declarations do not use this path:
+  // v0 has no such grammar yet, and a future implementation must collect those
+  // obligations directly from their declarations because their stubs diagnose
+  // no missing name or member.
+  return typeOwnedByImagine(objectType, compiler.checker, owners);
+}
+
+function collectSemanticDiagnostics(
+  compiler: TypeScriptProgramFile,
+  declarations: readonly ChzImagineDeclaration[],
+  fileName: string,
+): {
+  obligations: ChzDiagnostic[];
+  humanErrors: ChzDiagnostic[];
+} {
+  const obligations: ChzDiagnostic[] = [];
+  const humanErrors: ChzDiagnostic[] = [];
+  const owners = imagineSymbols(declarations, compiler);
+  for (
+    const diagnostic of compiler.program.getSemanticDiagnostics(
+      compiler.absoluteFileName,
+    )
+  ) {
+    const offset = Math.max(0, diagnostic.pos);
+    if (isImagineObligation(diagnostic, compiler, owners)) {
+      obligations.push(
+        createTypeScriptDiagnostic(
+          diagnostic.code,
+          diagnostic.text,
+          fileName,
+          offset,
+          compiler.sourceFile,
+        ),
+      );
+      continue;
+    }
+    humanErrors.push(
+      createHumanTypeScriptDiagnostic(
+        diagnostic.code,
+        diagnostic.text,
+        fileName,
+        offset,
+        compiler.sourceFile,
+      ),
+    );
+  }
+  return { obligations, humanErrors };
+}
+
 function collectTypeScriptDiagnostics(
   parsed: CheeseParseResult,
   projected: ProjectedChzSource,
   compiler: TypeScriptProgramFile,
   fileName: string,
   diagnostics: ChzDiagnostic[],
-): void {
+): ReadonlySet<number> {
+  const malformed = new Set<number>();
   // A committed Cheese failure has the authoritative recovery location. The
   // partially neutralized source is still parsed to obtain one batch lifetime,
   // but its cascading TS parser noise is not surfaced.
-  if (parsed.diagnostics.length > 0) return;
+  if (parsed.diagnostics.length > 0) {
+    for (const index of parsed.declarations.keys()) malformed.add(index);
+    return malformed;
+  }
 
-  const malformed = new Set<ParsedImagineDeclarationShell>();
   for (
     const diagnostic of compiler.program.getSyntacticDiagnostics(
       compiler.absoluteFileName,
     )
   ) {
     const offset = Math.max(0, diagnostic.pos);
-    const declaration = parsed.declarations.find(
+    const declarationIndex = parsed.declarations.findIndex(
       (candidate) =>
         declarationContains(candidate, offset) ||
         (
@@ -564,9 +833,9 @@ function collectTypeScriptDiagnostics(
             .trim() === ""
         ),
     );
-    if (declaration !== undefined) {
-      if (malformed.has(declaration)) continue;
-      malformed.add(declaration);
+    if (declarationIndex >= 0) {
+      if (malformed.has(declarationIndex)) continue;
+      malformed.add(declarationIndex);
       diagnostics.push(
         createChzDiagnostic(
           "CHZ1003",
@@ -594,6 +863,7 @@ function collectTypeScriptDiagnostics(
         island.virtualFileName,
       )
     ) {
+      malformed.add(island.owner.declarationIndex);
       diagnostics.push(
         createChzDiagnostic(
           "CHZ1003",
@@ -604,6 +874,7 @@ function collectTypeScriptDiagnostics(
       );
     }
   }
+  return malformed;
 }
 
 function deduplicateDiagnostics(
@@ -640,6 +911,7 @@ function analyzeParsedInput(
   );
   const tsxUnsupported =
     scriptKindForFileName(input.fileName) === ScriptKind.TSX;
+  let malformedDeclarations: ReadonlySet<number> = new Set();
   if (tsxUnsupported) {
     diagnostics.push(
       createChzDiagnostic(
@@ -650,7 +922,7 @@ function analyzeParsedInput(
       ),
     );
   } else {
-    collectTypeScriptDiagnostics(
+    malformedDeclarations = collectTypeScriptDiagnostics(
       parsed,
       projected,
       compiler,
@@ -666,6 +938,7 @@ function analyzeParsedInput(
       compiler.sourceFile,
       input.fileName,
       diagnostics,
+      malformedDeclarations,
     );
   if (!tsxUnsupported) {
     validateIslands(
@@ -686,6 +959,17 @@ function analyzeParsedInput(
     );
   }
 
+  let obligations: ChzDiagnostic[] = [];
+  if (diagnostics.length === 0 && imagineDeclarations.length > 0) {
+    const semantic = collectSemanticDiagnostics(
+      compiler,
+      imagineDeclarations,
+      input.fileName,
+    );
+    obligations = deduplicateDiagnostics(semantic.obligations);
+    diagnostics.push(...semantic.humanErrors);
+  }
+
   return {
     fileName: input.fileName,
     source: input.source,
@@ -698,6 +982,7 @@ function analyzeParsedInput(
       checker: compiler.checker,
       islands: compiler.islandSourceFiles,
     },
+    obligations,
     diagnostics: deduplicateDiagnostics(diagnostics),
     dispose,
   };

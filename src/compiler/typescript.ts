@@ -1,9 +1,9 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import {
   API,
-  createVirtualFileSystem,
   type Checker,
+  type FileSystem,
   type Program,
   type Project,
   type Snapshot,
@@ -16,6 +16,42 @@ declare function requirements(value: string): void;
 declare function ensure(...args: unknown[]): void;
 declare function assert(condition: unknown): asserts condition;
 `;
+
+/**
+ * Overlay generated projections on the real project filesystem. Returning
+ * `undefined` for non-virtual paths is the unstable API's explicit fallback
+ * contract, so tsconfig.json, package.json, imports, and libraries retain the
+ * host project's NodeNext module classification.
+ */
+function createProjectFileSystem(
+  virtualFiles: Readonly<Record<string, string>>,
+): FileSystem {
+  const directories = new Set<string>();
+  for (const fileName of Object.keys(virtualFiles)) {
+    let directory = dirname(fileName);
+    while (!directories.has(directory)) {
+      directories.add(directory);
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+
+  return {
+    readFile: (fileName) =>
+      Object.hasOwn(virtualFiles, fileName)
+        ? virtualFiles[fileName]!
+        : undefined,
+    fileExists: (fileName) =>
+      Object.hasOwn(virtualFiles, fileName) ? true : undefined,
+    directoryExists: (directoryName) =>
+      directories.has(directoryName) ? true : undefined,
+    realpath: (path) =>
+      Object.hasOwn(virtualFiles, path) || directories.has(path)
+        ? path
+        : undefined,
+  };
+}
 
 export interface TypeScriptProgramFile {
   absoluteFileName: string;
@@ -74,7 +110,7 @@ export function createTypeScriptProgramBatch(
 
   const api = new API({
     cwd: resolve("."),
-    fs: createVirtualFileSystem(virtualFiles),
+    fs: createProjectFileSystem(virtualFiles),
   });
   let snapshot: Snapshot | undefined;
   try {

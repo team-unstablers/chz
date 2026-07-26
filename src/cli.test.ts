@@ -38,8 +38,8 @@ function makeClassFixture(name = "game.chz.ts"): string {
     [
       "imagine class Game {",
       "  requirements(`테스트 가능한 게임을 구현합니다.`);",
-      "  imagine async start() {}",
-      "  imagine async cleanup() { requirements(`리소스를 정리합니다.`); }",
+      "  imagine async start(): Promise<void> {}",
+      "  imagine async cleanup(): Promise<void> { requirements(`리소스를 정리합니다.`); }",
       "}",
       "",
     ].join("\n"),
@@ -61,6 +61,25 @@ function makeFatalIslandFixture(name = "fatal-island.chz.ts"): string {
       "    requirements(limit);",
       "  }",
       "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return file;
+}
+
+function makeSemanticFatalFixture(name = "semantic-fatal.chz.ts"): string {
+  const root = mkdtempSync(join(tmpdir(), "chz-cli-semantic-fatal-"));
+  roots.push(root);
+  const file = join(root, name);
+  writeFileSync(
+    file,
+    [
+      "imagine class Game {}",
+      "const game = new Game();",
+      "game.start();",
+      "const human = { value: 1 };",
+      "human.missing();",
       "",
     ].join("\n"),
     "utf8",
@@ -564,6 +583,47 @@ export default {
       { code: "CHZ1003", offset: 43, line: 2, column: 20 },
       { code: "CHZ2001", offset: 98, line: 4, column: 18 },
     ]);
+  });
+
+  it("shares semantic diagnostics across JSON, dry-run, and realize without writes or sessions", async () => {
+    const file = makeSemanticFatalFixture();
+    const jsonOut: string[] = [];
+    const dryRunErr: string[] = [];
+    const realizeErr: string[] = [];
+    const realizer = new ClassCliRealizer();
+
+    const jsonCode = await run(
+      ["realize", "--json", file],
+      { out: (message) => jsonOut.push(message), err: () => {} },
+    );
+    const dryRunCode = await run(
+      ["realize", "--dry-run", file],
+      { out: () => {}, err: (message) => dryRunErr.push(message) },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file) },
+    );
+    const realizeCode = await run(
+      ["realize", file],
+      { out: () => {}, err: (message) => realizeErr.push(message) },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file) },
+    );
+
+    const diagnostics = JSON.parse(jsonOut.join("\n")) as ChzDiagnostic[];
+    const rendered = diagnostics.map(
+      (diagnostic) =>
+        `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}`,
+    );
+    expect([jsonCode, dryRunCode, realizeCode]).toEqual([1, 1, 1]);
+    expect(diagnostics).toMatchObject([
+      {
+        code: "TS2339",
+        line: 5,
+        column: 7,
+      },
+    ]);
+    expect(dryRunErr).toEqual(rendered);
+    expect(realizeErr).toEqual(rendered);
+    expect(realizer.calls).toBe(0);
+    expect(existsSync(join(dirname(file), "chz"))).toBe(false);
   });
 
   it("requires a configured model when no config exists", async () => {

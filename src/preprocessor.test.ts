@@ -164,7 +164,7 @@ describe("extractImagineSpecs", () => {
       "      assert(session !== undefined);",
       "    });",
       "  }",
-      "  imagine async cleanup() {",
+      "  imagine async cleanup(): Promise<void> {",
       "    requirements(`리소스를 정리합니다.`);",
       "  }",
       "}",
@@ -193,7 +193,13 @@ describe("extractImagineSpecs", () => {
         parameters: "name: string",
         returnType: "Promise<GameSession>",
       },
-      { type: "method", name: "cleanup", modifiers: ["async"], parameters: "", returnType: "" },
+      {
+        type: "method",
+        name: "cleanup",
+        modifiers: ["async"],
+        parameters: "",
+        returnType: "Promise<void>",
+      },
     ]);
     expect(spec!.members[0]!.requirements).toBe("현재 점수입니다.");
     expect(spec!.members[1]!.ensures).toMatchObject([

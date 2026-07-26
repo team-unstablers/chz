@@ -39,6 +39,14 @@ function replacementText(
   );
   const blank = blankPreservingLines(original);
   if (replacement.placeholder === "blank") return blank;
+  if (replacement.placeholder === "declare") {
+    if (original.length !== "declare".length) {
+      throw new Error(
+        "The imagine-to-declare projection must preserve UTF-16 length.",
+      );
+    }
+    return "declare";
+  }
 
   const firstCodeUnit = blank.search(/[^\r\n]/);
   if (firstCodeUnit < 0) return blank;
@@ -88,11 +96,13 @@ function originMappedIslandSource(
   // surrogate pairs and shift every later diagnostic and AST span.
   const codeUnits = blankPreservingLines(source).split("");
   const copyStart =
-    island.kind === "property-contract-body"
+    island.kind === "property-contract-body" ||
+      island.kind === "callable-contract-body"
       ? island.original.start + 1
       : island.original.start;
   const copyEnd =
-    island.kind === "property-contract-body"
+    island.kind === "property-contract-body" ||
+      island.kind === "callable-contract-body"
       ? island.original.end - 1
       : island.original.end;
   for (let index = copyStart; index < copyEnd; index += 1) {
@@ -134,4 +144,3 @@ export function createTypeScriptProjection(
     islandSources,
   };
 }
-

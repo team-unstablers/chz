@@ -17,8 +17,8 @@
     },
     {
       "file": "positive-class-islands.chz.fixture",
-      "description": "Projects class-level contracts and an imagined property body through mapped islands.",
-      "expect": { "success": true, "diagnostics": [], "declarations": ["Counter"], "islands": 3 }
+      "description": "Projects class-level, property, and callable contracts through mapped islands.",
+      "expect": { "success": true, "diagnostics": [], "declarations": ["Counter"], "islands": 4 }
     },
     {
       "file": "positive-profile.chz.fixture",
@@ -100,6 +100,19 @@
         "success": false,
         "diagnostics": [{ "code": "CHZ1002", "line": 2, "column": 18 }],
         "declarations": []
+      }
+    },
+    {
+      "file": "negative-missing-type-annotation.chz.fixture",
+      "description": "Requires explicit return and property type annotations on imagine declarations.",
+      "expect": {
+        "success": false,
+        "diagnostics": [
+          { "code": "CHZ1009", "line": 2, "column": 48 },
+          { "code": "CHZ1009", "line": 7, "column": 39 },
+          { "code": "CHZ1009", "line": 11, "column": 26 }
+        ],
+        "declarations": ["missingFunction", "MissingTypes"]
       }
     },
     {

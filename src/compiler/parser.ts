@@ -26,7 +26,7 @@ export interface PendingDiagnostic {
 
 export interface ProjectionReplacement {
   span: SourceSpan;
-  placeholder: "blank" | "empty-class-element";
+  placeholder: "blank" | "declare" | "empty-class-element";
 }
 
 export interface ParsedImagineFunctionShell {
@@ -44,6 +44,7 @@ export interface ParsedImagineMethodShell {
   span: SourceSpan;
   imagineSpan: SourceSpan;
   bodySpan: SourceSpan;
+  modifierTexts: readonly string[];
 }
 
 export interface ParsedImaginePropertyShell {
@@ -52,6 +53,7 @@ export interface ParsedImaginePropertyShell {
   span: SourceSpan;
   imagineSpan: SourceSpan;
   bodySpan: SourceSpan;
+  modifierTexts: readonly string[];
 }
 
 export type ParsedImagineClassMemberShell =
@@ -469,9 +471,20 @@ function scanClassMembers(
       });
 
       let cursor = index + 1;
+      const modifierTexts: string[] = [];
       while (
         MEMBER_MODIFIERS.has(tokens[cursor]?.kind ?? SyntaxKind.Unknown)
       ) {
+        const modifier = tokens[cursor]!;
+        modifierTexts.push(modifier.value);
+        // Ambient class stubs preserve every signature modifier except async:
+        // TypeScript rejects async in an ambient context with TS1040.
+        if (modifier.kind === SyntaxKind.AsyncKeyword) {
+          replacements.push({
+            span: { start: modifier.start, end: modifier.end },
+            placeholder: "blank",
+          });
+        }
         cursor += 1;
       }
       const nameToken = tokens[cursor];
@@ -512,12 +525,23 @@ function scanClassMembers(
       const memberIndex = members.length;
 
       if (isMethod) {
+        islands.push({
+          kind: "callable-contract-body",
+          original: bodySpan,
+          placeholder: bodySpan,
+          owner: { declarationIndex, memberIndex },
+        });
+        replacements.push({
+          span: bodySpan,
+          placeholder: "empty-class-element",
+        });
         members.push({
           kind: "ImagineMethod",
           name: nameToken.value,
           span: { start: token.start, end: bodySpan.end },
           imagineSpan: { start: token.start, end: token.end },
           bodySpan,
+          modifierTexts,
         });
       } else {
         islands.push({
@@ -536,6 +560,7 @@ function scanClassMembers(
           span: { start: token.start, end: bodySpan.end },
           imagineSpan: { start: token.start, end: token.end },
           bodySpan,
+          modifierTexts,
         });
       }
 
@@ -569,6 +594,9 @@ function scanFunction(
   imagineIndex: number,
   kindIndex: number,
   exported: boolean,
+  declarationIndex: number,
+  islands: ParsedProjectionIsland[],
+  replacements: ProjectionReplacement[],
   diagnostics: PendingDiagnostic[],
 ): { declaration: ParsedImagineFunctionShell; nextIndex: number } | undefined {
   const name = declarationName(tokens, kindIndex + 1);
@@ -593,6 +621,16 @@ function scanFunction(
     start: tokens[body.open]!.start,
     end: tokens[body.close]!.end,
   };
+  islands.push({
+    kind: "callable-contract-body",
+    original: bodySpan,
+    placeholder: bodySpan,
+    owner: { declarationIndex, memberIndex: null },
+  });
+  replacements.push({
+    span: bodySpan,
+    placeholder: "empty-class-element",
+  });
   return {
     declaration: {
       kind: "ImagineFunction",
@@ -778,7 +816,7 @@ export function parseCheeseExtensions(
 
     replacements.push({
       span: { start: imagineToken.start, end: imagineToken.end },
-      placeholder: "blank",
+      placeholder: "declare",
     });
 
     const kindIndex = imagineIndex + 1;
@@ -812,6 +850,9 @@ export function parseCheeseExtensions(
         imagineIndex,
         kindIndex,
         exported,
+        declarations.length,
+        islands,
+        replacements,
         diagnostics,
       );
       if (scanned === undefined) break;

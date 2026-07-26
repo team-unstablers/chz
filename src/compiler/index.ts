@@ -7,6 +7,7 @@ export {
 export {
   DIAGNOSTIC_DEFINITIONS,
   createChzDiagnostic,
+  createHumanTypeScriptDiagnostic,
   createTypeScriptDiagnostic,
   renderChzDiagnostic,
   renderChzDiagnostics,

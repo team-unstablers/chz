@@ -182,10 +182,10 @@ describe("canonical prompt and symbol graph", () => {
   it("orders mentioned dependencies before dependents", () => {
     const source = [
       "imagine function leaf(): number { requirements(`leaf`); }",
-      "imagine function parent(): number { requirements(`Use leaf to calculate.`); }",
+      "imagine function parentNode(): number { requirements(`Use leaf to calculate.`); }",
     ].join("\n");
     const order = buildEstimatedRealizeOrder(extractImagineSpecs(source, "graph.chz.ts"), source, "graph.chz.ts");
-    expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parent"]);
+    expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parentNode"]);
     expect(order[1]!.dependencies.map((symbol) => symbol.name)).toEqual(["leaf"]);
   });
 
@@ -203,8 +203,12 @@ describe("canonical prompt and symbol graph", () => {
   });
 
   it("imports external signature types into the engine-owned ensure harness", () => {
-    const source =
-      "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }\n";
+    const source = [
+      "interface Widget {}",
+      "type Result = unknown;",
+      "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }",
+      "",
+    ].join("\n");
     const spec = extractImagineSpecs(source, "types.chz.ts")[0]!;
     const harness = renderEnsureHarness(spec, "types.chz.ts");
     expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');

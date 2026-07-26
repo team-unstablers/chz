@@ -12,6 +12,7 @@ export {
   isCallExpression,
   isClassDeclaration,
   isEnumDeclaration,
+  isElementAccessExpression,
   isExportDeclaration,
   isExpressionStatement,
   isExternalModuleReference,
@@ -38,6 +39,7 @@ export {
   isVariableStatement,
 } from "typescript/unstable/ast";
 export { createVirtualFileSystem } from "typescript/unstable/fs";
+export type { FileSystem } from "typescript/unstable/fs";
 export {
   API,
   DiagnosticCategory,
@@ -48,6 +50,7 @@ export type {
   Block,
   CallExpression,
   ClassDeclaration,
+  ElementAccessExpression,
   Expression,
   ExpressionStatement,
   FunctionExpression,
@@ -57,6 +60,7 @@ export type {
   Node,
   NodeArray,
   ParameterDeclaration,
+  PropertyAccessExpression,
   PropertyDeclaration,
   Scanner,
   SourceFile,
@@ -71,4 +75,5 @@ export type {
   Project,
   Snapshot,
   Symbol as TypeScriptSymbol,
+  Type as TypeScriptType,
 } from "typescript/unstable/sync";

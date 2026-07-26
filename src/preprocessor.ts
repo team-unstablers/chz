@@ -147,15 +147,11 @@ function adaptEnsure(
 function compatibilityModifiers(
   member: ChzImagineClassMember,
 ): string[] {
-  const sourceFile = member.declaration.getSourceFile();
-  const modifiers = member.declaration.modifiers ?? [];
-  return modifiers
-    .map((modifier) => modifier.getText(sourceFile))
-    .filter((modifier) =>
+  return member.modifierTexts.filter((modifier) =>
       modifier === "async" ||
       modifier === "static" ||
       modifier === "readonly"
-    );
+  );
 }
 
 function adaptClassMember(

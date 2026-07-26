@@ -7,8 +7,10 @@ import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
 import {
-  analyzeChzSource,
+  analyzeChzSources,
   renderChzDiagnostics,
+  type ChzAnalysisBatch,
+  type ChzSourceInput,
   type ChzSourceFile,
 } from "./compiler/index.ts";
 import {
@@ -145,8 +147,13 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
   if (parsed.file !== undefined) {
     const sourceFile = resolve(parsed.file);
     let configured: ConfiguredProject | undefined;
-    return realizeSourceFile(sourceFile, parsed.file, parsed, io, deps, async () =>
-      (configured ??= await resolveConfiguration(sourceFile, parsed, deps)),
+    return realizeSourceFiles(
+      [{ sourceFile, displayName: parsed.file }],
+      parsed,
+      io,
+      deps,
+      async () =>
+        (configured ??= await resolveConfiguration(sourceFile, parsed, deps)),
     );
   }
 
@@ -186,64 +193,86 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 1;
   }
   if (configured.path !== undefined) io.err(`config: ${configured.path}`);
-  let exitCode = 0;
-  for (const file of files) {
-    const displayName = relative(process.cwd(), file) || file;
-    io.err(`==> ${displayName}`);
-    const code = await realizeSourceFile(
-      file,
-      displayName,
-      parsed,
-      io,
-      deps,
-      async () => configured,
-      false,
-    );
-    exitCode = Math.max(exitCode, code);
-  }
-  return exitCode;
+  return realizeSourceFiles(
+    files.map((file) => ({
+      sourceFile: file,
+      displayName: relative(process.cwd(), file) || file,
+    })),
+    parsed,
+    io,
+    deps,
+    async () => configured,
+    false,
+    true,
+  );
 };
 
-async function realizeSourceFile(
-  sourceFile: string,
-  displayName: string,
+interface RealizeSourceRequest {
+  sourceFile: string;
+  displayName: string;
+}
+
+async function realizeSourceFiles(
+  requests: readonly RealizeSourceRequest[],
   parsed: RealizeArguments,
   io: CliIO,
   deps: CliDeps,
   getConfigured: () => Promise<ConfiguredProject>,
   announceConfig = true,
+  announceFiles = false,
 ): Promise<number> {
-  let source: string;
-  try {
-    source = readFileSync(sourceFile, "utf8");
-  } catch (error) {
-    io.err(`${BIN_NAME} realize: cannot read file '${displayName}': ${(error as Error).message}`);
-    return 1;
+  const readable: Array<{
+    request: RealizeSourceRequest;
+    input: ChzSourceInput;
+  }> = [];
+  let exitCode = 0;
+  for (const request of requests) {
+    try {
+      readable.push({
+        request,
+        input: {
+          source: readFileSync(request.sourceFile, "utf8"),
+          fileName: request.sourceFile,
+        },
+      });
+    } catch (error) {
+      io.err(
+        `${BIN_NAME} realize: cannot read file '${request.displayName}': ${(error as Error).message}`,
+      );
+      exitCode = 1;
+    }
   }
+  if (readable.length === 0) return exitCode;
 
-  let analysis: ChzSourceFile;
+  let batch: ChzAnalysisBatch;
   try {
-    analysis = analyzeChzSource(source, sourceFile);
+    batch = analyzeChzSources(readable.map(({ input }) => input));
   } catch (error) {
     io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
     return 1;
   }
 
-  // realizeSourceFile owns the compiler snapshot. Every command path consumes
-  // this exact analysis, and disposal happens only after dry-run/JSON output or
-  // the asynchronous realization has completely finished.
+  // The CLI owns one compiler snapshot for the complete source batch. Every
+  // file shares its Program/lib state, and the snapshot stays alive until all
+  // dry-run, JSON, or asynchronous realization consumers have finished.
   try {
-    return await realizeAnalyzedSourceFile(
-      analysis,
-      displayName,
-      parsed,
-      io,
-      deps,
-      getConfigured,
-      announceConfig,
-    );
+    for (const [index, analysis] of batch.sourceFiles.entries()) {
+      const request = readable[index]!.request;
+      if (announceFiles) io.err(`==> ${request.displayName}`);
+      const code = await realizeAnalyzedSourceFile(
+        analysis,
+        request.displayName,
+        parsed,
+        io,
+        deps,
+        getConfigured,
+        announceConfig,
+      );
+      exitCode = Math.max(exitCode, code);
+    }
+    return exitCode;
   } finally {
-    analysis.dispose();
+    batch.dispose();
   }
 }
 
@@ -256,9 +285,9 @@ async function realizeAnalyzedSourceFile(
   getConfigured: () => Promise<ConfiguredProject>,
   announceConfig: boolean,
 ): Promise<number> {
-  // Phase 2 analysis contains Cheese grammar/contract diagnostics and
-  // TypeScript syntactic diagnostics only. Semantic diagnostics are not
-  // collected here, so obligation classification remains untouched.
+  // One shared analysis owns grammar, syntactic, and semantic preflight.
+  // Promoted obligations are intentionally absent from diagnostics and do not
+  // block any of the JSON, dry-run, or realization command paths.
   if (analysis.diagnostics.length > 0) {
     const format = parsed.json ? "json" : "human";
     const write = parsed.json ? io.out : io.err;

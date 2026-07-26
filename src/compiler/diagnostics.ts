@@ -11,7 +11,7 @@ export interface DiagnosticDefinition {
 }
 
 /**
- * CHZ1001-CHZ1008 and CHZ2001 are frozen by the Phase 0 fixture corpus.
+ * CHZ1001-CHZ1009 and CHZ2001 are frozen by the grammar fixture corpus.
  * Later entries preserve pre-AST contract validation that the public adapter
  * still guarantees.
  */
@@ -55,6 +55,11 @@ export const DIAGNOSTIC_DEFINITIONS = {
     namespace: "grammar",
     message: "This imagine declaration kind is reserved but not supported yet.",
     recovery: "Use 'imagine function' or 'imagine class' instead.",
+  },
+  CHZ1009: {
+    namespace: "grammar",
+    message: "An imagine callable or property must declare an explicit type annotation.",
+    recovery: "Add a type annotation after the parameter list or property name; if the callable returns no value, write ': void'.",
   },
   CHZ2001: {
     namespace: "contract",
@@ -144,6 +149,22 @@ export function createTypeScriptDiagnostic(
     offset,
     ...originalPosition(sourceFile, offset),
   };
+}
+
+export function createHumanTypeScriptDiagnostic(
+  code: number,
+  text: string,
+  file: string,
+  offset: number,
+  sourceFile: SourceFile,
+): ChzDiagnostic {
+  return createTypeScriptDiagnostic(
+    code,
+    `${text} This .chz.ts file is human-owned; fix the source before running realize again.`,
+    file,
+    offset,
+    sourceFile,
+  );
 }
 
 export function renderChzDiagnostic(diagnostic: ChzDiagnostic): string {

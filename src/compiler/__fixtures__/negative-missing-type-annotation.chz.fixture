@@ -1,0 +1,14 @@
+// Every imagine callable and property must state its contract type explicitly.
+imagine function missingFunction(value: number) {
+  requirements("Return nothing.");
+}
+
+imagine class MissingTypes {
+  imagine missingMethod(value: string) {
+    requirements("Return nothing.");
+  }
+
+  imagine missingProperty {
+    requirements("Expose a value.");
+  }
+}

@@ -68,6 +68,11 @@ export interface ChzImagineMethod extends ChzImagineCallable {
   span: SourceSpan;
   imagineSpan: SourceSpan;
   bodySpan: SourceSpan;
+  /**
+   * Cheese member modifiers are retained separately because the semantic
+   * projection neutralizes `async` inside an ambient class stub.
+   */
+  modifierTexts: readonly string[];
   declaration: MethodDeclaration;
 }
 
@@ -77,6 +82,7 @@ export interface ChzImagineProperty {
   span: SourceSpan;
   imagineSpan: SourceSpan;
   bodySpan: SourceSpan;
+  modifierTexts: readonly string[];
   declaration: PropertyDeclaration;
   returnType: TypeNode | null;
   requirements: ChzRequirements | null;
@@ -102,6 +108,7 @@ export type ChzImagineDeclaration = ChzImagineFunction | ChzImagineClass;
 
 export type ProjectionIslandKind =
   | "class-contract-statement"
+  | "callable-contract-body"
   | "property-contract-body";
 
 export interface ProjectionIsland {
@@ -156,10 +163,18 @@ export interface ChzSourceFile {
      */
     islands: ReadonlyMap<string, SourceFile>;
   };
+  /**
+   * Missing member diagnostics promoted by "usage creates the contract".
+   * No pipeline consumer exists yet; later obligation extraction owns that
+   * hand-off rather than the analyzer mutating realization prompts.
+   */
+  obligations: ChzDiagnostic[];
   diagnostics: ChzDiagnostic[];
   /**
    * TypeScript 7's unstable AST nodes, Program, and Checker are backed by a
    * snapshot process. They remain valid only until this method is called.
+   * Sources returned by analyzeChzSources share this method; batch callers
+   * should dispose the ChzAnalysisBatch after every source consumer finishes.
    * This explicit lifetime is the only addition to the model sketched in
    * docs/idea-sketches/260726-00.
    */

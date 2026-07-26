@@ -1,4 +1,4 @@
-imagine function phoneNumberNormalizer(input: string) {
+imagine function phoneNumberNormalizer(input: string): string {
     requirements(`
         # Mobile Phone Number Normalizer
 

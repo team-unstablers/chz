@@ -2,9 +2,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { analyzeChzSource } from "./index.ts";
+import {
+  analyzeChzSources,
+  type ChzAnalysisBatch,
+  type ChzSourceFile,
+} from "./index.ts";
 
 interface ExpectedDiagnostic {
   code: string;
@@ -63,43 +67,83 @@ const fixtureRoot = join(
   "__fixtures__",
 );
 const manifest = readManifest(join(fixtureRoot, "manifest.json"));
+const analyses = new Map<string, ChzSourceFile>();
+const batches: ChzAnalysisBatch[] = [];
+
+beforeAll(() => {
+  // These two fixtures deliberately declare the same global script bindings.
+  // They remain separate projects so a test-only collision cannot become a
+  // semantic diagnostic; every other fixture shares one Program/lib batch.
+  const isolated = new Set([
+    "positive-lexical.chz.fixture",
+    "positive-unicode-escaped.chz.fixture",
+  ]);
+  const groups = [
+    manifest.fixtures.filter((fixture) => !isolated.has(fixture.file)),
+    ...manifest.fixtures
+      .filter((fixture) => isolated.has(fixture.file))
+      .map((fixture) => [fixture]),
+  ];
+  try {
+    for (const group of groups) {
+      const batch = analyzeChzSources(
+        group.map((fixture) => ({
+          source: readFileSync(join(fixtureRoot, fixture.file), "utf8"),
+          fileName: logicalFileName(fixtureRoot, fixture),
+        })),
+      );
+      batches.push(batch);
+      for (const [index, analysis] of batch.sourceFiles.entries()) {
+        analyses.set(group[index]!.file, analysis);
+      }
+    }
+  } catch (error) {
+    for (const batch of batches.splice(0)) batch.dispose();
+    throw error;
+  }
+});
+
+afterAll(() => {
+  analyses.clear();
+  for (const batch of batches.splice(0)) batch.dispose();
+});
 
 describe("compiler grammar fixture corpus", () => {
   for (const fixture of manifest.fixtures) {
     it(fixture.description, () => {
-      const source = readFileSync(
-        join(fixtureRoot, fixture.file),
-        "utf8",
+      const analysis = analyses.get(fixture.file);
+      if (analysis === undefined) {
+        throw new Error(`Fixture '${fixture.file}' was not analyzed.`);
+      }
+      expect(analysis.diagnostics.length === 0).toBe(
+        fixture.expect.success,
       );
-      const analysis = analyzeChzSource(
-        source,
-        logicalFileName(fixtureRoot, fixture),
-      );
-      try {
-        expect(analysis.diagnostics.length === 0).toBe(
-          fixture.expect.success,
+      expect(
+        analysis.diagnostics.map(({ code, line, column }) => ({
+          code,
+          line,
+          column,
+        })),
+      ).toEqual(fixture.expect.diagnostics);
+      expect(
+        analysis.imagineDeclarations.map(
+          (declaration) => declaration.name,
+        ),
+      ).toEqual(fixture.expect.declarations);
+      for (
+        const diagnostic of analysis.diagnostics.filter(
+          ({ code }) => code === "CHZ1009",
+        )
+      ) {
+        expect(diagnostic.message).toContain(
+          "if the callable returns no value, write ': void'.",
         );
-        expect(
-          analysis.diagnostics.map(({ code, line, column }) => ({
-            code,
-            line,
-            column,
-          })),
-        ).toEqual(fixture.expect.diagnostics);
-        expect(
-          analysis.imagineDeclarations.map(
-            (declaration) => declaration.name,
-          ),
-        ).toEqual(fixture.expect.declarations);
-        if (fixture.expect.islands !== undefined) {
-          expect(analysis.typescript.islands).toHaveLength(
-            fixture.expect.islands,
-          );
-        }
-      } finally {
-        analysis.dispose();
+      }
+      if (fixture.expect.islands !== undefined) {
+        expect(analysis.typescript.islands).toHaveLength(
+          fixture.expect.islands,
+        );
       }
     });
   }
 });
-
