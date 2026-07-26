@@ -24,7 +24,7 @@ describe("extractImagineSpecs", () => {
       ["placeStone", 1],
       ["stoneAt", 1],
       ["winner", 3],
-      ["chooseCpuMove", 3],
+      ["chooseCpuMove", 6],
       ["start", 0],
       ["cleanup", 0],
     ]);
