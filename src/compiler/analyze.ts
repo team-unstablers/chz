@@ -93,6 +93,20 @@ interface BoundClass {
   members: ReadonlyMap<number, ChzImagineClassMember>;
 }
 
+interface HumanClassElement {
+  declarationIndex: number;
+  node: Node;
+  candidateOffset: number;
+}
+
+interface ClassBodyClassification {
+  humanElements: readonly HumanClassElement[];
+  invalidCandidates: readonly {
+    declarationIndex: number;
+    offset: number;
+  }[];
+}
+
 type BoundDeclaration =
   | { kind: "function"; declaration: ChzImagineFunction }
   | { kind: "class"; bound: BoundClass };
@@ -360,14 +374,74 @@ function bindFunction(
 function findClassNode(
   shell: ParsedImagineClassShell,
   sourceFile: SourceFile,
-) {
-  return sourceFile.statements.find(
+): ChzImagineClass["declaration"] | undefined {
+  const node = sourceFile.statements.find(
     (statement) =>
       isClassDeclaration(statement) &&
       statement.name?.text === shell.name &&
       statement.getStart(sourceFile) >= shell.span.start &&
       statement.getStart(sourceFile) < shell.span.end,
   );
+  return node !== undefined && isClassDeclaration(node) ? node : undefined;
+}
+
+function classifyClassBodyCandidates(
+  parsed: CheeseParseResult,
+  sourceFile: SourceFile,
+): ClassBodyClassification {
+  const humanElements: HumanClassElement[] = [];
+  const invalidCandidates: {
+    declarationIndex: number;
+    offset: number;
+  }[] = [];
+
+  for (const [declarationIndex, shell] of parsed.declarations.entries()) {
+    if (shell.kind !== "ImagineClass") continue;
+    const classNode = findClassNode(shell, sourceFile);
+    for (const offset of shell.unclassifiedMemberOffsets) {
+      const node = classNode?.members.find((candidate) => {
+        const start = candidate.getStart(sourceFile);
+        return offset >= start && offset < candidate.end;
+      });
+      if (node === undefined) {
+        invalidCandidates.push({ declarationIndex, offset });
+        continue;
+      }
+
+      // The scanner can encounter another apparent member boundary inside a
+      // TypeScript type or initializer. Collapse those offsets by AST span:
+      // the compiler's ClassElement, not a Cheese syntax allowlist, owns the
+      // complete human member and automatically covers future TS member forms.
+      const existing = humanElements.find(
+        (candidate) =>
+          candidate.declarationIndex === declarationIndex &&
+          candidate.node.getStart(sourceFile) === node.getStart(sourceFile) &&
+          candidate.node.end === node.end,
+      );
+      if (existing === undefined) {
+        humanElements.push({
+          declarationIndex,
+          node,
+          candidateOffset: offset,
+        });
+      } else if (offset < existing.candidateOffset) {
+        existing.candidateOffset = offset;
+      }
+    }
+  }
+
+  return { humanElements, invalidCandidates };
+}
+
+function humanClassElementAt(
+  classification: ClassBodyClassification,
+  sourceFile: SourceFile,
+  offset: number,
+): HumanClassElement | undefined {
+  return classification.humanElements.find(({ node }) => {
+    const start = node.getStart(sourceFile);
+    return offset >= start && offset < node.end;
+  });
 }
 
 function memberName(
@@ -765,6 +839,7 @@ function isImagineObligation(
 function collectSemanticDiagnostics(
   compiler: TypeScriptProgramFile,
   declarations: readonly ChzImagineDeclaration[],
+  classBody: ClassBodyClassification,
   fileName: string,
 ): {
   obligations: ChzDiagnostic[];
@@ -779,6 +854,27 @@ function collectSemanticDiagnostics(
     )
   ) {
     const offset = Math.max(0, diagnostic.pos);
+    const humanElement = humanClassElementAt(
+      classBody,
+      compiler.sourceFile,
+      offset,
+    );
+    if (
+      humanElement !== undefined &&
+      (
+        diagnostic.code === 1036 ||
+        diagnostic.code === 1039 ||
+        diagnostic.code === 1040 ||
+        diagnostic.code === 1183
+      )
+    ) {
+      // The production projection intentionally turns the owning imagine
+      // class into an ambient `declare class`. Human implementations remain
+      // in the AST so the prompt can retain them; these four diagnostics are
+      // artifacts of that projection, while ordinary type errors in the same
+      // bodies continue through the normal TypeScript diagnostic path.
+      continue;
+    }
     if (isImagineObligation(diagnostic, compiler, owners)) {
       obligations.push(
         createTypeScriptDiagnostic(
@@ -839,6 +935,7 @@ function collectTypeScriptDiagnostics(
   parsed: CheeseParseResult,
   projected: ProjectedChzSource,
   compiler: TypeScriptProgramFile,
+  classBody: ClassBodyClassification,
   fileName: string,
   diagnostics: ChzDiagnostic[],
 ): ReadonlySet<number> {
@@ -849,6 +946,46 @@ function collectTypeScriptDiagnostics(
   if (parsed.diagnostics.length > 0) {
     for (const index of parsed.declarations.keys()) malformed.add(index);
     return malformed;
+  }
+
+  for (const candidate of classBody.invalidCandidates) {
+    malformed.add(candidate.declarationIndex);
+    diagnostics.push(
+      createChzDiagnostic(
+        "CHZ1004",
+        fileName,
+        candidate.offset,
+        compiler.sourceFile,
+      ),
+    );
+  }
+
+  for (
+    const diagnostic of compiler.program.getSemanticDiagnostics(
+      compiler.absoluteFileName,
+    )
+  ) {
+    if (diagnostic.code !== 1248) continue;
+    const humanElement = humanClassElementAt(
+      classBody,
+      compiler.sourceFile,
+      Math.max(0, diagnostic.pos),
+    );
+    if (humanElement === undefined) continue;
+
+    // TypeScript error recovery represents `const x = ...` in a class body as
+    // a PropertyDeclaration even though TS1248 says it is not a legal class
+    // member. Treat that statement-shaped recovery node as CHZ1004 before the
+    // ordinary semantic pass, matching other invalid class-body candidates.
+    malformed.add(humanElement.declarationIndex);
+    diagnostics.push(
+      createChzDiagnostic(
+        "CHZ1004",
+        fileName,
+        humanElement.candidateOffset,
+        compiler.sourceFile,
+      ),
+    );
   }
 
   for (
@@ -945,6 +1082,10 @@ function analyzeParsedInput(
   );
   const tsxUnsupported =
     scriptKindForFileName(input.fileName) === ScriptKind.TSX;
+  const classBody = classifyClassBodyCandidates(
+    parsed,
+    compiler.sourceFile,
+  );
   let malformedDeclarations: ReadonlySet<number> = new Set();
   if (tsxUnsupported) {
     diagnostics.push(
@@ -960,6 +1101,7 @@ function analyzeParsedInput(
       parsed,
       projected,
       compiler,
+      classBody,
       input.fileName,
       diagnostics,
     );
@@ -1009,6 +1151,7 @@ function analyzeParsedInput(
     const semantic = collectSemanticDiagnostics(
       compiler,
       imagineDeclarations,
+      classBody,
       input.fileName,
     );
     obligations = deduplicateDiagnostics(semantic.obligations);

@@ -1,0 +1,50 @@
+abstract class FixtureBaseGame {
+  abstract update(): void;
+}
+
+imagine class FixtureShootingGame extends FixtureBaseGame {
+  requirements(`Human TypeScript members guide the imagined implementation.`);
+
+  public readonly title = "fixture";
+  private score = 0;
+
+  constructor() {
+    super();
+  }
+
+  static collision2D(a: number, b: number): boolean {
+    return a === b;
+  }
+
+  protected get currentScore(): number {
+    return this.score;
+  }
+
+  protected set currentScore(value: number) {
+    this.score = value;
+  }
+
+  public snapshot(): { score: number } {
+    return { score: this.score };
+  }
+
+  async warmup(): Promise<void> {
+    await Promise.resolve();
+  }
+
+  override update(): void {
+    this.score += 1;
+  }
+
+  accessor active = true;
+
+  [key: string]: unknown;
+
+  static {
+    void FixtureShootingGame;
+  }
+
+  imagine startGame(): void {
+    requirements(`Start the game.`);
+  }
+}

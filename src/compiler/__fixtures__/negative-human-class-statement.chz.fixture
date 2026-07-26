@@ -1,0 +1,6 @@
+imagine class HumanMemberBoundary {
+  requirements(`Only TypeScript class members belong here.`);
+  {
+    void 0;
+  }
+}

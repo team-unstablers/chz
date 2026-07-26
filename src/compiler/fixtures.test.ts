@@ -20,6 +20,7 @@ interface FixtureExpectation {
   success: boolean;
   diagnostics: ExpectedDiagnostic[];
   declarations: string[];
+  imagineMembers?: Record<string, string[]>;
   islands?: number;
 }
 
@@ -130,6 +131,23 @@ describe("compiler grammar fixture corpus", () => {
           (declaration) => declaration.name,
         ),
       ).toEqual(fixture.expect.declarations);
+      if (fixture.expect.imagineMembers !== undefined) {
+        expect(
+          Object.fromEntries(
+            analysis.imagineDeclarations
+              .filter(
+                (declaration) =>
+                  declaration.kind === "ImagineClass",
+              )
+              .map((declaration) => [
+                declaration.name,
+                declaration.kind === "ImagineClass"
+                  ? declaration.members.map((member) => member.name)
+                  : [],
+              ]),
+          ),
+        ).toEqual(fixture.expect.imagineMembers);
+      }
       for (
         const diagnostic of analysis.diagnostics.filter(
           ({ code }) => code === "CHZ1009",

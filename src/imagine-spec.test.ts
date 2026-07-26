@@ -273,6 +273,43 @@ describe("ImagineSpec compatibility adapter", () => {
     ]);
     expect(spec!.members[2]!.requirements).toBe("리소스를 정리합니다.");
   });
+
+  it("keeps the docs/00 human ShootingGame member in the prompt without collecting it as imagined work", () => {
+    const intro = readFileSync(
+      new URL("../docs/00-chz-intro.ko.md", import.meta.url),
+      "utf8",
+    );
+    const memberStart = intro.indexOf(
+      "  static collisionDetection2D(",
+    );
+    const memberEndMarker =
+      "\n  \n  // **요구하기**";
+    const memberEnd = intro.indexOf(memberEndMarker, memberStart);
+    expect(memberStart).toBeGreaterThanOrEqual(0);
+    expect(memberEnd).toBeGreaterThan(memberStart);
+    const humanMember = intro.slice(memberStart, memberEnd);
+    const source = [
+      "imagine class ShootingGame {",
+      "  requirements(`간단한 슈팅 게임입니다.`);",
+      "",
+      humanMember,
+      "",
+      "  imagine startGame(): void {",
+      "    requirements(`게임을 시작합니다.`);",
+      "  }",
+      "}",
+    ].join("\n");
+
+    const [spec] = specsOf(source, "shooting-game.chz.ts");
+
+    expect(spec!.originalText).toContain(humanMember);
+    expect(spec!.members.map((member) => member.name)).toEqual([
+      "startGame",
+    ]);
+    expect(spec!.members.every(
+      (member) => member.name !== "collisionDetection2D",
+    )).toBe(true);
+  });
 });
 
 describe("diagnostic-free final emit", () => {

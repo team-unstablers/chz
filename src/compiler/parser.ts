@@ -68,6 +68,13 @@ export interface ParsedImagineClassShell {
   bodySpan: SourceSpan;
   exported: boolean;
   members: ParsedImagineClassMemberShell[];
+  /**
+   * Starts that the Cheese extension pass did not consume as contracts or
+   * imagined members. analyze.ts accepts them only when the TypeScript AST
+   * places them inside a real ClassElement. Keeping the decision AST-backed
+   * means new TypeScript member forms do not require a Cheese allowlist.
+   */
+  unclassifiedMemberOffsets: readonly number[];
 }
 
 export type ParsedImagineDeclarationShell =
@@ -414,8 +421,12 @@ function scanClassMembers(
   islands: ParsedProjectionIsland[],
   replacements: ProjectionReplacement[],
   diagnostics: PendingDiagnostic[],
-): ParsedImagineClassMemberShell[] {
+): {
+  members: ParsedImagineClassMemberShell[];
+  unclassifiedMemberOffsets: number[];
+} {
   const members: ParsedImagineClassMemberShell[] = [];
+  const unclassifiedMemberOffsets: number[] = [];
   let index = openIndex + 1;
   let memberStart = true;
 
@@ -460,6 +471,7 @@ function scanClassMembers(
     if (memberStart && textIs(token, "imagine")) {
       const next = tokens[index + 1];
       if (next === undefined || !commitsImagine(next)) {
+        unclassifiedMemberOffsets.push(token.start);
         memberStart = false;
         index += 1;
         continue;
@@ -570,7 +582,7 @@ function scanClassMembers(
     }
 
     if (memberStart) {
-      diagnostics.push({ code: "CHZ1004", offset: token.start });
+      unclassifiedMemberOffsets.push(token.start);
     }
     if (token.kind === SyntaxKind.OpenBraceToken) {
       const nestedClose = pairs.closeForOpen.get(index);
@@ -584,7 +596,7 @@ function scanClassMembers(
     index += 1;
   }
 
-  return members;
+  return { members, unclassifiedMemberOffsets };
 }
 
 function scanFunction(
@@ -680,7 +692,7 @@ function scanClass(
     diagnostics.push({ code: "CHZ1007", offset: tokens[name.index]!.end });
     return undefined;
   }
-  const members = scanClassMembers(
+  const scannedMembers = scanClassMembers(
     tokens,
     pairs,
     body.open,
@@ -708,7 +720,9 @@ function scanClass(
       },
       bodySpan,
       exported,
-      members,
+      members: scannedMembers.members,
+      unclassifiedMemberOffsets:
+        scannedMembers.unclassifiedMemberOffsets,
     },
     nextIndex: body.close + 1,
   };

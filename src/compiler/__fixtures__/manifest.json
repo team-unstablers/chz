@@ -21,6 +21,18 @@
       "expect": { "success": true, "diagnostics": [], "declarations": ["Counter"], "islands": 4 }
     },
     {
+      "file": "positive-human-class-members.chz.fixture",
+      "description": "Accepts TypeScript-defined class elements beside imagined members without collecting the human elements as realization work.",
+      "expect": {
+        "success": true,
+        "diagnostics": [],
+        "declarations": ["FixtureShootingGame"],
+        "imagineMembers": {
+          "FixtureShootingGame": ["startGame"]
+        }
+      }
+    },
+    {
       "file": "positive-profile.chz.fixture",
       "description": "Recognizes and neutralizes a top-level profile directive.",
       "expect": { "success": true, "diagnostics": [], "declarations": ["runProfiled"] }
@@ -148,7 +160,16 @@
       "expect": {
         "success": false,
         "diagnostics": [{ "code": "CHZ1004", "line": 3, "column": 3 }],
-        "declarations": ["C"]
+        "declarations": ["ClassContractStatementBoundary"]
+      }
+    },
+    {
+      "file": "negative-human-class-statement.chz.fixture",
+      "description": "Rejects a block statement that TypeScript does not parse as a class element.",
+      "expect": {
+        "success": false,
+        "diagnostics": [{ "code": "CHZ1004", "line": 3, "column": 3 }],
+        "declarations": ["HumanMemberBoundary"]
       }
     },
     {
