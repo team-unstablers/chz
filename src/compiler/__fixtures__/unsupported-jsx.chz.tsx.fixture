@@ -1,0 +1,10 @@
+// TSX is lexically distinguishable from generic syntax, but Cheese TSX is a later milestone.
+interface Props<T> {
+  value: T;
+}
+
+const View = <T,>({ value }: Props<T>) => <span>{String(value)}</span>;
+
+imagine function makeView<T>(value: T): JSX.Element {
+  requirements("Render the value.");
+}

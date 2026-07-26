@@ -1,0 +1,10 @@
+// Semicolon, comma, closing delimiters, and a block boundary keep imagine as an identifier.
+declare const imagine: unknown;
+declare const value: unknown;
+declare function consume(value: unknown): void;
+
+imagine;
+imagine, value;
+consume(imagine);
+[imagine];
+{ imagine }

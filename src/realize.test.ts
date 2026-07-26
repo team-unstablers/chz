@@ -1,18 +1,26 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { extractImagineSpecs } from "./preprocessor.ts";
-import { buildRealizationCache, writeRealizationCache } from "./verify.ts";
+import { analyzeChzSource } from "./compiler/index.ts";
+import { API } from "./compiler/ts-api.ts";
+import { splitHumanCode } from "./human-code.ts";
+import {
+  imagineSpecsFromChzSource,
+} from "./preprocessor.ts";
+import {
+  buildRealizationCache,
+  writeRealizationCache,
+  type RealizationCache,
+} from "./verify.ts";
 import {
   CHZ_HARNESS_TOOLS,
   CHZ_REALIZER_SYSTEM,
   ChzRealizerBase,
   buildEstimatedRealizeOrder,
   buildSessionBaseline,
-  imagineSpecToSymbol,
   realize,
   renderEnsureHarness,
   renderEntryPoint,
@@ -62,6 +70,67 @@ function contextFor(root: string, outputDir: string): ChzRealizeContext {
   };
 }
 
+async function realizeSource(
+  source: string,
+  fileName: string,
+  options: Parameters<typeof realize>[1],
+): Promise<Awaited<ReturnType<typeof realize>>> {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return await realize(analysis, options);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function symbolsOf(source: string, fileName: string): ChzImagineSymbol[] {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildEstimatedRealizeOrder(analysis);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function firstSpecAndSymbol(
+  source: string,
+  fileName: string,
+) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return {
+      spec: imagineSpecsFromChzSource(analysis)[0]!,
+      symbol: buildEstimatedRealizeOrder(analysis)[0]!,
+    };
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function typeCheckProject(configPath: string, projectRoot: string): string[] {
+  const api = new API({ cwd: projectRoot });
+  let snapshot: ReturnType<API["updateSnapshot"]> | undefined;
+  try {
+    snapshot = api.updateSnapshot({ openProjects: [configPath] });
+    const project =
+      snapshot.getProject(configPath) ?? snapshot.getProjects()[0];
+    if (project === undefined) return ["TypeScript did not create a project."];
+    return [
+      ...project.program.getConfigFileParsingDiagnostics(),
+      ...project.program.getProgramDiagnostics(),
+      ...project.program.getGlobalDiagnostics(),
+      ...project.program.getSyntacticDiagnostics(),
+      ...project.program.getBindDiagnostics(),
+      ...project.program.getSemanticDiagnostics(),
+    ].map((diagnostic) => `TS${diagnostic.code}: ${diagnostic.text}`);
+  } finally {
+    snapshot?.dispose();
+    api.close();
+  }
+}
+
 class ScriptedRealizer extends ChzRealizerBase {
   readonly name = "ScriptedRealizer";
   readonly seenMessages: ChzChatMessage[][] = [];
@@ -93,8 +162,10 @@ function response(toolCalls: ChzChatResponse["message"]["toolCalls"]): ChzChatRe
 describe("canonical prompt and symbol graph", () => {
   it("uses the canonical fixed prompt and deterministic baseline", () => {
     const data = fixture();
-    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const { spec, symbol } = firstSpecAndSymbol(
+      data.source,
+      data.sourceFile,
+    );
     const context = contextFor(data.root, data.outputDir);
     const first = buildSessionBaseline(symbol, context, "gpt-test");
     const second = buildSessionBaseline(symbol, context, "gpt-test");
@@ -114,8 +185,7 @@ describe("canonical prompt and symbol graph", () => {
 
   it("uses dependency surfaces before falling back to dependency file reads", () => {
     const data = fixture();
-    const spec = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const symbol = imagineSpecToSymbol(spec, data.source, data.sourceFile);
+    const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
     const dependencyFile = join(data.root, "chz", "realization", "dependency.ts");
     const dependencySymbol: ChzImagineSymbol = {
       ...symbol,
@@ -164,32 +234,101 @@ describe("canonical prompt and symbol graph", () => {
   it("orders mentioned dependencies before dependents", () => {
     const source = [
       "imagine function leaf(): number { requirements(`leaf`); }",
-      "imagine function parent(): number { requirements(`Use leaf to calculate.`); }",
+      "imagine function parentNode(): number { requirements(`Use leaf to calculate.`); }",
     ].join("\n");
-    const order = buildEstimatedRealizeOrder(extractImagineSpecs(source, "graph.chz.ts"), source, "graph.chz.ts");
-    expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parent"]);
+    const order = symbolsOf(source, "graph.chz.ts");
+    expect(order.map((symbol) => symbol.name)).toEqual(["leaf", "parentNode"]);
     expect(order[1]!.dependencies.map((symbol) => symbol.name)).toEqual(["leaf"]);
   });
 
   it("renders ensure harnesses independent of file position and checkout path", () => {
     const data = fixture();
     const shifted = `// a comment moving every symbol down one line\n\n${data.source}`;
-    const specAtOrigin = extractImagineSpecs(data.source, data.sourceFile)[0]!;
-    const specShifted = extractImagineSpecs(shifted, "/entirely/other/path/sample.chz.ts")[0]!;
+    const originAnalysis = analyzeChzSource(data.source, data.sourceFile);
+    const shiftedAnalysis = analyzeChzSource(
+      shifted,
+      "/entirely/other/path/sample.chz.ts",
+    );
+    try {
+      const specAtOrigin = imagineSpecsFromChzSource(originAnalysis)[0]!;
+      const specShifted = imagineSpecsFromChzSource(shiftedAnalysis)[0]!;
 
-    expect(specShifted.ensures[0]!.line).not.toBe(specAtOrigin.ensures[0]!.line);
-    // Identical harness bytes: cache reuse must not break when an edit
-    // elsewhere shifts the block, or when the repo lives at another path.
-    expect(renderEnsureHarness(specShifted, "/entirely/other/path/sample.chz.ts", [specShifted]))
-      .toBe(renderEnsureHarness(specAtOrigin, data.sourceFile, [specAtOrigin]));
+      expect(specShifted.ensures[0]!.line).not.toBe(
+        specAtOrigin.ensures[0]!.line,
+      );
+      // Identical harness bytes: cache reuse must not break when an edit
+      // elsewhere shifts the block, or when the repo lives at another path.
+      expect(
+        renderEnsureHarness(shiftedAnalysis, specShifted, [specShifted]),
+      ).toBe(
+        renderEnsureHarness(originAnalysis, specAtOrigin, [specAtOrigin]),
+      );
+    } finally {
+      originAnalysis.dispose();
+      shiftedAnalysis.dispose();
+    }
   });
 
   it("imports external signature types into the engine-owned ensure harness", () => {
-    const source =
-      "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }\n";
-    const spec = extractImagineSpecs(source, "types.chz.ts")[0]!;
-    const harness = renderEnsureHarness(spec, "types.chz.ts");
-    expect(harness).toContain('import type { Result, Widget } from "../implementations/__prologue__.ts";');
+    const source = [
+      "interface Widget {}",
+      "type Result = unknown;",
+      "imagine function inspect(value: Widget): Result { ensure(inspect({} as Widget) !== undefined); }",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, "types.chz.ts");
+    try {
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const harness = renderEnsureHarness(analysis, spec);
+      expect(harness).toContain(
+        'import type { Result, Widget } from "../implementations/__prologue__.ts";',
+      );
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("collects lowercase and Unicode prologue types but excludes lib and imported declarations", () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-external-types-"));
+    roots.push(root);
+    const fileName = join(root, "types.chz.ts");
+    writeFileSync(
+      join(root, "external.ts"),
+      "export interface ImportedType { external: boolean }\n",
+      "utf8",
+    );
+    const source = [
+      'import type { ImportedType as importedAlias } from "./external.ts";',
+      "type lowercase = { value: number };",
+      "interface 유니코드타입 { ok: boolean }",
+      "imagine function inspect(",
+      "  value: lowercase,",
+      "  imported: importedAlias,",
+      "): Promise<유니코드타입> {",
+      "  ensure('type references remain available', () => {",
+      "    const local: lowercase = { value: 1 };",
+      "    const unicode = { ok: true } as 유니코드타입;",
+      "    const external = { external: true } as importedAlias;",
+      "    assert(local.value === 1 && unicode.ok && external.external);",
+      "  });",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, fileName);
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const harness = renderEnsureHarness(analysis, spec);
+
+      expect(
+        harness.split("\n").find((line) => line.startsWith("import type")),
+      ).toBe(
+        'import type { lowercase, 유니코드타입 } from "../implementations/__prologue__.ts";',
+      );
+      expect(harness).not.toContain("Promise } from");
+    } finally {
+      analysis.dispose();
+    }
   });
 
   it("turns an imagine class into a class symbol and executable ensure tests", () => {
@@ -203,27 +342,181 @@ describe("canonical prompt and symbol graph", () => {
       "  }",
       "}",
     ].join("\n");
-    const spec = extractImagineSpecs(source, "counter.chz.ts")[0]!;
-    const symbol = imagineSpecToSymbol(spec, source, "counter.chz.ts");
-    const harness = renderEnsureHarness(spec, "counter.chz.ts");
+    const analysis = analyzeChzSource(source, "counter.chz.ts");
+    try {
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const symbol = buildEstimatedRealizeOrder(analysis)[0]!;
+      const harness = renderEnsureHarness(analysis, spec);
 
-    expect(symbol.type).toBe("class");
-    expect(symbol.definition).toContain("imagine increment");
-    expect(harness).toContain('import { Counter } from "../implementations/Counter.ts";');
-    expect(harness).toContain("it('increment는 number를 반환합니다.'");
-    expect(harness).toContain("typeof counter.increment(1) === 'number'");
-    expect(harness).not.toContain("assertEnsures");
+      expect(symbol.type).toBe("class");
+      expect(symbol.definition).toContain("imagine increment");
+      expect(harness).toContain(
+        'import { Counter } from "../implementations/Counter.ts";',
+      );
+      expect(harness).toContain("it('increment는 number를 반환합니다.'");
+      expect(harness).toContain(
+        "typeof counter.increment(1) === 'number'",
+      );
+      expect(harness).not.toContain("assertEnsures");
+    } finally {
+      analysis.dispose();
+    }
   });
 
   it("connects prologue, realized symbols, and epilogue in entry-point order", () => {
-    const source = "imagine function greet(): string { ensure(greet() === '안녕'); }\n";
-    const specs = extractImagineSpecs(source, "example.chz.ts");
-    const entry = renderEntryPoint(specs, "example.chz.ts");
+    const source =
+      "export imagine function greet(): string { ensure(greet() === '안녕'); }\n";
+    const analysis = analyzeChzSource(source, "example.chz.ts");
+    try {
+      const specs = imagineSpecsFromChzSource(analysis);
+      const entry = renderEntryPoint(
+        analysis,
+        splitHumanCode(analysis),
+        specs,
+      );
 
-    expect(entry.indexOf('import "./implementations/__prologue__.ts";'))
-      .toBeLessThan(entry.indexOf('export { greet } from "./implementations/greet.ts";'));
-    expect(entry.indexOf('export { greet } from "./implementations/greet.ts";'))
-      .toBeLessThan(entry.indexOf('import "./implementations/__epilogue__.ts";'));
+      expect(entry.indexOf('import "./implementations/__prologue__.ts";'))
+        .toBeLessThan(entry.indexOf('export { greet } from "./implementations/greet.ts";'));
+      expect(entry.indexOf('export { greet } from "./implementations/greet.ts";'))
+        .toBeLessThan(entry.indexOf('import "./implementations/__epilogue__.ts";'));
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("forwards exactly the source exports with value/type separation", () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-entrypoint-exports-"));
+    roots.push(root);
+    const sourceFile = join(root, "exports.chz.ts");
+    const source = [
+      "interface PrivateType { hidden: true; }",
+      "const privateValue = 1;",
+      "export interface PublicType { value: number; }",
+      "export type PublicAlias = PublicType;",
+      "export const publicValue = 2;",
+      "imagine function hiddenImagine(): number {}",
+      "export imagine function publicImagine(): PublicType {}",
+      "export { hiddenImagine as exposedImagine };",
+      "const result = hiddenImagine();",
+      "export { result };",
+      "export default publicImagine;",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+    const analysis = analyzeChzSource(source, sourceFile);
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const specs = imagineSpecsFromChzSource(analysis);
+      const humanCode = splitHumanCode(analysis);
+      const entryPoint = renderEntryPoint(analysis, humanCode, specs);
+
+      expect(entryPoint).toContain(
+        'export { publicValue } from "./implementations/__prologue__.ts";',
+      );
+      expect(entryPoint).toContain(
+        'export type { PublicType, PublicAlias } from "./implementations/__prologue__.ts";',
+      );
+      expect(entryPoint).toContain(
+        'export { hiddenImagine as exposedImagine } from "./implementations/hiddenImagine.ts";',
+      );
+      expect(entryPoint).toContain(
+        'export { publicImagine } from "./implementations/publicImagine.ts";',
+      );
+      expect(entryPoint).toContain(
+        'export { result } from "./implementations/__epilogue__.ts";',
+      );
+      expect(entryPoint).toContain(
+        'export { default } from "./implementations/__epilogue__.ts";',
+      );
+      expect(entryPoint).not.toContain("PrivateType");
+      expect(entryPoint).not.toContain("privateValue");
+      expect(entryPoint).not.toContain(
+        'export * from "./implementations/__prologue__.ts"',
+      );
+
+      const baseDir = join(root, "chz", "realization", "exports");
+      const implementations = join(baseDir, "implementations");
+      mkdirSync(implementations, { recursive: true });
+      writeFileSync(
+        join(implementations, "__prologue__.ts"),
+        humanCode.prologue,
+        "utf8",
+      );
+      writeFileSync(
+        join(implementations, "__epilogue__.ts"),
+        humanCode.epilogue,
+        "utf8",
+      );
+      writeFileSync(
+        join(implementations, "hiddenImagine.ts"),
+        "export function hiddenImagine(): number { return 1; }\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(implementations, "publicImagine.ts"),
+        [
+          'import type { PublicType } from "./__prologue__.ts";',
+          "export function publicImagine(): PublicType { return { value: 1 }; }",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      writeFileSync(
+        join(baseDir, "implementation.ts"),
+        entryPoint,
+        "utf8",
+      );
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ type: "module" }),
+        "utf8",
+      );
+      const configPath = join(root, "tsconfig.json");
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          compilerOptions: {
+            allowImportingTsExtensions: true,
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            noEmit: true,
+            strict: true,
+            target: "ES2022",
+            verbatimModuleSyntax: true,
+          },
+          files: [join(baseDir, "implementation.ts")],
+        }),
+        "utf8",
+      );
+
+      expect(typeCheckProject(configPath, root)).toEqual([]);
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("keeps the official non-export collision symbol private and epilogue-wired", () => {
+    const fileName = resolve("examples/simple-cases/collision.chz.ts");
+    const source = readFileSync(fileName, "utf8");
+    const analysis = analyzeChzSource(source, fileName);
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const specs = imagineSpecsFromChzSource(analysis);
+      const humanCode = splitHumanCode(analysis);
+      const entryPoint = renderEntryPoint(analysis, humanCode, specs);
+
+      expect(humanCode.epilogue).toContain(
+        'import { 충돌판정_2D } from "./충돌판정_2D.ts";',
+      );
+      expect(entryPoint).toContain(
+        'import "./implementations/충돌판정_2D.ts";',
+      );
+      expect(entryPoint).not.toContain(
+        'export { 충돌판정_2D } from "./implementations/충돌판정_2D.ts";',
+      );
+    } finally {
+      analysis.dispose();
+    }
   });
 });
 
@@ -231,11 +524,7 @@ describe("ChzRealizerBase", () => {
   it("owns the tool loop and resolves files after Finish", async () => {
     const data = fixture();
     const events: string[] = [];
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     const realizer = new ScriptedRealizer([
@@ -271,11 +560,7 @@ describe("ChzRealizerBase", () => {
   it("logs verification outcomes without leaking diagnostic output", async () => {
     const data = fixture();
     const events: string[] = [];
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -303,7 +588,7 @@ describe("ChzRealizerBase", () => {
 
   it("retries provider failures in the base class", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const test = join(data.outputDir, "tests", "test_greet.autogen.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -322,7 +607,7 @@ describe("ChzRealizerBase", () => {
 
   it("returns the three-way blocked/failed outcomes", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const blocked = new ScriptedRealizer([
       response([{ id: "block", name: "Block", arguments: { reason: "dependency missing", todo: "npm install package" } }]),
     ]);
@@ -339,7 +624,7 @@ describe("ChzRealizerBase", () => {
 
   it("does not mistake the engine-owned ensure harness for an LLM-authored test", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(extractImagineSpecs(data.source, data.sourceFile), data.source, data.sourceFile)[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const ensure = join(data.outputDir, "tests", "test_greet.ensure.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -362,11 +647,7 @@ describe("ChzRealizerBase", () => {
 
   it("does not accept an arbitrarily named test that independent verification will ignore", async () => {
     const data = fixture();
-    const symbol = buildEstimatedRealizeOrder(
-      extractImagineSpecs(data.source, data.sourceFile),
-      data.source,
-      data.sourceFile,
-    )[0]!;
+    const symbol = symbolsOf(data.source, data.sourceFile)[0]!;
     const implementation = join(data.outputDir, "implementations", "greet.ts");
     const noncanonicalTest = join(data.outputDir, "tests", "greet.test.ts");
     mkdirSync(dirname(implementation), { recursive: true });
@@ -517,11 +798,74 @@ class SlugPairRealizer implements ChzRealizer {
 }
 
 describe("realize engine", () => {
+  it("uses the analyzer profile directive instead of comment or string text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-profile-realize-"));
+    roots.push(root);
+    const sourceFile = join(root, "profile.chz.ts");
+    const source = [
+      "// @profile fake_comment",
+      'const fake = "@profile fake_string";',
+      "@profile server",
+      "export imagine function value(): number {}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+    const seenProfiles: string[] = [];
+    const realizer: ChzRealizer = {
+      name: "ProfileCaptureRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        seenProfiles.push(context.activeProfile);
+        const implementation = join(
+          context.outputDir,
+          "implementations",
+          `${symbol.name}.ts`,
+        );
+        const test = join(
+          context.outputDir,
+          "tests",
+          `test_${symbol.name}.autogen.ts`,
+        );
+        mkdirSync(dirname(implementation), { recursive: true });
+        mkdirSync(dirname(test), { recursive: true });
+        writeFileSync(
+          implementation,
+          "export function value(): number { return 1; }\n",
+          "utf8",
+        );
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date("2026-07-27T00:00:00.000Z"),
+          resolvedBy: "profile-capture",
+        };
+      },
+    };
+
+    const result = await realizeSource(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      skipVerification: true,
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(seenProfiles).toEqual(["server"]);
+    expect(
+      readFileSync(
+        join(result.baseDir, "implementations", "__prologue__.ts"),
+        "utf8",
+      ),
+    ).not.toContain("@profile server");
+  });
+
   it("feeds independent verification failures into bounded retry sessions", async () => {
     const data = fixture();
     const realizer = new RetryingEngineRealizer();
     let verificationCalls = 0;
-    const result = await realize(data.source, data.sourceFile, {
+    const result = await realizeSource(data.source, data.sourceFile, {
       realizers: [realizer],
       projectRoot: data.root,
       maxRetries: 1,
@@ -565,7 +909,7 @@ describe("realize engine", () => {
     ].join("\n");
     writeFileSync(sourceFile, source, "utf8");
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [new CounterClassRealizer()],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -576,8 +920,14 @@ describe("realize engine", () => {
     expect(result.symbols[0]!.symbol.type).toBe("class");
     expect(readFileSync(join(result.baseDir, "implementations", "Counter.ts"), "utf8"))
       .toContain("realization of `imagine class Counter`");
-    expect(readFileSync(join(result.baseDir, "implementation.ts"), "utf8"))
-      .toContain('export { Counter } from "./implementations/Counter.ts";');
+    const entryPoint = readFileSync(
+      join(result.baseDir, "implementation.ts"),
+      "utf8",
+    );
+    expect(entryPoint)
+      .toContain('import "./implementations/Counter.ts";');
+    expect(entryPoint)
+      .not.toContain('export { Counter } from "./implementations/Counter.ts";');
   });
 
   it(
@@ -604,7 +954,7 @@ describe("realize engine", () => {
       ].join("\n");
       writeFileSync(sourceFile, source, "utf8");
 
-      const result = await realize(source, sourceFile, {
+      const result = await realizeSource(source, sourceFile, {
         realizers: [new SlugPairRealizer()],
         projectRoot: root,
         now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -668,7 +1018,7 @@ describe("realize engine", () => {
 
     const warnings: string[] = [];
     const verifiedScopes: string[][] = [];
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       verify: async (input) => {
@@ -744,7 +1094,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       verify: async () => ({ passed: true, output: "green" }),
@@ -795,7 +1145,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -856,7 +1206,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -891,7 +1241,7 @@ describe("realize engine", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       now: () => new Date("2026-07-23T00:00:00.000Z"),
@@ -958,7 +1308,7 @@ describe("parallel realize (-j)", () => {
       active--;
     });
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 2,
@@ -987,7 +1337,7 @@ describe("parallel realize (-j)", () => {
       events.push(`end:${name}`);
     });
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 4,
@@ -1044,7 +1394,7 @@ describe("parallel realize (-j)", () => {
       },
     };
 
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       jobs: 3,
@@ -1123,7 +1473,7 @@ describe("realize re-runs (docs/62)", () => {
 
   async function firstRun(source: string, root: string, sourceFile: string) {
     const realizer = new CountingSlugRealizer();
-    const result = await realize(source, sourceFile, {
+    const result = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1154,10 +1504,11 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, source, "utf8");
     const first = await firstRun(source, root, sourceFile);
     const firstCache = readFileSync(join(first.baseDir, "realization-cache.json"), "utf8");
+    const firstCacheData = JSON.parse(firstCache) as RealizationCache;
 
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1185,6 +1536,10 @@ describe("realize re-runs (docs/62)", () => {
       realizedAt: "2026-07-24T00:00:00.000Z",
       testsPassed: true,
     });
+    expect(rewritten.symbols.slugify?.publicSurfaceHash)
+      .toBe(firstCacheData.symbols.slugify?.publicSurfaceHash);
+    expect(rewritten.symbols.buildUniqueSlugs?.publicSurfaceHash)
+      .toBe(firstCacheData.symbols.buildUniqueSlugs?.publicSurfaceHash);
     expect(`${JSON.stringify(rewritten, null, 2)}\n`).toBe(firstCache);
   });
 
@@ -1200,7 +1555,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1233,7 +1588,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1261,7 +1616,7 @@ describe("realize re-runs (docs/62)", () => {
     const edited = makeSlugSource("소문자 슬러그로 만듭니다.", ensureLine);
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1292,7 +1647,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, shifted, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(shifted, sourceFile, {
+    const second = await realizeSource(shifted, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1325,7 +1680,7 @@ describe("realize re-runs (docs/62)", () => {
       "utf8",
     );
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1351,7 +1706,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1381,7 +1736,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(sourceFile, edited, "utf8");
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(edited, sourceFile, {
+    const second = await realizeSource(edited, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1416,7 +1771,7 @@ describe("realize re-runs (docs/62)", () => {
     writeFileSync(cachePath, `${JSON.stringify(cache, null, 2)}\n`, "utf8");
 
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,
@@ -1437,7 +1792,7 @@ describe("realize re-runs (docs/62)", () => {
     await firstRun(source, root, sourceFile);
 
     const realizer = new CountingSlugRealizer();
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: "another-version",
@@ -1462,7 +1817,7 @@ describe("realize re-runs (docs/62)", () => {
 
     const realizer = new CountingSlugRealizer();
     const retests: string[][] = [];
-    const second = await realize(source, sourceFile, {
+    const second = await realizeSource(source, sourceFile, {
       realizers: [realizer],
       projectRoot: root,
       chzVersion: CHZ_VERSION,

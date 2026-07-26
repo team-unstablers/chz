@@ -4,9 +4,9 @@
  * Realize order is decided per strongly connected component (SCC), leaves
  * first. Edges are discovered in the three stages of docs/62:
  *
- *   1-2. Estimated edges — identifier mentions of other imagine symbols inside
- *        an imagine block (signature type refs plus requirements/ensure body
- *        mentions; both live in `spec.originalText`, so one scan covers both).
+ *   1-2. Estimated edges — three deliberately separate sources:
+ *        signature TypeNodes, executable ensure AST, and natural-language
+ *        requirements prose.
  *   3.   Confirmed edges — imports extracted from a realized implementation
  *        after its session ends. The engine records them in
  *        `realization-cache.json`; re-runs will prefer them over estimates.
@@ -18,8 +18,23 @@
 
 import { resolve } from "node:path";
 
-import type { ImagineSpec } from "./preprocessor.ts";
+import {
+  collectModuleSpecifiersFromSource,
+  collectSymbolReferences,
+  collectTypeSymbolReferences,
+  declarationEnsureScopes,
+  unaliasSymbol,
+  type ChzImagineDeclaration,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
 import type { ChzImagineSymbol } from "./realizer/types.ts";
+import { mentionedSymbols } from "./requirements-mentions.ts";
+
+export {
+  maskOccurrences,
+  mentionedSymbols,
+  mentionsSymbol,
+} from "./requirements-mentions.ts";
 
 /**
  * Cycles above this size fail realize unless `maxCycleSize` raises the cap.
@@ -42,6 +57,26 @@ export interface ChzDependencyGraph {
   groups: ChzRealizeGroup[];
   /** Human-facing cycle warnings (a cycle is legal but always warned). */
   warnings: string[];
+  /** Every graph edge with its independently recorded discovery sources. */
+  edges: ChzDependencyEdge[];
+}
+
+export type ChzDependencyEdgeSource =
+  | "signature"
+  | "ensure"
+  | "requirements-prose"
+  | "confirmed";
+
+export interface ChzDependencyEdge {
+  dependent: string;
+  dependency: string;
+  sources: ChzDependencyEdgeSource[];
+}
+
+export interface ChzEstimatedDependencySources {
+  signature: readonly string[];
+  ensure: readonly string[];
+  requirementsProse: readonly string[];
 }
 
 export interface BuildDependencyGraphOptions {
@@ -50,7 +85,7 @@ export interface BuildDependencyGraphOptions {
   /**
    * Confirmed edges from a previous run's `realization-cache.json` (docs/62
    * stage 3), keyed by symbol name. They are united with the estimated
-   * mention-scan edges: a dependency the model chose during realization must
+   * edges: a dependency the model chose during realization must
    * keep constraining the order even when the spec text never names it.
    * Callers must only pass edges of symbols whose spec is unchanged — a
    * changed spec invalidates its old implementation's imports.
@@ -73,145 +108,187 @@ export class ChzCycleError extends Error {
   }
 }
 
-/**
- * True when the character continues an ASCII identifier. Non-ASCII characters
- * are deliberately NOT treated as identifier continuations here: requirements
- * prose attaches Korean particles directly to symbol names (`크리티컬_판정을`),
- * and rejecting those suffixes would silently drop real dependency edges. The
- * cost is a rare over-match when one Korean symbol name prefixes another; an
- * extra estimated edge only makes the realize order more conservative.
- */
-function isAsciiIdentifierPart(ch: string): boolean {
-  return (
-    (ch >= "a" && ch <= "z") ||
-    (ch >= "A" && ch <= "Z") ||
-    (ch >= "0" && ch <= "9") ||
-    ch === "_" ||
-    ch === "$"
-  );
-}
-
-/**
- * Whether `text` mentions the symbol `name` at an identifier boundary. Unlike
- * plain substring search this never matches inside a longer ASCII identifier
- * (`slug` does not match `slugify`). The same matcher must be used everywhere
- * mentions decide behavior (graph edges, ensure-harness imports), or the
- * realize order and the emitted imports would disagree.
- */
-export function mentionsSymbol(text: string, name: string): boolean {
-  if (name.length === 0) return false;
-  for (let from = 0; ; ) {
-    const at = text.indexOf(name, from);
-    if (at < 0) return false;
-    const before = at > 0 ? text[at - 1]! : "";
-    const after = at + name.length < text.length ? text[at + name.length]! : "";
-    if (
-      (before === "" || !isAsciiIdentifierPart(before)) &&
-      (after === "" || !isAsciiIdentifierPart(after))
-    ) {
-      return true;
-    }
-    from = at + 1;
-  }
-}
-
-/**
- * Which of `names` are mentioned in `text`. A mention of a longer known name
- * never doubles as a mention of a shorter name it contains: with symbols
- * `판정` and `판정기`, the text `판정기를 사용` mentions only `판정기` — the
- * tolerant non-ASCII boundary would otherwise also match `판정` and could
- * even manufacture cycles out of a symbol's own declaration header.
- */
-export function mentionedSymbols(text: string, names: readonly string[]): string[] {
-  return names.filter((name) => {
-    const shadowing = names
-      .filter((other) => other !== name && other.length > name.length && other.includes(name))
-      .sort((a, b) => b.length - a.length);
-    return mentionsSymbol(maskOccurrences(text, shadowing), name);
-  });
-}
-
-/** Blank out every boundary-tolerant occurrence of the given names. */
-function maskOccurrences(text: string, names: readonly string[]): string {
-  let masked = text;
-  for (const name of names) {
-    if (name.length === 0) continue;
-    let result = "";
-    let from = 0;
-    for (;;) {
-      const at = masked.indexOf(name, from);
-      if (at < 0) {
-        result += masked.slice(from);
-        break;
-      }
-      const before = at > 0 ? masked[at - 1]! : "";
-      const after = at + name.length < masked.length ? masked[at + name.length]! : "";
-      const bounded =
-        (before === "" || !isAsciiIdentifierPart(before)) &&
-        (after === "" || !isAsciiIdentifierPart(after));
-      result += masked.slice(from, at) + (bounded ? " ".repeat(name.length) : name);
-      from = at + name.length;
-    }
-    masked = result;
-  }
-  return masked;
-}
-
-/** Lift a preprocessor spec into the Realizer's symbol shape. */
-export function imagineSpecToSymbol(
-  spec: ImagineSpec,
-  source: string,
-  fileName: string,
+function imagineDeclarationToSymbol(
+  declaration: ChzImagineDeclaration,
+  analysis: ChzSourceFile,
 ): ChzImagineSymbol {
-  const before = source.slice(0, spec.start);
-  const lines = before.split(/\r?\n/);
+  const position =
+    analysis.typescript.sourceFile.getLineAndCharacterOfPosition(
+      declaration.span.start,
+    );
   return {
-    name: spec.name,
-    type: spec.type,
-    definition: spec.originalText,
-    file: resolve(fileName),
-    posLine: lines.length,
-    posCol: (lines.at(-1)?.length ?? 0) + 1,
+    name: declaration.name,
+    type: declaration.kind === "ImagineFunction" ? "function" : "class",
+    definition: analysis.source.slice(
+      declaration.span.start,
+      declaration.span.end,
+    ),
+    file: resolve(analysis.fileName),
+    posLine: position.line + 1,
+    posCol: position.character + 1,
     dependencies: [],
     circularDependencies: [],
   };
 }
 
+function imagineSymbolsById(
+  analysis: ChzSourceFile,
+): ReadonlyMap<number, string> {
+  const checker = analysis.typescript.checker;
+  const symbols = new Map<number, string>();
+  for (const declaration of analysis.imagineDeclarations) {
+    const name = declaration.declaration.name;
+    if (name === undefined) continue;
+    const symbol = unaliasSymbol(checker, checker.getSymbolAtLocation(name));
+    if (symbol !== undefined) symbols.set(symbol.id, declaration.name);
+  }
+  return symbols;
+}
+
+function requirementsProse(
+  declaration: ChzImagineDeclaration,
+): string {
+  return [
+    declaration.requirements?.value.text ?? "",
+    ...(declaration.kind === "ImagineClass"
+      ? declaration.members.map((member) =>
+          member.requirements?.value.text ?? ""
+        )
+      : []),
+  ].join("\n");
+}
+
 /**
- * Build the dependency graph and the SCC realize order for one source file.
- *
- * @throws {ChzCycleError} when a cycle exceeds `maxCycleSize`.
+ * Analyze the three estimated-edge sources without mixing their semantics.
+ * Signature and ensure identities come from Checker symbols; only prose uses
+ * the explicit natural-language matcher.
  */
-export function buildDependencyGraph(
-  specs: readonly ImagineSpec[],
-  source: string,
-  fileName: string,
-  options: BuildDependencyGraphOptions = {},
+export function collectEstimatedDependencySources(
+  analysis: ChzSourceFile,
+): ReadonlyMap<string, ChzEstimatedDependencySources> {
+  const imagineById = imagineSymbolsById(analysis);
+  const names = analysis.imagineDeclarations.map((declaration) =>
+    declaration.name
+  );
+  const result = new Map<string, ChzEstimatedDependencySources>();
+  for (const declaration of analysis.imagineDeclarations) {
+    const signature = new Set<string>();
+    for (
+      const reference of collectTypeSymbolReferences(
+        analysis,
+        declaration.declaration,
+        declaration.declaration,
+      )
+    ) {
+      const name = imagineById.get(reference.symbol.id);
+      if (name !== undefined) signature.add(name);
+    }
+
+    const ensure = new Set<string>();
+    for (const scope of declarationEnsureScopes(declaration)) {
+      for (
+        const reference of collectSymbolReferences(
+          analysis,
+          scope.ensure.conditionOrScenario,
+          scope.owner,
+        )
+      ) {
+        const name = imagineById.get(reference.symbol.id);
+        if (name !== undefined) ensure.add(name);
+      }
+    }
+
+    result.set(declaration.name, {
+      signature: names.filter((name) => signature.has(name)),
+      ensure: names.filter((name) => ensure.has(name)),
+      requirementsProse: mentionedSymbols(
+        requirementsProse(declaration),
+        names,
+      ),
+    });
+  }
+  return result;
+}
+
+const EDGE_SOURCE_ORDER: readonly ChzDependencyEdgeSource[] = [
+  "signature",
+  "ensure",
+  "requirements-prose",
+  "confirmed",
+];
+
+function buildAnalyzedDependencyGraph(
+  analysis: ChzSourceFile,
+  options: BuildDependencyGraphOptions,
 ): ChzDependencyGraph {
   const maxCycleSize = options.maxCycleSize ?? DEFAULT_MAX_CYCLE_SIZE;
-  const symbols = specs.map((spec) => imagineSpecToSymbol(spec, source, fileName));
-  const names = symbols.map((symbol) => symbol.name);
+  const symbols = analysis.imagineDeclarations.map((declaration) =>
+    imagineDeclarationToSymbol(declaration, analysis)
+  );
+  const estimated = collectEstimatedDependencySources(analysis);
+  const sourcesByDependent = new Map<
+    string,
+    Map<string, Set<ChzDependencyEdgeSource>>
+  >();
+  const add = (
+    dependent: string,
+    dependency: string,
+    source: ChzDependencyEdgeSource,
+  ): void => {
+    if (dependent === dependency) return;
+    const byDependency = sourcesByDependent.get(dependent) ??
+      new Map<string, Set<ChzDependencyEdgeSource>>();
+    const sources = byDependency.get(dependency) ??
+      new Set<ChzDependencyEdgeSource>();
+    sources.add(source);
+    byDependency.set(dependency, sources);
+    sourcesByDependent.set(dependent, byDependency);
+  };
+
   for (const symbol of symbols) {
-    const mentioned = new Set(mentionedSymbols(symbol.definition, names));
-    for (const confirmed of options.confirmedEdges?.get(symbol.name) ?? []) {
-      mentioned.add(confirmed);
+    const discovered = estimated.get(symbol.name);
+    for (const dependency of discovered?.signature ?? []) {
+      add(symbol.name, dependency, "signature");
     }
-    symbol.dependencies = symbols.filter(
-      (candidate) => candidate !== symbol && mentioned.has(candidate.name),
+    for (const dependency of discovered?.ensure ?? []) {
+      add(symbol.name, dependency, "ensure");
+    }
+    for (const dependency of discovered?.requirementsProse ?? []) {
+      add(symbol.name, dependency, "requirements-prose");
+    }
+    for (const dependency of options.confirmedEdges?.get(symbol.name) ?? []) {
+      add(symbol.name, dependency, "confirmed");
+    }
+  }
+
+  const knownNames = new Set(symbols.map((symbol) => symbol.name));
+  for (const symbol of symbols) {
+    const discovered = sourcesByDependent.get(symbol.name);
+    symbol.dependencies = symbols.filter((candidate) =>
+      candidate !== symbol &&
+      knownNames.has(candidate.name) &&
+      discovered?.has(candidate.name) === true
     );
   }
 
-  const sourceIndex = new Map(symbols.map((symbol, index) => [symbol, index]));
-  const groups: ChzRealizeGroup[] = tarjanComponents(symbols).map((members) => {
-    const ordered = [...members].sort((a, b) => sourceIndex.get(a)! - sourceIndex.get(b)!);
-    const circular = ordered.length > 1;
-    for (const member of ordered) {
-      member.circularDependencies = circular
-        ? ordered.filter((candidate) => candidate !== member)
-        : [];
-    }
-    return { symbols: ordered, circular };
-  });
+  const sourceIndex = new Map(
+    symbols.map((symbol, index) => [symbol, index]),
+  );
+  const groups: ChzRealizeGroup[] = tarjanComponents(symbols).map(
+    (members) => {
+      const ordered = [...members].sort(
+        (left, right) =>
+          sourceIndex.get(left)! - sourceIndex.get(right)!,
+      );
+      const circular = ordered.length > 1;
+      for (const member of ordered) {
+        member.circularDependencies = circular
+          ? ordered.filter((candidate) => candidate !== member)
+          : [];
+      }
+      return { symbols: ordered, circular };
+    },
+  );
 
   const warnings = groups
     .filter((group) => group.circular)
@@ -222,7 +299,9 @@ export function buildDependencyGraph(
         `shared human-owned interface to break it.`,
     );
 
-  const oversized = groups.find((group) => group.symbols.length > maxCycleSize);
+  const oversized = groups.find((group) =>
+    group.symbols.length > maxCycleSize
+  );
   if (oversized !== undefined) {
     throw new ChzCycleError(
       oversized.symbols.map((symbol) => symbol.name),
@@ -230,7 +309,39 @@ export function buildDependencyGraph(
     );
   }
 
-  return { symbols, groups, warnings };
+  const edges = symbols.flatMap((dependent) => {
+    const sources = sourcesByDependent.get(dependent.name);
+    return symbols.flatMap((dependency): ChzDependencyEdge[] => {
+      if (
+        dependency === dependent ||
+        sources?.has(dependency.name) !== true
+      ) {
+        return [];
+      }
+      const discoveredSources = sources.get(dependency.name)!;
+      return [{
+        dependent: dependent.name,
+        dependency: dependency.name,
+        sources: EDGE_SOURCE_ORDER.filter((source) =>
+          discoveredSources.has(source)
+        ),
+      }];
+    });
+  });
+
+  return { symbols, groups, warnings, edges };
+}
+
+/**
+ * Build the dependency graph and the SCC realize order for one source file.
+ *
+ * @throws {ChzCycleError} when a cycle exceeds `maxCycleSize`.
+ */
+export function buildDependencyGraph(
+  analysis: ChzSourceFile,
+  options: BuildDependencyGraphOptions = {},
+): ChzDependencyGraph {
+  return buildAnalyzedDependencyGraph(analysis, options);
 }
 
 /**
@@ -240,13 +351,13 @@ export function buildDependencyGraph(
  * which the engine and `--dry-run` use with the configured cap.
  */
 export function buildEstimatedRealizeOrder(
-  specs: ImagineSpec[],
-  source: string,
-  fileName: string,
+  analysis: ChzSourceFile,
 ): ChzImagineSymbol[] {
-  return buildDependencyGraph(specs, source, fileName, {
-    maxCycleSize: Number.POSITIVE_INFINITY,
-  }).groups.flatMap((group) => group.symbols);
+  const graph = buildDependencyGraph(
+    analysis,
+    { maxCycleSize: Number.POSITIVE_INFINITY },
+  );
+  return graph.groups.flatMap((group) => group.symbols);
 }
 
 /**
@@ -307,13 +418,9 @@ function tarjanComponents(symbols: readonly ChzImagineSymbol[]): ChzImagineSymbo
  * layout every cross-symbol use must be imported from a sibling module
  * (`./<name>.ts`), so import specifiers are the complete usage record.
  *
- * The scan is lexical but comment/string/template/regex aware, mirroring the
- * preprocessor: realized files have already passed the strict type check, so
- * their syntax is well-formed. Handles static `import`/`export ... from`,
- * side-effect `import "…"`, dynamic `import("…")`, and `require("…")`.
- * Regex literals are recognized with the usual lexical heuristic (a `/` after
- * an identifier, number, `)`, `]`, or literal is division) so a quote inside
- * a character class can never desynchronize the scan.
+ * Realized files have already passed the strict type check. The shared
+ * compiler traversal handles static imports, re-exports, dynamic imports,
+ * import-equals, and unshadowed CommonJS require calls.
  */
 export function extractConfirmedDependencies(
   implementationSource: string,
@@ -347,149 +454,7 @@ function specifierToSymbolName(specifier: string): string | null {
   return name;
 }
 
-/** Keywords after which a `/` starts a regex literal rather than division. */
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  "await",
-  "case",
-  "delete",
-  "do",
-  "else",
-  "in",
-  "instanceof",
-  "new",
-  "of",
-  "return",
-  "throw",
-  "typeof",
-  "void",
-  "yield",
-]);
-
-/**
- * `pos` is at a `/` believed to open a regex literal. Returns the index just
- * past the literal (including flags), or -1 when no closing `/` appears on
- * the same line — the caller then treats the `/` as a division operator.
- */
-function scanRegexLiteral(source: string, pos: number): number {
-  let i = pos + 1;
-  let inClass = false;
-  for (; i < source.length; i++) {
-    const ch = source[i]!;
-    if (ch === "\\") {
-      i++;
-      continue;
-    }
-    if (ch === "\n") return -1;
-    if (ch === "[") inClass = true;
-    else if (ch === "]") inClass = false;
-    else if (ch === "/" && !inClass) {
-      i++;
-      while (i < source.length && isAsciiIdentifierPart(source[i]!)) i++;
-      return i;
-    }
-  }
-  return -1;
-}
-
 /** Every string literal used as a module specifier, in source order. */
 export function extractModuleSpecifiers(source: string): string[] {
-  const specifiers: string[] = [];
-  let i = 0;
-  /** Last significant token: an identifier word, or a single character. */
-  let lastWord = "";
-  let lastChar = "";
-  /** The word immediately before the most recent `(` (for import()/require()). */
-  let callee = "";
-
-  const isWordStart = (ch: string): boolean =>
-    isAsciiIdentifierPart(ch) && !(ch >= "0" && ch <= "9");
-
-  while (i < source.length) {
-    const ch = source[i]!;
-
-    if (ch === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i += 2;
-      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
-      i = Math.min(source.length, i + 2);
-      continue;
-    }
-    if (ch === "/") {
-      const afterExpression =
-        (lastWord !== "" && !REGEX_PRECEDING_KEYWORDS.has(lastWord)) ||
-        lastChar === ")" ||
-        lastChar === "]" ||
-        lastChar === "'" ||
-        lastChar === '"' ||
-        lastChar === "`" ||
-        (lastChar >= "0" && lastChar <= "9");
-      const regexEnd = afterExpression ? -1 : scanRegexLiteral(source, i);
-      if (regexEnd >= 0) {
-        i = regexEnd;
-        // A regex literal ends an expression, exactly like a closing paren.
-        lastWord = "";
-        lastChar = ")";
-        continue;
-      }
-      lastWord = "";
-      lastChar = "/";
-      i++;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const start = i + 1;
-      i++;
-      while (i < source.length && source[i] !== ch) {
-        if (source[i] === "\\") i++;
-        i++;
-      }
-      const value = source.slice(start, i);
-      i = Math.min(source.length, i + 1);
-      const isFromClause = lastWord !== "" && lastChar === "" && lastWord === "from";
-      const isBareImport = lastWord !== "" && lastChar === "" && lastWord === "import";
-      const isCallArgument = lastChar === "(" && (callee === "import" || callee === "require");
-      if (isFromClause || isBareImport || isCallArgument) specifiers.push(value);
-      lastWord = "";
-      lastChar = ch;
-      continue;
-    }
-    if (ch === "`") {
-      // Template literals never carry a static import specifier; skip whole.
-      i++;
-      while (i < source.length && source[i] !== "`") {
-        if (source[i] === "\\") i++;
-        i++;
-      }
-      i = Math.min(source.length, i + 1);
-      lastWord = "";
-      lastChar = "`";
-      continue;
-    }
-    if (isWordStart(ch)) {
-      let end = i + 1;
-      while (end < source.length && isAsciiIdentifierPart(source[end]!)) end++;
-      // A member access like `foo.import` is not the import keyword.
-      lastWord = lastChar === "." ? "" : source.slice(i, end);
-      lastChar = "";
-      i = end;
-      continue;
-    }
-    if (ch === "(") {
-      callee = lastWord;
-      lastWord = "";
-      lastChar = "(";
-      i++;
-      continue;
-    }
-    if (ch !== " " && ch !== "\t" && ch !== "\n" && ch !== "\r") {
-      lastWord = "";
-      lastChar = ch;
-    }
-    i++;
-  }
-
-  return specifiers;
+  return collectModuleSpecifiersFromSource(source);
 }

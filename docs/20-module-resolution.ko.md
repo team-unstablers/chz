@@ -136,7 +136,68 @@ imagine function 보스전_시작(game: ShootingGame): void {
   처리합니다. 자세한 규칙과 해결 방법은 62 문서를 참조하십시오.
 - 사람 코드가 realization 디렉토리로 복사될 때(60 문서 참조), 그 안의
   `./example` 같은 상대 경로는 복사된 위치에서도 같은 파일을 가리키도록
-  결정적으로 다시 계산됩니다.
+  결정적으로 다시 계산됩니다. 바로 아래에서 설명합니다.
+
+## 상대 경로는 옮겨진 자리에 맞춰 다시 계산됩니다
+
+realize는 사람이 쓴 코드를 그대로 두지 않고 realization 디렉토리 안으로
+복사합니다(60 문서 참조). 이때 문제가 하나 생깁니다. 원래 코드가 이렇게
+생겼다고 해 봅시다.
+
+```typescript chz
+/// battle.chz.ts (발췌)
+import { 크리티컬_판정, type CombatStats } from "./stats";
+```
+
+`battle.chz.ts` 옆에는 `stats.ts` shim이 있으니 이 경로는 맞습니다. 그런데 이
+줄이 `chz/realization/battle/implementations/__prologue__.ts`로 복사되면
+어떻게 될까요? `./stats`는 이제 **realization 디렉토리 안의 `stats`**를
+가리키게 됩니다. 그런 파일은 없습니다.
+
+그래서 치즈는 복사할 때 상대 경로를 **옮겨진 위치 기준으로 다시 씁니다.**
+위 줄은 복사본에서 이렇게 바뀝니다.
+
+```typescript
+/// chz/realization/battle/implementations/__prologue__.ts (발췌)
+import { 크리티컬_판정, type CombatStats } from "../../../stats";
+```
+
+가리키는 파일은 원본과 정확히 같습니다. 다시 쓰는 것은 **경로뿐이고, 무엇을
+가져오는지는 건드리지 않습니다.**
+
+### 무엇을 다시 쓰고, 무엇을 그대로 두나요?
+
+다시 쓰는 것은 **상대 경로(`./`로 시작하거나 `../`로 시작하는 것)뿐**입니다.
+
+```typescript
+import { readFileSync } from "node:fs";     // 그대로
+import { z } from "zod";                     // 그대로
+import { config } from "@app/settings";      // 그대로 (경로 별칭)
+import { 원점 } from "./geometry";           // 다시 씁니다
+import { 상수 } from "../shared/const";      // 다시 씁니다
+```
+
+패키지 이름(`zod`, `node:fs`)이나 tsconfig에 설정한 경로 별칭(`@app/...`)은
+디렉토리 위치와 무관하게 해석되므로 손댈 이유가 없습니다.
+
+경로가 등장할 수 있는 자리는 여러 곳이고, 전부 같은 규칙을 따릅니다 —
+`import`, `import type`, 부수 효과만을 위한 `import "..."`,
+`export ... from`, 정적 문자열을 받는 `import()`, 그리고
+`import x = require(...)`.
+
+### 다시 쓸 수 없는 경우
+
+경로가 **실행해 봐야 알 수 있는 값**이면 다시 쓸 수 없습니다.
+
+```typescript chz
+const 이름 = 조건 ? "./a" : "./b";
+const 모듈 = await import(이름);
+//                        ^ CHZ3001: 동적 import의 경로는 고정된 문자열이어야 합니다
+```
+
+이런 코드를 조용히 넘기면, 복사된 뒤에 엉뚱한 곳을 가리키는 채로 실행되다가
+런타임에야 실패합니다. 그래서 치즈는 복사하기 전에 오류로 알려 드립니다.
+고치는 방법은 경로를 고정 문자열로 적는 것입니다.
 
 ## 빌드가 없다면, 검사는 누가 하나요?
 

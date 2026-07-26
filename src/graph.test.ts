@@ -6,13 +6,34 @@ import {
   buildEstimatedRealizeOrder,
   extractConfirmedDependencies,
   extractModuleSpecifiers,
+} from "./graph.ts";
+import { analyzeChzSource } from "./compiler/index.ts";
+import {
   mentionedSymbols,
   mentionsSymbol,
-} from "./graph.ts";
-import { extractImagineSpecs } from "./preprocessor.ts";
+} from "./requirements-mentions.ts";
 
-function specsOf(source: string) {
-  return extractImagineSpecs(source, "graph-test.chz.ts");
+function graphOf(
+  source: string,
+  options?: Parameters<typeof buildDependencyGraph>[1],
+) {
+  const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildDependencyGraph(analysis, options);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function orderOf(source: string) {
+  const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return buildEstimatedRealizeOrder(analysis);
+  } finally {
+    analysis.dispose();
+  }
 }
 
 function imagineFunction(name: string, requirements: string): string {
@@ -34,6 +55,7 @@ describe("mentionsSymbol", () => {
 
   it("matches Korean names even with an attached particle", () => {
     expect(mentionsSymbol("크리티컬_판정을 사용하여 판정하십시오.", "크리티컬_판정")).toBe(true);
+    expect(mentionsSymbol("크리티컬_판정이 결과를 바꿉니다.", "크리티컬_판정")).toBe(true);
     expect(mentionsSymbol("`크리티컬_판정`을 사용하십시오.", "크리티컬_판정")).toBe(true);
   });
 
@@ -56,13 +78,99 @@ describe("mentionedSymbols", () => {
 });
 
 describe("buildDependencyGraph", () => {
+  it("records signature, ensure, and requirements-prose edges separately", () => {
+    const source = [
+      "imagine class DependencyModel {",
+      "  requirements(`A dependency model.`);",
+      "}",
+      "imagine function bySignature(value: DependencyModel): void {",
+      "  requirements(`Accept a model value.`);",
+      "}",
+      "imagine function byEnsure(): boolean {",
+      "  ensure(new DependencyModel() instanceof DependencyModel);",
+      "}",
+      "imagine function byProse(): void {",
+      "  requirements(`DependencyModel을 사용합니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const graph = buildDependencyGraph(analysis);
+
+      expect(graph.edges).toEqual([
+        {
+          dependent: "bySignature",
+          dependency: "DependencyModel",
+          sources: ["signature"],
+        },
+        {
+          dependent: "byEnsure",
+          dependency: "DependencyModel",
+          sources: ["ensure"],
+        },
+        {
+          dependent: "byProse",
+          dependency: "DependencyModel",
+          sources: ["requirements-prose"],
+        },
+      ]);
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("uses Checker identity instead of aliases, shadowing, or property text", () => {
+    const source = [
+      "export imagine function dependency(): number {",
+      "  requirements(`Return one.`);",
+      "}",
+      "export imagine function noFalseEdge(): boolean {",
+      "  ensure('local names stay local', () => {",
+      "    const dependency = 1;",
+      "    const holder = { dependency: true };",
+      "    const alias = holder.dependency;",
+      "    assert(alias && dependency === 1);",
+      "  });",
+      "}",
+      "export imagine function actualEdge(): boolean {",
+      "  ensure(dependency() === 1);",
+      "}",
+      "",
+    ].join("\n");
+    const analysis = analyzeChzSource(source, "graph-test.chz.ts");
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const graph = buildDependencyGraph(analysis);
+      const falseEdge = graph.symbols.find((symbol) =>
+        symbol.name === "noFalseEdge"
+      )!;
+      const actualEdge = graph.symbols.find((symbol) =>
+        symbol.name === "actualEdge"
+      )!;
+
+      expect(falseEdge.dependencies).toEqual([]);
+      expect(actualEdge.dependencies.map((dependency) => dependency.name))
+        .toEqual(["dependency"]);
+      expect(graph.edges.find((edge) => edge.dependent === "actualEdge"))
+        .toEqual({
+          dependent: "actualEdge",
+          dependency: "dependency",
+          sources: ["ensure"],
+        });
+    } finally {
+      analysis.dispose();
+    }
+  });
+
   it("orders groups dependencies-first from requirements mentions", () => {
     const source = [
       imagineFunction("전투_시뮬레이션", "데미지_계산을 반복 호출합니다."),
       imagineFunction("데미지_계산", "크리티컬_판정을 사용합니다."),
       imagineFunction("크리티컬_판정", "운에 따라 판정합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     expect(graph.groups.map((group) => group.symbols.map((symbol) => symbol.name))).toEqual([
       ["크리티컬_판정"],
@@ -80,7 +188,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("slug", "한 단어를 정규화합니다."),
       imagineFunction("slugify", "문자열 전체를 슬러그로 만듭니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     for (const symbol of graph.symbols) {
       expect(symbol.dependencies).toEqual([]);
@@ -95,7 +203,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("판정", "판정기를 사용해 결과를 집계합니다."),
       imagineFunction("판정기", "단일 입력을 판별합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     const 판정 = graph.symbols.find((symbol) => symbol.name === "판정")!;
     const 판정기 = graph.symbols.find((symbol) => symbol.name === "판정기")!;
@@ -110,7 +218,7 @@ describe("buildDependencyGraph", () => {
       imagineFunction("짝수_판정", "0이면 참, 아니면 홀수_판정(n - 1)을 반환합니다."),
       imagineFunction("홀수_판정", "0이면 거짓, 아니면 짝수_판정(n - 1)을 반환합니다."),
     ].join("\n");
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts");
+    const graph = graphOf(source);
 
     expect(graph.groups).toHaveLength(1);
     const [group] = graph.groups;
@@ -132,13 +240,13 @@ describe("buildDependencyGraph", () => {
       )
       .join("\n");
 
-    expect(() => buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts")).toThrow(
+    expect(() => graphOf(source)).toThrow(
       ChzCycleError,
     );
-    expect(() => buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts")).toThrow(
+    expect(() => graphOf(source)).toThrow(
       "human-owned interface",
     );
-    const graph = buildDependencyGraph(specsOf(source), source, "graph-test.chz.ts", {
+    const graph = graphOf(source, {
       maxCycleSize: 4,
     });
     expect(graph.groups).toHaveLength(1);
@@ -153,7 +261,7 @@ describe("buildDependencyGraph", () => {
       )
       .join("\n");
 
-    const order = buildEstimatedRealizeOrder(specsOf(source), source, "graph-test.chz.ts");
+    const order = orderOf(source);
     expect(order.map((symbol) => symbol.name)).toEqual(names);
   });
 });
@@ -165,6 +273,7 @@ describe("extractModuleSpecifiers", () => {
       'import type { Title } from "./__prologue__.ts";',
       'import "./side-effect.ts";',
       'export { helper } from "../implementations/helper.ts";',
+      'import legacyEquals = require("./import-equals.ts");',
       'const lazy = await import("./lazy.ts");',
       'const legacy = require("./legacy.ts");',
       "",
@@ -175,6 +284,7 @@ describe("extractModuleSpecifiers", () => {
       "./__prologue__.ts",
       "./side-effect.ts",
       "../implementations/helper.ts",
+      "./import-equals.ts",
       "./lazy.ts",
       "./legacy.ts",
     ]);
@@ -204,6 +314,19 @@ describe("extractModuleSpecifiers", () => {
     ].join("\n");
 
     expect(extractModuleSpecifiers(source)).toEqual([]);
+  });
+
+  it("ignores require calls whose identifier is shadowed", () => {
+    const source = [
+      'const real = require("./real.ts");',
+      "function local(require: (name: string) => unknown): unknown {",
+      '  return require("./shadowed.ts");',
+      "}",
+      'const member = loader.require("./member.ts");',
+      "",
+    ].join("\n");
+
+    expect(extractModuleSpecifiers(source)).toEqual(["./real.ts"]);
   });
 });
 

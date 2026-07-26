@@ -1,0 +1,2 @@
+// abstract is forbidden on an imagine declaration.
+abstract imagine class C {}

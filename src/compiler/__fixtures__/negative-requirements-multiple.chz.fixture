@@ -1,0 +1,4 @@
+// requirements accepts exactly one argument.
+imagine function f(): void {
+  requirements("left", "right");
+}

@@ -1,0 +1,15 @@
+// Call, access, generic-call, optional-chain, element-access, and tagged-template continuations cancel commit.
+declare const imagine: {
+  <T>(value?: unknown): unknown;
+  preview(): void;
+  readonly [key: number]: unknown;
+};
+declare const seed: unknown;
+interface Preview {}
+
+imagine();
+imagine.preview();
+imagine?.();
+imagine[0];
+imagine<Preview>(seed);
+imagine`preview`;

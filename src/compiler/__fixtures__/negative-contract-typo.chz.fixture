@@ -1,0 +1,4 @@
+// Misspelled contract calls are not silently discarded.
+imagine function f(): void {
+  requirments(`typo`);
+}

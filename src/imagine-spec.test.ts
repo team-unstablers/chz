@@ -2,21 +2,49 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import { analyzeChzSource } from "./compiler/index.ts";
 import {
-  ChzSyntaxError,
-  extractImagineSpecs,
-  preprocess,
+  imagineSpecsFromChzSource,
   realizationImportSpecifier,
-  transformToPlainTs,
+  stripAnalyzedSource,
 } from "./preprocessor.ts";
 
-describe("extractImagineSpecs", () => {
+function specsOf(source: string, fileName: string) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return imagineSpecsFromChzSource(analysis);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function diagnosticsOf(source: string, fileName: string) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return analysis.diagnostics;
+  } finally {
+    analysis.dispose();
+  }
+}
+
+function plainTypeScriptOf(source: string, fileName: string): string {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return stripAnalyzedSource(analysis);
+  } finally {
+    analysis.dispose();
+  }
+}
+
+describe("ImagineSpec compatibility adapter", () => {
   it("parses the Gomoku class example as one class realization", () => {
     const source = readFileSync(
       new URL("../examples/simple-cases/gomoku.chz.ts", import.meta.url),
       "utf8",
     );
-    const specs = extractImagineSpecs(source, "examples/simple-cases/gomoku.chz.ts");
+    const specs = specsOf(source, "examples/simple-cases/gomoku.chz.ts");
 
     expect(specs).toHaveLength(1);
     expect(specs[0]).toMatchObject({ type: "class", name: "GomokuGame" });
@@ -24,7 +52,7 @@ describe("extractImagineSpecs", () => {
       ["placeStone", 1],
       ["stoneAt", 1],
       ["winner", 3],
-      ["chooseCpuMove", 3],
+      ["chooseCpuMove", 6],
       ["start", 0],
       ["cleanup", 0],
     ]);
@@ -41,7 +69,7 @@ describe("extractImagineSpecs", () => {
         new URL(`../examples/simple-cases/${name}.chz.ts`, import.meta.url),
         "utf8",
       );
-      expect(() => extractImagineSpecs(source, `examples/simple-cases/${name}.chz.ts`)).not.toThrow();
+      expect(() => specsOf(source, `examples/simple-cases/${name}.chz.ts`)).not.toThrow();
     }
   });
 
@@ -56,7 +84,7 @@ describe("extractImagineSpecs", () => {
       "}",
     ].join("\n");
 
-    const specs = extractImagineSpecs(source, "collide.chz.ts");
+    const specs = specsOf(source, "collide.chz.ts");
     expect(specs).toHaveLength(1);
 
     const spec = specs[0]!;
@@ -85,7 +113,7 @@ describe("extractImagineSpecs", () => {
 
   it("② handles an imagine function without requirements", () => {
     const source = "imagine function ping(): void {\n  ensure(ping() === undefined);\n}\n";
-    const specs = extractImagineSpecs(source, "ping.chz.ts");
+    const specs = specsOf(source, "ping.chz.ts");
     expect(specs).toHaveLength(1);
     expect(specs[0]!.requirements).toBeNull();
     expect(specs[0]!.returnType).toBe("void");
@@ -95,10 +123,10 @@ describe("extractImagineSpecs", () => {
 
   it("③ returns no specs for a file without imagine blocks", () => {
     const source = "const a = 1;\nfunction greet(n: string) { return `hi ${n}`; }\nexport { greet };\n";
-    const specs = extractImagineSpecs(source, "plain.chz.ts");
+    const specs = specsOf(source, "plain.chz.ts");
     expect(specs).toEqual([]);
     // And transform is a byte-for-byte identity here.
-    expect(transformToPlainTs(source, "plain.chz.ts", specs)).toBe(source);
+    expect(plainTypeScriptOf(source, "plain.chz.ts")).toBe(source);
   });
 
   it("④ ignores fake imagine blocks inside comments, strings and templates", () => {
@@ -109,7 +137,7 @@ describe("extractImagineSpecs", () => {
       "const t = `imagine function inTemplate(): void { ${ensure(`nope`)} }`;",
       "const u = `nested ${ `imagine function deeper() {}` }`;",
     ].join("\n");
-    const specs = extractImagineSpecs(source, "fakes.chz.ts");
+    const specs = specsOf(source, "fakes.chz.ts");
     expect(specs).toEqual([]);
   });
 
@@ -124,7 +152,7 @@ describe("extractImagineSpecs", () => {
       "  });",
       "}",
     ].join("\n");
-    const specs = extractImagineSpecs(source, "classify.chz.ts");
+    const specs = specsOf(source, "classify.chz.ts");
     expect(specs).toHaveLength(1);
     const spec = specs[0]!;
     expect(spec.ensures).toHaveLength(1);
@@ -132,6 +160,41 @@ describe("extractImagineSpecs", () => {
     // The whole arrow function, nested braces and all, is captured as one arg.
     expect(spec.ensures[0]!.source).toContain("{ k: { deep: [1, 2, 3] } }");
     expect(spec.requirements).toBeNull();
+  });
+
+  it("classifies static templates and function-expression scenarios by AST shape", () => {
+    const source = [
+      "imagine function inspect(value: number): boolean {",
+      "  ensure(inspect(1) === true, `assertion message`);",
+      "  ensure(`scenario message`, function () {",
+      "    const nested = { value: inspect(2) };",
+      "    assert(nested.value === true);",
+      "  });",
+      "}",
+    ].join("\n");
+    const [spec] = specsOf(source, "ensure-shape.chz.ts");
+
+    expect(spec!.ensures).toEqual([
+      {
+        kind: "assertion",
+        source: "inspect(1) === true",
+        messageSource: "`assertion message`",
+        line: 2,
+        column: 3,
+      },
+      {
+        kind: "scenario",
+        source: [
+          "function () {",
+          "    const nested = { value: inspect(2) };",
+          "    assert(nested.value === true);",
+          "  }",
+        ].join("\n"),
+        messageSource: "`scenario message`",
+        line: 3,
+        column: 3,
+      },
+    ]);
   });
 
   it("finds multiple top-level imagine functions while preserving order", () => {
@@ -142,13 +205,13 @@ describe("extractImagineSpecs", () => {
       "imagine function second(a: string): string { ensure(second('x') === 'x'); }",
       "const after = 3;",
     ].join("\n");
-    const specs = extractImagineSpecs(source, "multi.chz.ts");
+    const specs = specsOf(source, "multi.chz.ts");
     expect(specs.map((s) => s.name)).toEqual(["first", "second"]);
   });
 
   it("does not mistake a `foo.imagine` member or an `imagine` variable for a declaration", () => {
     const source = "const imagine = 1;\nobj.imagine.function;\nlet x = imagine + 2;\n";
-    expect(extractImagineSpecs(source, "ident.chz.ts")).toEqual([]);
+    expect(specsOf(source, "ident.chz.ts")).toEqual([]);
   });
 
   it("extracts an imagine class and its imagined async methods and properties", () => {
@@ -164,13 +227,13 @@ describe("extractImagineSpecs", () => {
       "      assert(session !== undefined);",
       "    });",
       "  }",
-      "  imagine async cleanup() {",
+      "  imagine async cleanup(): Promise<void> {",
       "    requirements(`리소스를 정리합니다.`);",
       "  }",
       "}",
     ].join("\n");
 
-    const [spec] = extractImagineSpecs(source, "game.chz.ts");
+    const [spec] = specsOf(source, "game.chz.ts");
     expect(spec).toMatchObject({
       type: "class",
       name: "GameSession",
@@ -193,7 +256,13 @@ describe("extractImagineSpecs", () => {
         parameters: "name: string",
         returnType: "Promise<GameSession>",
       },
-      { type: "method", name: "cleanup", modifiers: ["async"], parameters: "", returnType: "" },
+      {
+        type: "method",
+        name: "cleanup",
+        modifiers: ["async"],
+        parameters: "",
+        returnType: "Promise<void>",
+      },
     ]);
     expect(spec!.members[0]!.requirements).toBe("현재 점수입니다.");
     expect(spec!.members[1]!.ensures).toMatchObject([
@@ -204,9 +273,46 @@ describe("extractImagineSpecs", () => {
     ]);
     expect(spec!.members[2]!.requirements).toBe("리소스를 정리합니다.");
   });
+
+  it("keeps the docs/00 human ShootingGame member in the prompt without collecting it as imagined work", () => {
+    const intro = readFileSync(
+      new URL("../docs/00-chz-intro.ko.md", import.meta.url),
+      "utf8",
+    );
+    const memberStart = intro.indexOf(
+      "  static collisionDetection2D(",
+    );
+    const memberEndMarker =
+      "\n  \n  // **요구하기**";
+    const memberEnd = intro.indexOf(memberEndMarker, memberStart);
+    expect(memberStart).toBeGreaterThanOrEqual(0);
+    expect(memberEnd).toBeGreaterThan(memberStart);
+    const humanMember = intro.slice(memberStart, memberEnd);
+    const source = [
+      "imagine class ShootingGame {",
+      "  requirements(`간단한 슈팅 게임입니다.`);",
+      "",
+      humanMember,
+      "",
+      "  imagine startGame(): void {",
+      "    requirements(`게임을 시작합니다.`);",
+      "  }",
+      "}",
+    ].join("\n");
+
+    const [spec] = specsOf(source, "shooting-game.chz.ts");
+
+    expect(spec!.originalText).toContain(humanMember);
+    expect(spec!.members.map((member) => member.name)).toEqual([
+      "startGame",
+    ]);
+    expect(spec!.members.every(
+      (member) => member.name !== "collisionDetection2D",
+    )).toBe(true);
+  });
 });
 
-describe("transformToPlainTs", () => {
+describe("diagnostic-free final emit", () => {
   it("⑥ strips imagine blocks, inserts one import, and preserves the rest byte-for-byte", () => {
     const source = [
       "const header = 1;",
@@ -222,7 +328,7 @@ describe("transformToPlainTs", () => {
       "",
     ].join("\n");
 
-    const output = transformToPlainTs(source, "example.chz.ts");
+    const output = plainTypeScriptOf(source, "example.chz.ts");
 
     // A single consolidated import at the very top.
     expect(output.startsWith(
@@ -247,13 +353,20 @@ describe("transformToPlainTs", () => {
     );
   });
 
-  it("preprocess() returns both the specs and the transformed code", () => {
+  it("builds compatibility specs and transformed code from one analysis", () => {
     const source = "imagine function f(): void { requirements(`r`); }\nconst tail = 0;\n";
-    const { specs, code } = preprocess(source, "f.chz.ts");
-    expect(specs).toHaveLength(1);
-    expect(code).toContain('import { f } from "./chz/realization/f/implementation.ts";');
-    expect(code).toContain("const tail = 0;");
-    expect(code).not.toContain("imagine");
+    const analysis = analyzeChzSource(source, "f.chz.ts");
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const specs = imagineSpecsFromChzSource(analysis);
+      const code = stripAnalyzedSource(analysis);
+      expect(specs).toHaveLength(1);
+      expect(code).toContain('import { f } from "./chz/realization/f/implementation.ts";');
+      expect(code).toContain("const tail = 0;");
+      expect(code).not.toContain("imagine");
+    } finally {
+      analysis.dispose();
+    }
   });
 
   it("replaces an imagine class with a realization import", () => {
@@ -266,7 +379,7 @@ describe("transformToPlainTs", () => {
       "",
     ].join("\n");
 
-    const output = transformToPlainTs(source, "counter.chz.ts");
+    const output = plainTypeScriptOf(source, "counter.chz.ts");
     expect(output).toContain(
       'import { Counter } from "./chz/realization/counter/implementation.ts";',
     );
@@ -275,31 +388,33 @@ describe("transformToPlainTs", () => {
   });
 });
 
-describe("error handling", () => {
-  it("⑦ throws a ChzSyntaxError with file/line info for a second requirements()", () => {
+describe("shared compiler diagnostics", () => {
+  it("⑦ reports file/line info for a second requirements()", () => {
     const source = [
       "imagine function bad(): void {",
       "  requirements(`first`);",
       "  requirements(`second`);",
       "}",
     ].join("\n");
-    let caught: unknown;
-    try {
-      extractImagineSpecs(source, "bad.chz.ts");
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(ChzSyntaxError);
-    const err = caught as ChzSyntaxError;
-    expect(err.fileName).toBe("bad.chz.ts");
-    expect(err.line).toBe(3);
-    expect(err.message).toContain("bad.chz.ts:3:");
-    expect(err.message).toContain("requirements() may appear at most once");
+    const diagnostics = diagnosticsOf(source, "bad.chz.ts");
+
+    expect(diagnostics).toMatchObject([
+      {
+        code: "CHZ2002",
+        file: "bad.chz.ts",
+        line: 3,
+      },
+    ]);
+    expect(diagnostics[0]?.message).toContain(
+      "requirements() may appear at most once",
+    );
   });
 
-  it("throws for an unterminated imagine block", () => {
+  it("reports an unterminated imagine block", () => {
     const source = "imagine function oops(): void {\n  requirements(`x`);\n";
-    expect(() => extractImagineSpecs(source, "oops.chz.ts")).toThrow(ChzSyntaxError);
+    expect(diagnosticsOf(source, "oops.chz.ts")).toMatchObject([
+      { code: "CHZ1007" },
+    ]);
   });
 
   it("rejects legacy predicate and natural-language ensures", () => {
@@ -307,10 +422,22 @@ describe("error handling", () => {
       "imagine function old(): boolean { ensure((args, retval) => retval === true); }\n";
     const natural = "imagine function old(): boolean { ensure(`항상 참이어야 합니다.`); }\n";
 
-    expect(() => extractImagineSpecs(predicate, "predicate.chz.ts"))
-      .toThrow(/predicate ensure.*no longer supported/);
-    expect(() => extractImagineSpecs(natural, "natural.chz.ts"))
-      .toThrow(/natural-language ensure.*no longer supported/);
+    expect(diagnosticsOf(predicate, "predicate.chz.ts")).toMatchObject([
+      {
+        code: "CHZ2005",
+        message: expect.stringMatching(
+          /predicate ensure.*no longer supported/,
+        ),
+      },
+    ]);
+    expect(diagnosticsOf(natural, "natural.chz.ts")).toMatchObject([
+      {
+        code: "CHZ2004",
+        message: expect.stringMatching(
+          /natural-language ensure.*no longer supported/,
+        ),
+      },
+    ]);
   });
 
   it("rejects malformed executable ensure signatures", () => {
@@ -319,10 +446,18 @@ describe("error handling", () => {
     const missingScenario =
       "imagine function bad(): boolean { ensure('message', bad()); }\n";
 
-    expect(() => extractImagineSpecs(dynamicMessage, "dynamic.chz.ts"))
-      .toThrow(/static string/);
-    expect(() => extractImagineSpecs(missingScenario, "scenario.chz.ts"))
-      .toThrow(/scenario ensure/);
+    expect(diagnosticsOf(dynamicMessage, "dynamic.chz.ts")).toMatchObject([
+      {
+        code: "CHZ2008",
+        message: expect.stringMatching(/static string/),
+      },
+    ]);
+    expect(diagnosticsOf(missingScenario, "scenario.chz.ts")).toMatchObject([
+      {
+        code: "CHZ2006",
+        message: expect.stringMatching(/scenario ensure/),
+      },
+    ]);
   });
 
   it("keeps imagine resource explicitly deferred at top level and inside classes", () => {
@@ -332,7 +467,17 @@ describe("error handling", () => {
       "  imagine resource sprite: ImageAsset { requirements(`sprite`); }",
       "}",
     ].join("\n");
-    expect(() => extractImagineSpecs(topLevel, "sprite.chz.ts")).toThrow(/intentionally deferred/);
-    expect(() => extractImagineSpecs(member, "game.chz.ts")).toThrow(/intentionally deferred/);
+    expect(diagnosticsOf(topLevel, "sprite.chz.ts")).toMatchObject([
+      {
+        code: "CHZ1008",
+        message: expect.stringMatching(/reserved but not supported yet/),
+      },
+    ]);
+    expect(diagnosticsOf(member, "game.chz.ts")).toMatchObject([
+      {
+        code: "CHZ1008",
+        message: expect.stringMatching(/reserved but not supported yet/),
+      },
+    ]);
   });
 });

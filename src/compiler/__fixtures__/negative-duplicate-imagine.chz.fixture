@@ -1,0 +1,2 @@
+// A committed declaration never falls back after a second imagine token.
+imagine imagine imagine function x(): void {}

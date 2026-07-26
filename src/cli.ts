@@ -6,7 +6,17 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
-import { ChzSyntaxError, extractImagineSpecs, type ImagineSpec } from "./preprocessor.ts";
+import {
+  analyzeChzSources,
+  renderChzDiagnostics,
+  type ChzAnalysisBatch,
+  type ChzSourceInput,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
+import {
+  imagineSpecsFromChzSource,
+  type ImagineSpec,
+} from "./preprocessor.ts";
 import {
   buildDependencyGraph,
   realize,
@@ -137,8 +147,13 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
   if (parsed.file !== undefined) {
     const sourceFile = resolve(parsed.file);
     let configured: ConfiguredProject | undefined;
-    return realizeSourceFile(sourceFile, parsed.file, parsed, io, deps, async () =>
-      (configured ??= await resolveConfiguration(sourceFile, parsed, deps)),
+    return realizeSourceFiles(
+      [{ sourceFile, displayName: parsed.file }],
+      parsed,
+      io,
+      deps,
+      async () =>
+        (configured ??= await resolveConfiguration(sourceFile, parsed, deps)),
     );
   }
 
@@ -178,51 +193,112 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
     return 1;
   }
   if (configured.path !== undefined) io.err(`config: ${configured.path}`);
-  let exitCode = 0;
-  for (const file of files) {
-    const displayName = relative(process.cwd(), file) || file;
-    io.err(`==> ${displayName}`);
-    const code = await realizeSourceFile(
-      file,
-      displayName,
-      parsed,
-      io,
-      deps,
-      async () => configured,
-      false,
-    );
-    exitCode = Math.max(exitCode, code);
-  }
-  return exitCode;
+  return realizeSourceFiles(
+    files.map((file) => ({
+      sourceFile: file,
+      displayName: relative(process.cwd(), file) || file,
+    })),
+    parsed,
+    io,
+    deps,
+    async () => configured,
+    false,
+    true,
+  );
 };
 
-async function realizeSourceFile(
-  sourceFile: string,
-  displayName: string,
+interface RealizeSourceRequest {
+  sourceFile: string;
+  displayName: string;
+}
+
+async function realizeSourceFiles(
+  requests: readonly RealizeSourceRequest[],
   parsed: RealizeArguments,
   io: CliIO,
   deps: CliDeps,
   getConfigured: () => Promise<ConfiguredProject>,
   announceConfig = true,
+  announceFiles = false,
 ): Promise<number> {
-  let source: string;
+  const readable: Array<{
+    request: RealizeSourceRequest;
+    input: ChzSourceInput;
+  }> = [];
+  let exitCode = 0;
+  for (const request of requests) {
+    try {
+      readable.push({
+        request,
+        input: {
+          source: readFileSync(request.sourceFile, "utf8"),
+          fileName: request.sourceFile,
+        },
+      });
+    } catch (error) {
+      io.err(
+        `${BIN_NAME} realize: cannot read file '${request.displayName}': ${(error as Error).message}`,
+      );
+      exitCode = 1;
+    }
+  }
+  if (readable.length === 0) return exitCode;
+
+  let batch: ChzAnalysisBatch;
   try {
-    source = readFileSync(sourceFile, "utf8");
+    batch = analyzeChzSources(readable.map(({ input }) => input));
   } catch (error) {
-    io.err(`${BIN_NAME} realize: cannot read file '${displayName}': ${(error as Error).message}`);
+    io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
     return 1;
   }
 
-  let specs: ImagineSpec[];
+  // The CLI owns one compiler snapshot for the complete source batch. Every
+  // file shares its Program/lib state, and the snapshot stays alive until all
+  // dry-run, JSON, or asynchronous realization consumers have finished.
   try {
-    specs = extractImagineSpecs(source, sourceFile);
-  } catch (error) {
-    if (error instanceof ChzSyntaxError) {
-      io.err(`${BIN_NAME} realize: ${error.message}`);
-      return 1;
+    for (const [index, analysis] of batch.sourceFiles.entries()) {
+      const request = readable[index]!.request;
+      if (announceFiles) io.err(`==> ${request.displayName}`);
+      const code = await realizeAnalyzedSourceFile(
+        analysis,
+        request.displayName,
+        parsed,
+        io,
+        deps,
+        getConfigured,
+        announceConfig,
+      );
+      exitCode = Math.max(exitCode, code);
     }
-    throw error;
+    return exitCode;
+  } finally {
+    batch.dispose();
   }
+}
+
+async function realizeAnalyzedSourceFile(
+  analysis: ChzSourceFile,
+  displayName: string,
+  parsed: RealizeArguments,
+  io: CliIO,
+  deps: CliDeps,
+  getConfigured: () => Promise<ConfiguredProject>,
+  announceConfig: boolean,
+): Promise<number> {
+  // One shared analysis owns grammar, syntactic, and semantic preflight.
+  // Promoted obligations are intentionally absent from diagnostics and do not
+  // block any of the JSON, dry-run, or realization command paths.
+  if (analysis.diagnostics.length > 0) {
+    const format = parsed.json ? "json" : "human";
+    const write = parsed.json ? io.out : io.err;
+    for (const rendered of renderChzDiagnostics(analysis.diagnostics, format)) {
+      write(rendered);
+    }
+    return 1;
+  }
+  const source = analysis.source;
+  const sourceFile = analysis.fileName;
+  const specs: ImagineSpec[] = imagineSpecsFromChzSource(analysis);
   if (parsed.json) {
     io.out(JSON.stringify(specs, null, 2));
     return 0;
@@ -243,7 +319,7 @@ async function realizeSourceFile(
   if (parsed.dryRun) {
     let graph: ChzDependencyGraph;
     try {
-      graph = buildDependencyGraph(specs, source, sourceFile, {
+      graph = buildDependencyGraph(analysis, {
         maxCycleSize: configured.config.maxCycleSize,
       });
     } catch (error) {
@@ -271,7 +347,8 @@ async function realizeSourceFile(
       const context = {
         projectRoot: configured.projectRoot,
         outputDir: realizationBaseDir(sourceFile),
-        activeProfile: configured.config.profile ?? "console",
+        activeProfile:
+          configured.config.profile ?? analysis.profile?.name ?? "console",
         resolvedDependencies: [],
         maxTurns: configured.config.maxTurns ?? 24,
         maxRetries: configured.config.maxRetries ?? 2,
@@ -295,7 +372,8 @@ async function realizeSourceFile(
     const verificationContext = {
       projectRoot: configured.projectRoot,
       outputDir: baseDir,
-      activeProfile: configured.config.profile ?? "console",
+      activeProfile:
+        configured.config.profile ?? analysis.profile?.name ?? "console",
       scope,
       resolvedDependencies: [],
       maxTurns: configured.config.maxTurns ?? 24,
@@ -363,7 +441,7 @@ async function realizeSourceFile(
 
   let result: RealizeResult;
   try {
-    result = await realize(source, sourceFile, {
+    result = await realize(analysis, {
       realizers: configured.config.realizers,
       projectRoot: configured.projectRoot,
       activeProfile: configured.config.profile,

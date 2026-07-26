@@ -1,54 +1,38 @@
 /**
- * chz — declaration-level preprocessor.
+ * AST-backed compatibility and final-emission boundary.
  *
- * chz is a TypeScript superset: almost all valid TS is valid chz, and chz adds
- * a handful of declaration-level extensions on top (`imagine` / `requirements`
- * / `ensure`). Because those extensions live only at declaration level, we can
- * compile without a full parser — a brace-depth scanner that understands
- * strings, comments and template literals is enough to find the `imagine`
- * blocks, lift them into spec objects, and strip them back down to plain TS.
- *
- * This module is deliberately zero-dependency (only the `node:path` builtin)
- * and never touches the TypeScript compiler API. It handles exactly the v0
- * grammar and nothing else:
- *
- *   imagine function <name>(<params>): <returnType> { ... }
- *
- *   imagine class <name> {
- *     requirements(`...`);
- *     imagine [static] [async] <method>(<params>): <returnType> { ... }
- *     imagine [static] <property>: <type> { ... }
- *   }
- *
- * Known limitations of the scanner (out of scope for v0), see the exported
- * doc comments and the README of Step 2:
- *   - regular-expression literals are NOT tracked; a top-level regex containing
- *     unbalanced braces can confuse depth tracking;
- *   - object-type / generic return types that contain `{` (e.g. `: { x: number }`
- *     or `: Promise<{...}>`) are not supported — the first `{` after the
- *     parameter list is taken to open the function body;
- *   - generic type parameters on the function (`imagine function f<T>(...)`) are
- *     not supported;
- *   - `export` / `default` modifiers in front of `imagine` are not supported.
+ * Cheese syntax is parsed only by `src/compiler/`. This module does not scan
+ * source structure: it slices the compiler-owned AST spans into the legacy
+ * string-shaped `ImagineSpec` consumed by prompts, deterministic emitters, and
+ * realization-cache hashing. Plain-TypeScript stripping likewise runs only on
+ * a diagnostic-free `ChzSourceFile`.
  */
-
 import { basename } from "node:path";
+
+import {
+  renderChzDiagnostics,
+  type ChzEnsure,
+  type ChzImagineClassMember,
+  type ChzImagineDeclaration,
+  type ChzRequirements,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
+import type {
+  Node,
+  NodeArray,
+  ParameterDeclaration,
+  SourceFile,
+  TypeNode,
+} from "./compiler/ts-api.ts";
 
 /** The executable shape of a human-authored `ensure(...)` contract. */
 export type EnsureKind = "assertion" | "scenario";
 
 /** A single `ensure(...)` contract lifted from an imagine block. */
 export interface EnsureContract {
-  /**
-   * `"assertion"` for `ensure(condition, message?)`, `"scenario"` for
-   * `ensure(message, () => { ... })`.
-   */
   kind: EnsureKind;
-  /** The condition or zero-argument scenario exactly as written. */
   source: string;
-  /** A static string literal exactly as written, or `null` when omitted. */
   messageSource: string | null;
-  /** One-based source position of the `ensure` keyword. */
   line: number;
   column: number;
 }
@@ -69,181 +53,196 @@ export interface ImagineClassMemberSpec {
   end: number;
 }
 
-/** The extracted specification of one top-level `imagine` declaration. */
+/** The compatibility view consumed by the current realization pipeline. */
 export interface ImagineSpec {
-  /** Declaration kind. Resources are deliberately not part of this union. */
   type: ImagineDeclarationType;
-  /** Symbol name; may be a Unicode identifier (e.g. `충돌판정_2D`). */
   name: string;
-  /** Function parameter list. Empty for classes. */
   parameters: string;
-  /** Function return type. Empty for classes or an omitted annotation. */
   returnType: string;
-  /** Required class members in source order. Empty for functions. */
   members: ImagineClassMemberSpec[];
-  /** The `requirements(...)` content string, or `null` when absent. */
   requirements: string | null;
-  /** The `ensure(...)` contracts, in source order. */
   ensures: EnsureContract[];
-  /**
-   * The whole imagine block verbatim — from the `imagine` keyword through the
-   * closing brace. This is what later feeds the realize prompt.
-   */
   originalText: string;
-  /** Byte offset (inclusive) where the block starts in `source`. */
   start: number;
-  /** Byte offset (exclusive) where the block ends in `source`. */
   end: number;
 }
 
-/** Result of a full preprocess pass: the lifted specs plus the plain-TS code. */
-export interface PreprocessResult {
-  specs: ImagineSpec[];
-  code: string;
+function nodeText(source: string, node: Node): string {
+  const sourceFile = node.getSourceFile();
+  return source.slice(node.getStart(sourceFile), node.end);
 }
 
-/**
- * A syntax error in a `.chz.ts` file. The message is prefixed with
- * `<file>:<line>:<column>:` so failures point straight at the source.
- */
-export class ChzSyntaxError extends Error {
-  readonly fileName: string;
-  readonly line: number;
-  readonly column: number;
-
-  constructor(fileName: string, line: number, column: number, detail: string) {
-    super(`${fileName}:${line}:${column}: ${detail}`);
-    this.name = "ChzSyntaxError";
-    this.fileName = fileName;
-    this.line = line;
-    this.column = column;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Find every top-level `imagine function` or `imagine class` declaration and lift it
- * into an {@link ImagineSpec}. `fileName` is used only for error messages.
- *
- * Only declarations at statement top level (brace/paren/bracket depth 0) are
- * recognised; `imagine`, braces, `requirements` and `ensure` appearing inside
- * strings, comments or template literals are ignored.
- *
- * @throws {ChzSyntaxError} on malformed input (unclosed block, a second
- *   `requirements(...)`, an unsupported `imagine var/resource`, etc.).
- */
-export function extractImagineSpecs(source: string, fileName: string): ImagineSpec[] {
-  const specs: ImagineSpec[] = [];
-  let i = 0;
-  let depth = 0;
-  // The most recent significant (non-whitespace, non-comment) character, used
-  // to distinguish a real `imagine` statement from a `foo.imagine` member.
-  let prev = "";
-
-  while (i < source.length) {
-    const ch = source[i]!;
-
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      prev = ch;
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      prev = "`";
-      continue;
-    }
-    if (ch === "{" || ch === "(" || ch === "[") {
-      depth++;
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (ch === "}" || ch === ")" || ch === "]") {
-      depth = Math.max(0, depth - 1);
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (isIdentifierStart(ch)) {
-      const id = readIdentifier(source, i)!;
-      if (depth === 0 && prev !== "." && id.value === "imagine") {
-        const spec = tryParseImagine(source, i, id.end, fileName);
-        if (spec !== null) {
-          specs.push(spec);
-          i = spec.end;
-          prev = "}";
-          continue;
-        }
-      }
-      i = id.end;
-      prev = source[id.end - 1]!;
-      continue;
-    }
-
-    if (!isWhitespace(ch)) prev = ch;
-    i++;
-  }
-
-  return specs;
-}
-
-/**
- * Strip the imagine blocks out of `source` and prepend a single realization
- * import for their symbols, producing plain TS. All non-imagine code is kept
- * byte-for-byte so that the diff stays reviewable.
- *
- * For `example.chz.ts` the import is emitted as
- * `import { ... } from "./chz/realization/example/implementation.ts";`.
- *
- * `specs` may be passed in to avoid re-scanning; it must have been produced
- * from the same `source`.
- */
-export function transformToPlainTs(
+function nodeArrayText(
   source: string,
-  fileName: string,
-  specs: ImagineSpec[] = extractImagineSpecs(source, fileName),
+  parameters: NodeArray<ParameterDeclaration>,
 ): string {
-  if (specs.length === 0) return source;
+  return source.slice(parameters.pos, parameters.end).trim();
+}
 
-  const names = specs.map((spec) => spec.name);
-  const importLine = `import { ${names.join(", ")} } from "${realizationImportSpecifier(fileName)}";\n`;
+function typeNodeText(source: string, type: TypeNode | null): string {
+  return type === null ? "" : nodeText(source, type).trim();
+}
 
-  const ordered = [...specs].sort((a, b) => a.start - b.start);
+function literalContent(source: string, requirement: ChzRequirements | null): string | null {
+  if (requirement === null) return null;
+  const literal = nodeText(source, requirement.value);
+  if (literal.length < 2) return "";
+  return literal.slice(1, -1);
+}
+
+function ensurePosition(
+  ensure: ChzEnsure,
+  mainSourceFile: SourceFile,
+): { line: number; column: number } {
+  const offset = ensure.call.getStart(ensure.call.getSourceFile());
+  const position = mainSourceFile.getLineAndCharacterOfPosition(offset);
+  return {
+    line: position.line + 1,
+    column: position.character + 1,
+  };
+}
+
+function adaptEnsure(
+  source: string,
+  ensure: ChzEnsure,
+  mainSourceFile: SourceFile,
+): EnsureContract {
+  return {
+    kind: ensure.kind,
+    source: nodeText(source, ensure.conditionOrScenario),
+    messageSource:
+      ensure.message === null ? null : nodeText(source, ensure.message),
+    ...ensurePosition(ensure, mainSourceFile),
+  };
+}
+
+function compatibilityModifiers(
+  member: ChzImagineClassMember,
+): string[] {
+  return member.modifierTexts.filter((modifier) =>
+      modifier === "async" ||
+      modifier === "static" ||
+      modifier === "readonly"
+  );
+}
+
+function adaptClassMember(
+  source: string,
+  member: ChzImagineClassMember,
+  mainSourceFile: SourceFile,
+): ImagineClassMemberSpec {
+  return {
+    type: member.kind === "ImagineMethod" ? "method" : "property",
+    name: member.name,
+    modifiers: compatibilityModifiers(member),
+    parameters:
+      member.kind === "ImagineMethod"
+        ? nodeArrayText(source, member.parameters)
+        : "",
+    returnType: typeNodeText(source, member.returnType),
+    requirements: literalContent(source, member.requirements),
+    ensures: member.ensures.map((ensure) =>
+      adaptEnsure(source, ensure, mainSourceFile)
+    ),
+    originalText: source.slice(member.span.start, member.span.end),
+    start: member.span.start,
+    end: member.span.end,
+  };
+}
+
+function adaptDeclaration(
+  source: string,
+  declaration: ChzImagineDeclaration,
+  mainSourceFile: SourceFile,
+): ImagineSpec {
+  if (declaration.kind === "ImagineFunction") {
+    return {
+      type: "function",
+      name: declaration.name,
+      parameters: nodeArrayText(source, declaration.parameters),
+      returnType: typeNodeText(source, declaration.returnType),
+      members: [],
+      requirements: literalContent(source, declaration.requirements),
+      ensures: declaration.ensures.map((ensure) =>
+        adaptEnsure(source, ensure, mainSourceFile)
+      ),
+      originalText: source.slice(declaration.span.start, declaration.span.end),
+      start: declaration.span.start,
+      end: declaration.span.end,
+    };
+  }
+
+  return {
+    type: "class",
+    name: declaration.name,
+    parameters: "",
+    returnType: "",
+    members: declaration.members.map((member) =>
+      adaptClassMember(source, member, mainSourceFile)
+    ),
+    requirements: literalContent(source, declaration.requirements),
+    ensures: declaration.ensures.map((ensure) =>
+      adaptEnsure(source, ensure, mainSourceFile)
+    ),
+    originalText: source.slice(declaration.span.start, declaration.span.end),
+    start: declaration.span.start,
+    end: declaration.span.end,
+  };
+}
+
+/**
+ * Build the legacy string model from a diagnostic-free AST-backed analysis.
+ * Callers own preflight and the analysis snapshot lifetime.
+ */
+export function imagineSpecsFromChzSource(
+  analysis: ChzSourceFile,
+): ImagineSpec[] {
+  return analysis.imagineDeclarations.map((declaration) =>
+    adaptDeclaration(
+      analysis.source,
+      declaration,
+      analysis.typescript.sourceFile,
+    )
+  );
+}
+
+function emitPlainTypeScript(
+  analysis: ChzSourceFile,
+): string {
+  const declarations = analysis.imagineDeclarations;
+  if (declarations.length === 0) return analysis.source;
+
+  const names = declarations.map((declaration) => declaration.name);
+  const importLine =
+    `import { ${names.join(", ")} } from "${realizationImportSpecifier(analysis.fileName)}";\n`;
+  const ordered = [...declarations].sort(
+    (left, right) => left.span.start - right.span.start,
+  );
   let body = "";
   let cursor = 0;
-  for (const spec of ordered) {
-    body += source.slice(cursor, spec.start);
-    cursor = spec.end;
+  for (const declaration of ordered) {
+    body += analysis.source.slice(cursor, declaration.span.start);
+    cursor = declaration.span.end;
   }
-  body += source.slice(cursor);
-
+  body += analysis.source.slice(cursor);
   return importLine + body;
 }
 
-/** Convenience: extract specs and transform in one call. */
-export function preprocess(source: string, fileName: string): PreprocessResult {
-  const specs = extractImagineSpecs(source, fileName);
-  return { specs, code: transformToPlainTs(source, fileName, specs) };
+/**
+ * Final strip/emit stage. It accepts an already analyzed source and refuses to
+ * emit until every shared diagnostic is green.
+ */
+export function stripAnalyzedSource(
+  analysis: ChzSourceFile,
+): string {
+  if (analysis.diagnostics.length > 0) {
+    throw new Error(
+      renderChzDiagnostics(analysis.diagnostics, "human").join("\n"),
+    );
+  }
+  return emitPlainTypeScript(analysis);
 }
 
-/**
- * The canonical public-surface text of an imagine declaration: its signature
- * plus its executable ensure contracts (docs/62). Dependents are invalidated
- * only when this surface changes; requirements prose, comments, and ensure
- * messages are internal and deliberately excluded.
- */
 export function publicSurfaceText(spec: ImagineSpec): string {
   const lines: string[] = [];
   if (spec.type === "function") {
@@ -251,7 +250,10 @@ export function publicSurfaceText(spec: ImagineSpec): string {
   } else {
     lines.push(`class ${spec.name}`);
     for (const member of spec.members) {
-      const modifiers = member.modifiers.length === 0 ? "" : `${member.modifiers.join(" ")} `;
+      const modifiers =
+        member.modifiers.length === 0
+          ? ""
+          : `${member.modifiers.join(" ")} `;
       lines.push(
         member.type === "method"
           ? `method ${modifiers}${spec.name}.${member.name}(${member.parameters}): ${member.returnType}`
@@ -262,7 +264,10 @@ export function publicSurfaceText(spec: ImagineSpec): string {
   const contracts = [
     ...spec.ensures.map((ensure) => ({ scope: spec.name, ensure })),
     ...spec.members.flatMap((member) =>
-      member.ensures.map((ensure) => ({ scope: `${spec.name}.${member.name}`, ensure })),
+      member.ensures.map((ensure) => ({
+        scope: `${spec.name}.${member.name}`,
+        ensure,
+      }))
     ),
   ];
   for (const { scope, ensure } of contracts) {
@@ -271,814 +276,15 @@ export function publicSurfaceText(spec: ImagineSpec): string {
   return lines.join("\n");
 }
 
-/** The realization directory base name for a source file: `example.chz.ts` -> `example`. */
 export function realizationBaseName(fileName: string): string {
   const base = basename(fileName);
-  if (base.endsWith(".chz.ts")) return base.slice(0, -".chz.ts".length);
+  if (base.endsWith(".chz.ts")) {
+    return base.slice(0, -".chz.ts".length);
+  }
   if (base.endsWith(".ts")) return base.slice(0, -".ts".length);
   return base;
 }
 
-/** The import specifier for a file's realized implementation entry point. */
 export function realizationImportSpecifier(fileName: string): string {
   return `./chz/realization/${realizationBaseName(fileName)}/implementation.ts`;
-}
-
-// ---------------------------------------------------------------------------
-// imagine declaration parsing
-// ---------------------------------------------------------------------------
-
-/**
- * Called with `declStart` at the `imagine` keyword and `afterImagine` just past
- * it. Returns the parsed spec when this is an `imagine function/class`, or `null`
- * when `imagine` is merely an ordinary identifier here (so the caller keeps
- * scanning). Throws for recognised-but-unsupported forms.
- */
-function tryParseImagine(
-  source: string,
-  declStart: number,
-  afterImagine: number,
-  fileName: string,
-): ImagineSpec | null {
-  const kw = readIdentifier(source, skipTrivia(source, afterImagine, fileName));
-  if (kw === null) return null;
-
-  if (kw.value === "resource") {
-    throw syntaxError(
-      fileName,
-      source,
-      declStart,
-      "'imagine resource' is intentionally deferred to a future language version",
-    );
-  }
-  if (kw.value === "var") {
-    throw syntaxError(
-      fileName,
-      source,
-      declStart,
-      "'imagine var' is not supported (use an imagined property inside 'imagine class')",
-    );
-  }
-  if (kw.value === "class") return parseImagineClass(source, declStart, kw.end, fileName);
-  if (kw.value !== "function") return null;
-
-  return parseImagineFunction(source, declStart, kw.end, fileName);
-}
-
-/** Parse an `imagine function` whose `function` keyword ends at `afterFunction`. */
-function parseImagineFunction(
-  source: string,
-  declStart: number,
-  afterFunction: number,
-  fileName: string,
-): ImagineSpec {
-  let p = skipTrivia(source, afterFunction, fileName);
-  const nameTok = readIdentifier(source, p);
-  if (nameTok === null) {
-    throw syntaxError(fileName, source, p, "expected a function name after 'imagine function'");
-  }
-  const name = nameTok.value;
-
-  p = skipTrivia(source, nameTok.end, fileName);
-  if (source[p] !== "(") {
-    throw syntaxError(fileName, source, p, `expected '(' after function name '${name}'`);
-  }
-  const paramsOpen = p;
-  const paramsEnd = skipBalanced(source, paramsOpen, fileName);
-  const parameters = source.slice(paramsOpen + 1, paramsEnd - 1).trim();
-
-  const bodyOpen = findBodyBrace(source, paramsEnd, name, fileName);
-  const returnRegion = source.slice(paramsEnd, bodyOpen).trim();
-  const returnType = returnRegion.startsWith(":") ? returnRegion.slice(1).trim() : returnRegion;
-
-  const bodyEnd = skipBalanced(source, bodyOpen, fileName);
-  const originalText = source.slice(declStart, bodyEnd);
-  const { requirements, ensures } = parseImagineBody(source, bodyOpen, bodyEnd, fileName);
-
-  return {
-    type: "function",
-    name,
-    parameters,
-    returnType,
-    members: [],
-    requirements,
-    ensures,
-    originalText,
-    start: declStart,
-    end: bodyEnd,
-  };
-}
-
-/** Parse an `imagine class` as one realizable symbol with nested member contracts. */
-function parseImagineClass(
-  source: string,
-  declStart: number,
-  afterClass: number,
-  fileName: string,
-): ImagineSpec {
-  let p = skipTrivia(source, afterClass, fileName);
-  const nameTok = readIdentifier(source, p);
-  if (nameTok === null) {
-    throw syntaxError(fileName, source, p, "expected a class name after 'imagine class'");
-  }
-  const name = nameTok.value;
-  const bodyOpen = findDeclarationBodyBrace(source, nameTok.end, `imagine class '${name}'`, fileName);
-  const bodyEnd = skipBalanced(source, bodyOpen, fileName);
-  const originalText = source.slice(declStart, bodyEnd);
-  const { requirements, ensures } = parseImagineBody(
-    source,
-    bodyOpen,
-    bodyEnd,
-    fileName,
-    `imagine class '${name}'`,
-  );
-  const members = parseImagineClassMembers(source, bodyOpen, bodyEnd, name, fileName);
-
-  return {
-    type: "class",
-    name,
-    parameters: "",
-    returnType: "",
-    members,
-    requirements,
-    ensures,
-    originalText,
-    start: declStart,
-    end: bodyEnd,
-  };
-}
-
-/** Collect `imagine` method/property declarations at direct class-body depth. */
-function parseImagineClassMembers(
-  source: string,
-  bodyOpen: number,
-  bodyEnd: number,
-  className: string,
-  fileName: string,
-): ImagineClassMemberSpec[] {
-  const members: ImagineClassMemberSpec[] = [];
-  let i = bodyOpen + 1;
-  const end = bodyEnd - 1;
-  let depth = 0;
-  let prev = "";
-
-  while (i < end) {
-    const ch = source[i]!;
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      prev = ch;
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      prev = "`";
-      continue;
-    }
-    if (ch === "{" || ch === "(" || ch === "[") {
-      depth++;
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (ch === "}" || ch === ")" || ch === "]") {
-      depth = Math.max(0, depth - 1);
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (isIdentifierStart(ch)) {
-      const id = readIdentifier(source, i)!;
-      if (depth === 0 && prev !== "." && id.value === "imagine") {
-        const member = parseImagineClassMember(source, i, id.end, className, fileName);
-        members.push(member);
-        i = member.end;
-        prev = "}";
-        continue;
-      }
-      i = id.end;
-      prev = source[id.end - 1]!;
-      continue;
-    }
-    if (!isWhitespace(ch)) prev = ch;
-    i++;
-  }
-
-  return members;
-}
-
-function parseImagineClassMember(
-  source: string,
-  declStart: number,
-  afterImagine: number,
-  className: string,
-  fileName: string,
-): ImagineClassMemberSpec {
-  let p = skipTrivia(source, afterImagine, fileName);
-  const modifiers: string[] = [];
-  let token = readIdentifier(source, p);
-  while (token !== null && ["async", "static", "readonly"].includes(token.value)) {
-    if (!modifiers.includes(token.value)) modifiers.push(token.value);
-    p = skipTrivia(source, token.end, fileName);
-    token = readIdentifier(source, p);
-  }
-  if (token === null) {
-    throw syntaxError(fileName, source, p, `expected a member name in imagine class '${className}'`);
-  }
-  if (token.value === "resource") {
-    throw syntaxError(
-      fileName,
-      source,
-      token.end,
-      "'imagine resource' is intentionally deferred to a future language version",
-    );
-  }
-  const name = token.value;
-  p = skipTrivia(source, token.end, fileName);
-
-  if (source[p] === "(") {
-    const paramsEnd = skipBalanced(source, p, fileName);
-    const parameters = source.slice(p + 1, paramsEnd - 1).trim();
-    const bodyOpen = findDeclarationBodyBrace(
-      source,
-      paramsEnd,
-      `imagined method '${className}.${name}'`,
-      fileName,
-    );
-    const returnRegion = source.slice(paramsEnd, bodyOpen).trim();
-    const returnType = returnRegion.startsWith(":") ? returnRegion.slice(1).trim() : returnRegion;
-    const bodyEnd = skipBalanced(source, bodyOpen, fileName);
-    const { requirements, ensures } = parseImagineBody(
-      source,
-      bodyOpen,
-      bodyEnd,
-      fileName,
-      `imagined method '${className}.${name}'`,
-    );
-    return {
-      type: "method",
-      name,
-      modifiers,
-      parameters,
-      returnType,
-      requirements,
-      ensures,
-      originalText: source.slice(declStart, bodyEnd),
-      start: declStart,
-      end: bodyEnd,
-    };
-  }
-
-  if (source[p] !== ":") {
-    throw syntaxError(
-      fileName,
-      source,
-      p,
-      `expected '(' or ':' after imagined class member '${className}.${name}'`,
-    );
-  }
-  const bodyOpen = findDeclarationBodyBrace(
-    source,
-    p + 1,
-    `imagined property '${className}.${name}'`,
-    fileName,
-  );
-  const returnType = source.slice(p + 1, bodyOpen).trim();
-  if (returnType === "") {
-    throw syntaxError(fileName, source, p + 1, `expected a type for imagined property '${className}.${name}'`);
-  }
-  const bodyEnd = skipBalanced(source, bodyOpen, fileName);
-  const { requirements, ensures } = parseImagineBody(
-    source,
-    bodyOpen,
-    bodyEnd,
-    fileName,
-    `imagined property '${className}.${name}'`,
-  );
-  return {
-    type: "property",
-    name,
-    modifiers,
-    parameters: "",
-    returnType,
-    requirements,
-    ensures,
-    originalText: source.slice(declStart, bodyEnd),
-    start: declStart,
-    end: bodyEnd,
-  };
-}
-
-/** Locate the `{` that opens the function body, scanning past the return type. */
-function findBodyBrace(source: string, from: number, name: string, fileName: string): number {
-  return findDeclarationBodyBrace(source, from, `imagine function '${name}'`, fileName);
-}
-
-function findDeclarationBodyBrace(
-  source: string,
-  from: number,
-  declaration: string,
-  fileName: string,
-): number {
-  let i = from;
-  while (i < source.length) {
-    const ch = source[i]!;
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      continue;
-    }
-    if (ch === "{") return i;
-    if (ch === ";") {
-      throw syntaxError(fileName, source, i, `${declaration} must have a body`);
-    }
-    i++;
-  }
-  throw syntaxError(fileName, source, from, `unterminated ${declaration}: missing '{'`);
-}
-
-/**
- * Scan the body of an imagine block for `requirements(...)` and `ensure(...)`
- * calls at statement position (body depth 0). Everything else in the body is
- * ignored.
- */
-function parseImagineBody(
-  source: string,
-  bodyOpen: number,
-  bodyEnd: number,
-  fileName: string,
-  declaration = "imagine function",
-): { requirements: string | null; ensures: EnsureContract[] } {
-  let requirements: string | null = null;
-  let requirementsCount = 0;
-  const ensures: EnsureContract[] = [];
-
-  let i = bodyOpen + 1;
-  const end = bodyEnd - 1;
-  let depth = 0;
-  let prev = "";
-
-  while (i < end) {
-    const ch = source[i]!;
-
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      prev = ch;
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      prev = "`";
-      continue;
-    }
-    if (ch === "{" || ch === "(" || ch === "[") {
-      depth++;
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (ch === "}" || ch === ")" || ch === "]") {
-      depth = Math.max(0, depth - 1);
-      i++;
-      prev = ch;
-      continue;
-    }
-    if (isIdentifierStart(ch)) {
-      const id = readIdentifier(source, i)!;
-      const isCallHead =
-        depth === 0 && prev !== "." && (id.value === "requirements" || id.value === "ensure");
-      if (isCallHead) {
-        const afterId = skipTrivia(source, id.end, fileName);
-        if (source[afterId] === "(") {
-          const call = scanCall(source, afterId, fileName);
-          if (id.value === "requirements") {
-            requirementsCount++;
-            if (requirementsCount > 1) {
-              throw syntaxError(
-                fileName,
-                source,
-                i,
-                `requirements() may appear at most once in ${declaration}`,
-              );
-            }
-            requirements = literalContent(call.args[0] ?? "");
-          } else {
-            ensures.push(parseEnsureContract(call.args, source, i, fileName));
-          }
-          i = call.end;
-          prev = ")";
-          continue;
-        }
-      }
-      i = id.end;
-      prev = source[id.end - 1]!;
-      continue;
-    }
-
-    if (!isWhitespace(ch)) prev = ch;
-    i++;
-  }
-
-  return { requirements, ensures };
-}
-
-/**
- * Scan a call argument list whose `(` is at `openParen`. Returns every
- * top-level argument as trimmed raw text and the index past the closing `)`.
- */
-function scanCall(source: string, openParen: number, fileName: string): { args: string[]; end: number } {
-  const args: string[] = [];
-  let argStart = openParen + 1;
-  let depth = 0;
-  let i = argStart;
-
-  while (i < source.length) {
-    const ch = source[i]!;
-
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      continue;
-    }
-    if (ch === "(" || ch === "[" || ch === "{") {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === ")" || ch === "]" || ch === "}") {
-      if (depth === 0) {
-        const last = source.slice(argStart, i).trim();
-        if (last.length > 0) args.push(last);
-        return { args, end: i + 1 };
-      }
-      depth--;
-      i++;
-      continue;
-    }
-    if (ch === "," && depth === 0) {
-      args.push(source.slice(argStart, i).trim());
-      argStart = i + 1;
-      i++;
-      continue;
-    }
-    i++;
-  }
-
-  throw syntaxError(fileName, source, openParen, "unterminated call: missing ')'");
-}
-
-function parseEnsureContract(
-  args: readonly string[],
-  source: string,
-  offset: number,
-  fileName: string,
-): EnsureContract {
-  const position = lineColumn(source, offset);
-  if (args.length === 0 || args[0] === "") {
-    throw syntaxError(
-      fileName,
-      source,
-      offset,
-      "ensure() requires either a boolean condition or a message plus a zero-argument scenario",
-    );
-  }
-
-  const first = args[0]!;
-  if (isStaticStringLiteral(first)) {
-    if (args.length === 1) {
-      throw syntaxError(
-        fileName,
-        source,
-        offset,
-        "natural-language ensure() contracts are no longer supported; put prose in requirements() and provide an executable assertion",
-      );
-    }
-    if (args.length !== 2 || !isFunctionExpression(args[1]!)) {
-      throw syntaxError(
-        fileName,
-        source,
-        offset,
-        "scenario ensure() must have the form ensure(\"message\", () => { assert(...); })",
-      );
-    }
-    return {
-      kind: "scenario",
-      source: args[1]!,
-      messageSource: first,
-      ...position,
-    };
-  }
-
-  if (isFunctionExpression(first)) {
-    throw syntaxError(
-      fileName,
-      source,
-      offset,
-      "predicate ensure((args, retval) => ...) is no longer supported; provide concrete inputs in ensure(condition) or ensure(\"message\", () => { assert(...); })",
-    );
-  }
-  if (args.length > 2) {
-    throw syntaxError(
-      fileName,
-      source,
-      offset,
-      "assertion ensure() accepts only a condition and an optional static message",
-    );
-  }
-  if (args.length === 2 && !isStaticStringLiteral(args[1]!)) {
-    throw syntaxError(
-      fileName,
-      source,
-      offset,
-      "the optional assertion message passed to ensure() must be a static string literal",
-    );
-  }
-  return {
-    kind: "assertion",
-    source: first,
-    messageSource: args[1] ?? null,
-    ...position,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Lexical scanning primitives (string / comment / template / bracket aware)
-// ---------------------------------------------------------------------------
-
-/** Skip whitespace and comments starting at `pos`; return the next index. */
-function skipTrivia(source: string, pos: number, fileName: string): number {
-  let i = pos;
-  while (i < source.length) {
-    const ch = source[i]!;
-    if (isWhitespace(ch)) {
-      i++;
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    break;
-  }
-  return i;
-}
-
-/** `pos` is at `//`; return the index of the terminating newline (or EOF). */
-function skipLineComment(source: string, pos: number): number {
-  let i = pos + 2;
-  while (i < source.length && source[i] !== "\n") i++;
-  return i;
-}
-
-/** `pos` is at the opening delimiter of a `/* ... *\/` comment. */
-function skipBlockComment(source: string, pos: number, fileName: string): number {
-  let i = pos + 2;
-  while (i < source.length) {
-    if (source[i] === "*" && source[i + 1] === "/") return i + 2;
-    i++;
-  }
-  throw syntaxError(fileName, source, pos, "unterminated block comment");
-}
-
-/** `pos` is at the opening `quote`; return the index just past the closing quote. */
-function skipString(source: string, pos: number, quote: string, fileName: string): number {
-  let i = pos + 1;
-  while (i < source.length) {
-    const ch = source[i]!;
-    if (ch === "\\") {
-      i += 2;
-      continue;
-    }
-    if (ch === quote) return i + 1;
-    if (ch === "\n") break;
-    i++;
-  }
-  throw syntaxError(fileName, source, pos, "unterminated string literal");
-}
-
-/**
- * `pos` is at the opening backtick. Handles escapes and `${ ... }`
- * interpolations (which may themselves nest templates / strings / braces).
- */
-function skipTemplate(source: string, pos: number, fileName: string): number {
-  let i = pos + 1;
-  while (i < source.length) {
-    const ch = source[i]!;
-    if (ch === "\\") {
-      i += 2;
-      continue;
-    }
-    if (ch === "`") return i + 1;
-    if (ch === "$" && source[i + 1] === "{") {
-      // The `{` at i+1 opens a balanced interpolation expression.
-      i = skipBalanced(source, i + 1, fileName);
-      continue;
-    }
-    i++;
-  }
-  throw syntaxError(fileName, source, pos, "unterminated template literal");
-}
-
-/**
- * `pos` is at an opening bracket (`(`, `[` or `{`). Return the index just past
- * the matching close, respecting strings, comments, templates and nesting.
- * Brackets are assumed to be well-formed (as in valid TS).
- */
-function skipBalanced(source: string, pos: number, fileName: string): number {
-  let depth = 0;
-  let i = pos;
-  while (i < source.length) {
-    const ch = source[i]!;
-    if (ch === "/" && source[i + 1] === "/") {
-      i = skipLineComment(source, i);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      i = skipBlockComment(source, i, fileName);
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(source, i, ch, fileName);
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(source, i, fileName);
-      continue;
-    }
-    if (ch === "(" || ch === "[" || ch === "{") {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === ")" || ch === "]" || ch === "}") {
-      depth--;
-      i++;
-      if (depth === 0) return i;
-      continue;
-    }
-    i++;
-  }
-  throw syntaxError(fileName, source, pos, "unterminated bracket: missing closing delimiter");
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-function isWhitespace(ch: string): boolean {
-  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v";
-}
-
-/**
- * Practical identifier-start test. Not a faithful reproduction of the ECMAScript
- * `IdentifierStart` grammar — we allow ASCII letters, `_`, `$`, and any
- * non-ASCII code unit so that Korean and other Unicode identifiers work.
- */
-function isIdentifierStart(ch: string): boolean {
-  return (
-    (ch >= "a" && ch <= "z") ||
-    (ch >= "A" && ch <= "Z") ||
-    ch === "_" ||
-    ch === "$" ||
-    ch.charCodeAt(0) >= 0x80
-  );
-}
-
-function isIdentifierPart(ch: string): boolean {
-  return isIdentifierStart(ch) || (ch >= "0" && ch <= "9");
-}
-
-/** Read a maximal identifier at `pos`, or `null` when none starts there. */
-function readIdentifier(source: string, pos: number): { value: string; end: number } | null {
-  if (pos >= source.length || !isIdentifierStart(source[pos]!)) return null;
-  let i = pos + 1;
-  while (i < source.length && isIdentifierPart(source[i]!)) i++;
-  return { value: source.slice(pos, i), end: i };
-}
-
-/** True only when the entire expression is a static string literal. */
-function isStaticStringLiteral(arg: string): boolean {
-  return /^(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\$]|\$(?!\{))*`)$/su.test(arg.trim());
-}
-
-/** Detect a function/arrow expression at the outermost expression level. */
-function isFunctionExpression(arg: string): boolean {
-  const trimmed = arg.trim();
-  if (/^(?:async\s+)?function(?:\s+[\p{L}_$][\p{L}\p{N}_$]*)?\s*\(/u.test(trimmed)) {
-    return true;
-  }
-
-  let depth = 0;
-  let i = 0;
-  while (i < trimmed.length) {
-    const ch = trimmed[i]!;
-    if (ch === "/" && trimmed[i + 1] === "/") {
-      i = skipLineComment(trimmed, i);
-      continue;
-    }
-    if (ch === "/" && trimmed[i + 1] === "*") {
-      i = skipBlockComment(trimmed, i, "<ensure>");
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      i = skipString(trimmed, i, ch, "<ensure>");
-      continue;
-    }
-    if (ch === "`") {
-      i = skipTemplate(trimmed, i, "<ensure>");
-      continue;
-    }
-    if (ch === "(" || ch === "[" || ch === "{") {
-      depth++;
-      i++;
-      continue;
-    }
-    if (ch === ")" || ch === "]" || ch === "}") {
-      depth = Math.max(0, depth - 1);
-      i++;
-      continue;
-    }
-    if (depth === 0 && ch === "=" && trimmed[i + 1] === ">") return true;
-    i++;
-  }
-  return false;
-}
-
-/** Unwrap a string/template literal to its inner text; pass anything else through. */
-function literalContent(arg: string): string {
-  if (arg.length >= 2) {
-    const first = arg[0]!;
-    const last = arg[arg.length - 1]!;
-    if (
-      (first === "`" && last === "`") ||
-      (first === "'" && last === "'") ||
-      (first === '"' && last === '"')
-    ) {
-      return arg.slice(1, -1);
-    }
-  }
-  return arg;
-}
-
-/** Build a {@link ChzSyntaxError} pointing at `offset` in `source`. */
-function syntaxError(fileName: string, source: string, offset: number, detail: string): ChzSyntaxError {
-  const { line, column } = lineColumn(source, offset);
-  return new ChzSyntaxError(fileName, line, column, detail);
-}
-
-/** 1-based line/column for a byte offset. */
-function lineColumn(source: string, offset: number): { line: number; column: number } {
-  let line = 1;
-  let column = 1;
-  const bound = Math.min(offset, source.length);
-  for (let i = 0; i < bound; i++) {
-    if (source[i] === "\n") {
-      line++;
-      column = 1;
-    } else {
-      column++;
-    }
-  }
-  return { line, column };
 }

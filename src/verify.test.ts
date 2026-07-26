@@ -4,7 +4,11 @@ import { basename, dirname, join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { extractImagineSpecs, publicSurfaceText } from "./preprocessor.ts";
+import { analyzeChzSource } from "./compiler/index.ts";
+import {
+  imagineSpecsFromChzSource,
+  publicSurfaceText,
+} from "./preprocessor.ts";
 import {
   realize,
   renderEnsureHarness,
@@ -31,6 +35,16 @@ function makeTempDir(): string {
   tempDirs.push(dir);
   return dir;
 }
+
+function specsOf(source: string, fileName: string) {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    expect(analysis.diagnostics).toEqual([]);
+    return imagineSpecsFromChzSource(analysis);
+  } finally {
+    analysis.dispose();
+  }
+}
 afterAll(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.length = 0;
@@ -42,6 +56,19 @@ function writeTree(baseDir: string, files: Record<string, string>): void {
     const abs = join(baseDir, relPath);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, "utf8");
+  }
+}
+
+async function realizeSource(
+  source: string,
+  fileName: string,
+  options: Parameters<typeof realize>[1],
+): Promise<Awaited<ReturnType<typeof realize>>> {
+  const analysis = analyzeChzSource(source, fileName);
+  try {
+    return await realize(analysis, options);
+  } finally {
+    analysis.dispose();
   }
 }
 
@@ -105,11 +132,19 @@ describe("runRealizationTests", () => {
       const baseDir = join(makeTempDir(), "human-assertion");
       const source =
         "imagine function answer(): number { ensure(answer() === 42, '정답은 42입니다.'); }\n";
-      const spec = extractImagineSpecs(source, "answer.chz.ts")[0]!;
+      const analysis = analyzeChzSource(source, "answer.chz.ts");
+      let ensureHarness: string;
+      try {
+        const specs = imagineSpecsFromChzSource(analysis);
+        const spec = specs[0]!;
+        ensureHarness = renderEnsureHarness(analysis, spec, specs);
+      } finally {
+        analysis.dispose();
+      }
 
       writeTree(baseDir, {
         "implementations/answer.ts": "export function answer(): number { return 41; }\n",
-        "tests/test_answer.ensure.ts": renderEnsureHarness(spec, "answer.chz.ts"),
+        "tests/test_answer.ensure.ts": ensureHarness,
         "tests/test_answer.autogen.ts":
           'import { it, expect } from "vitest";\n' +
           'it("unrelated autogen check", () => { expect(true).toBe(true); });\n',
@@ -263,7 +298,7 @@ class FixtureRealizer implements ChzRealizer {
 async function realizeFixture(): Promise<Awaited<ReturnType<typeof realize>>> {
   const file = join(makeTempDir(), FILE);
   writeFileSync(file, SOURCE, "utf8");
-  return realize(SOURCE, file, {
+  return realizeSource(SOURCE, file, {
     realizers: [new FixtureRealizer()],
     now: () => new Date("2026-07-23T12:34:56.000Z"),
     skipVerification: true,
@@ -287,7 +322,7 @@ describe("buildRealizationCache", () => {
     expect(cache.sourceHash).toBe(sha256(SOURCE));
     expect(cache.testsSkipped).toBe(false);
 
-    const spec = extractImagineSpecs(SOURCE, FILE)[0]!;
+    const spec = specsOf(SOURCE, FILE)[0]!;
     const sym = cache.symbols[NAME]!;
     expect(sym.name).toBe(NAME);
     expect(sym.model).toBe("fake-model");
@@ -323,8 +358,10 @@ describe("buildRealizationCache", () => {
       "두 점이 같은 위치인지 판정합니다.",
       "두 점이 완전히 동일한 좌표인지 판정합니다.",
     );
-    const editedSpec = extractImagineSpecs(editedSource, FILE)[0]!;
-    expect(editedSpec.originalText).not.toBe(extractImagineSpecs(SOURCE, FILE)[0]!.originalText);
+    const editedSpec = specsOf(editedSource, FILE)[0]!;
+    expect(editedSpec.originalText).not.toBe(
+      specsOf(SOURCE, FILE)[0]!.originalText,
+    );
     // The spec hash moves with the edit, the public surface does not — this
     // is the docs/62 distinction that stops invalidation from propagating.
     expect(sha256(editedSpec.originalText)).not.toBe(cache.symbols[NAME]!.specHash);
@@ -344,7 +381,7 @@ describe("buildRealizationCache", () => {
     ].join("\n");
     const file = join(makeTempDir(), "slugs.chz.ts");
     writeFileSync(file, source, "utf8");
-    const result = await realize(source, file, {
+    const result = await realizeSource(source, file, {
       realizers: [new ImportingSlugRealizer()],
       now: () => new Date("2026-07-23T12:34:56.000Z"),
       skipVerification: true,

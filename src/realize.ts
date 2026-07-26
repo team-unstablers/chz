@@ -12,17 +12,30 @@ import { dirname, join, relative, resolve } from "node:path";
 import {
   ChzCycleError,
   buildDependencyGraph,
-  mentionedSymbols,
+  collectEstimatedDependencySources,
   type ChzDependencyGraph,
   type ChzRealizeGroup,
 } from "./graph.ts";
-import { splitHumanCode } from "./human-code.ts";
 import {
-  extractImagineSpecs,
+  splitHumanCode,
+  type EntryPointNamedExport,
+  type HumanCodeLayer,
+  type HumanCodeSplit,
+} from "./human-code.ts";
+import {
+  imagineSpecsFromChzSource,
   publicSurfaceText,
   realizationBaseName,
   type ImagineSpec,
 } from "./preprocessor.ts";
+import {
+  collectTypeSymbolReferences,
+  declarationEnsureScopes,
+  renderChzDiagnostics,
+  symbolComesOnlyFromTypeScriptLib,
+  type ChzSourceFile,
+} from "./compiler/index.ts";
+import { SyntaxKind } from "./compiler/ts-api.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import {
   humanCodeHash,
@@ -153,21 +166,31 @@ export function serializeAskUser(
 
 /** Realize every imagine symbol, selecting the first configured compatible Realizer. */
 export async function realize(
-  source: string,
-  fileName: string,
+  analysis: ChzSourceFile,
   options: RealizeOptions,
 ): Promise<RealizeResult> {
-  const specs = extractImagineSpecs(source, fileName);
+  // The caller owns the analyzer snapshot and must keep it alive until this
+  // promise settles. A direct caller bypassing CLI preflight still sees the
+  // complete diagnostic set before any output directory or file is created.
+  if (analysis.diagnostics.length > 0) {
+    throw new Error(
+      renderChzDiagnostics(analysis.diagnostics, "human").join("\n"),
+    );
+  }
+  // Adapting the already-bound AST performs no additional parse.
+  const specs = imagineSpecsFromChzSource(analysis);
+  const { fileName } = analysis;
   const specByName = new Map(specs.map((spec) => [spec.name, spec]));
   const baseName = realizationBaseName(fileName);
   const baseDir = realizationBaseDir(fileName);
   const projectRoot = resolve(options.projectRoot ?? dirname(resolve(fileName)));
   const maxTurns = options.maxTurns ?? 24;
   const maxRetries = options.maxRetries ?? 2;
-  const activeProfile = options.activeProfile ?? extractProfile(source) ?? "console";
+  const activeProfile =
+    options.activeProfile ?? analysis.profile?.name ?? "console";
   mkdirSync(join(baseDir, "implementations"), { recursive: true });
   mkdirSync(join(baseDir, "tests"), { recursive: true });
-  const humanCode = splitHumanCode(source, fileName, specs);
+  const humanCode = splitHumanCode(analysis);
   const writeHumanCode = (): void => {
     writeFileSync(join(baseDir, "implementations", "__prologue__.ts"), humanCode.prologue, "utf8");
     writeFileSync(join(baseDir, "implementations", "__epilogue__.ts"), humanCode.epilogue, "utf8");
@@ -223,7 +246,7 @@ export async function realize(
 
   let graph: ChzDependencyGraph;
   try {
-    graph = buildDependencyGraph(specs, source, fileName, {
+    graph = buildDependencyGraph(analysis, {
       maxCycleSize: options.maxCycleSize,
       confirmedEdges,
     });
@@ -326,7 +349,12 @@ export async function realize(
     const renderedEnsures = new Map(
       members.map((member) => [
         member.name,
-        renderEnsureHarness(specByName.get(member.name)!, fileName, specs),
+        renderEnsureHarness(
+          analysis,
+          specByName.get(member.name)!,
+          specs,
+          humanCode,
+        ),
       ]),
     );
     const writeEnsures = (): void => {
@@ -669,7 +697,11 @@ export async function realize(
   }
 
   if (realizedSymbols.length > 0) {
-    writeFileSync(join(baseDir, "implementation.ts"), renderEntryPoint(specs, fileName), "utf8");
+    writeFileSync(
+      join(baseDir, "implementation.ts"),
+      renderEntryPoint(analysis, humanCode, specs),
+      "utf8",
+    );
   }
 
   // Per-symbol verification is scoped, so the human epilogue wiring, the entry
@@ -727,10 +759,12 @@ export async function realize(
 
 /** Deterministic executable tests for human-authored ensures; engine-owned. */
 export function renderEnsureHarness(
+  analysis: ChzSourceFile,
   spec: ImagineSpec,
-  fileName: string,
-  allSpecs: readonly ImagineSpec[] = [spec],
+  allSpecs: readonly ImagineSpec[] = imagineSpecsFromChzSource(analysis),
+  humanCode: HumanCodeSplit = splitHumanCode(analysis),
 ): string {
+  const fileName = analysis.fileName;
   const base = realizationBaseName(fileName);
   const contracts = [
     ...spec.ensures.map((ensure) => ({ scope: spec.name, ensure })),
@@ -738,12 +772,11 @@ export function renderEnsureHarness(
       member.ensures.map((ensure) => ({ scope: `${spec.name}.${member.name}`, ensure })),
     ),
   ];
-  const contractSource = contracts.map(({ ensure }) => ensure.source).join("\n");
-  // The same boundary-aware matcher builds the dependency graph; using it here
-  // keeps the harness imports consistent with the realize order (an imported
-  // symbol without a graph edge could be realized after this one).
+  // Ensure imports and graph edges share the same Checker-symbol analysis. A
+  // property name or shadowing local therefore cannot manufacture an import
+  // that has no dependency edge.
   const mentioned = new Set(
-    mentionedSymbols(contractSource, allSpecs.map((candidate) => candidate.name)),
+    collectEstimatedDependencySources(analysis).get(spec.name)?.ensure ?? [],
   );
   const importedSymbols = allSpecs
     .filter((candidate) => candidate.name === spec.name || mentioned.has(candidate.name))
@@ -753,7 +786,12 @@ export function renderEnsureHarness(
     : importedSymbols
         .map((name) => `import { ${name} } from "../implementations/${name}.ts";`)
         .join("\n") + "\n";
-  const externalTypes = collectExternalTypeNames(spec, new Set(importedSymbols));
+  const externalTypes = collectExternalTypeNames(
+    analysis,
+    spec,
+    humanCode,
+    new Set(importedSymbols),
+  );
   const typeImports = externalTypes.length === 0
     ? ""
     : `import type { ${externalTypes.join(", ")} } from "../implementations/__prologue__.ts";\n`;
@@ -815,90 +853,160 @@ function indentSource(source: string, spaces: number): string {
 }
 
 function collectExternalTypeNames(
+  analysis: ChzSourceFile,
   spec: ImagineSpec,
+  humanCode: HumanCodeSplit,
   valueImports: ReadonlySet<string>,
 ): string[] {
-  const builtins = new Set([
-    "Array",
-    "BigInt",
-    "Boolean",
-    "Date",
-    "Error",
-    "Function",
-    "Map",
-    "Number",
-    "Object",
-    "Promise",
-    "Readonly",
-    "ReadonlyArray",
-    "Record",
-    "RegExp",
-    "Set",
-    "String",
-    "Symbol",
-    "Uint8Array",
-    "WeakMap",
-    "WeakSet",
-  ]);
-  const typeText = [
-    spec.parameters,
-    spec.returnType,
-    ...spec.ensures.map((ensure) => ensure.source),
-    ...spec.members.flatMap((member) => [
-      member.parameters,
-      member.returnType,
-      ...member.ensures.map((ensure) => ensure.source),
-    ]),
-  ].join("\n");
-  const names = maskNonCodeText(typeText).match(/\b[A-Z][A-Za-z0-9_$]*\b/g) ?? [];
-  return [...new Set(names.filter((name) => !valueImports.has(name) && !builtins.has(name)))].sort();
-}
-
-function maskNonCodeText(source: string): string {
-  let result = "";
-  let i = 0;
-  while (i < source.length) {
-    const start = i;
-    if (source[i] === "/" && source[i + 1] === "/") {
-      i += 2;
-      while (i < source.length && source[i] !== "\n") i++;
-    } else if (source[i] === "/" && source[i + 1] === "*") {
-      i += 2;
-      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) i++;
-      i = Math.min(source.length, i + 2);
-    } else if (source[i] === "'" || source[i] === '"' || source[i] === "`") {
-      const quote = source[i]!;
-      i++;
-      while (i < source.length) {
-        if (source[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        const ch = source[i++];
-        if (ch === quote) break;
-      }
-    } else {
-      result += source[i++];
-      continue;
-    }
-    result += source.slice(start, i).replace(/[^\r\n]/g, " ");
+  const declaration = analysis.imagineDeclarations.find((candidate) =>
+    candidate.name === spec.name
+  );
+  if (declaration === undefined) {
+    throw new Error(
+      `The analyzed declaration for '${spec.name}' disappeared before ensure emission.`,
+    );
   }
-  return result;
+
+  const symbols = new Map<number, string>();
+  const addReferences = (
+    references: ReturnType<typeof collectTypeSymbolReferences>,
+  ): void => {
+    for (const { symbol } of references) {
+      if (symbolComesOnlyFromTypeScriptLib(symbol)) continue;
+      if (humanCode.humanSymbolLayers.get(symbol.id) !== "prologue") {
+        continue;
+      }
+      if (!valueImports.has(symbol.name)) {
+        symbols.set(symbol.id, symbol.name);
+      }
+    }
+  };
+  addReferences(
+    collectTypeSymbolReferences(
+      analysis,
+      declaration.declaration,
+      declaration.declaration,
+    ),
+  );
+  for (const scope of declarationEnsureScopes(declaration)) {
+    addReferences(
+      collectTypeSymbolReferences(
+        analysis,
+        scope.ensure.conditionOrScenario,
+        scope.owner,
+      ),
+    );
+  }
+  return [...new Set(symbols.values())].sort();
 }
 
-export function renderEntryPoint(specs: ImagineSpec[], fileName: string): string {
-  const base = realizationBaseName(fileName);
-  const exports = specs
-    .map((spec) => `export { ${spec.name} } from "./implementations/${spec.name}.ts";`)
-    .join("\n");
+function renderForwardName(item: EntryPointNamedExport): string {
+  return item.importedName === item.exportedName
+    ? item.importedName
+    : `${item.importedName} as ${item.exportedName}`;
+}
+
+function renderNamedForwards(
+  items: readonly EntryPointNamedExport[],
+  moduleName: string,
+): string[] {
+  const value = items
+    .filter((item) => !item.typeOnly)
+    .map(renderForwardName);
+  const type = items
+    .filter((item) => item.typeOnly)
+    .map(renderForwardName);
+  return [
+    ...(value.length === 0
+      ? []
+      : [`export { ${value.join(", ")} } from ${JSON.stringify(moduleName)};`]),
+    ...(type.length === 0
+      ? []
+      : [`export type { ${type.join(", ")} } from ${JSON.stringify(moduleName)};`]),
+  ];
+}
+
+function layerExports(
+  humanCode: HumanCodeSplit,
+  layer: HumanCodeLayer,
+): string[] {
+  const moduleName = `./implementations/__${layer}__.ts`;
+  const named = humanCode.entryPoint.named.filter(
+    (item) =>
+      item.source.kind === "layer" &&
+      item.source.layer === layer,
+  );
+  const star = humanCode.entryPoint.star
+    .filter((item) => item.layer === layer)
+    .map((item) => item.rendered);
+  const defaultExport = humanCode.entryPoint.default?.layer === layer
+    ? [
+        humanCode.entryPoint.default.typeOnly
+          ? `export type { default } from ${JSON.stringify(moduleName)};`
+          : `export { default } from ${JSON.stringify(moduleName)};`,
+      ]
+    : [];
+  return [
+    ...renderNamedForwards(named, moduleName),
+    ...star,
+    ...defaultExport,
+  ];
+}
+
+export function renderEntryPoint(
+  analysis: ChzSourceFile,
+  humanCode: HumanCodeSplit,
+  specs: readonly ImagineSpec[] = imagineSpecsFromChzSource(analysis),
+): string {
+  const base = realizationBaseName(analysis.fileName);
+  const declarationExported = new Set(
+    analysis.imagineDeclarations
+      .filter((declaration) =>
+        declaration.declaration.modifiers?.some((modifier) =>
+          modifier.kind === SyntaxKind.ExportKeyword
+        ) === true
+      )
+      .map((declaration) => declaration.name),
+  );
+  const explicitImagineExports = humanCode.entryPoint.named.filter(
+    (item) => item.source.kind === "imagine",
+  );
+  const imagineLines = specs.flatMap((spec) => {
+    const forwards: EntryPointNamedExport[] = [
+      ...(declarationExported.has(spec.name)
+        ? [{
+            source: { kind: "imagine" as const, name: spec.name },
+            importedName: spec.name,
+            exportedName: spec.name,
+            typeOnly: false,
+          }]
+        : []),
+      ...explicitImagineExports.filter(
+        (item) =>
+          item.source.kind === "imagine" &&
+          item.source.name === spec.name,
+      ),
+    ];
+    const moduleName = `./implementations/${spec.name}.ts`;
+    const rendered = renderNamedForwards(forwards, moduleName);
+    const hasRuntimeForward = forwards.some((item) => !item.typeOnly);
+    return hasRuntimeForward
+      ? rendered
+      : [`import ${JSON.stringify(moduleName)};`, ...rendered];
+  });
+  const prologueExports = layerExports(humanCode, "prologue");
+  const epilogueExports = layerExports(humanCode, "epilogue");
+  const sections = [
+    'import "./implementations/__prologue__.ts";',
+    ...prologueExports,
+    ...imagineLines,
+    'import "./implementations/__epilogue__.ts";',
+    ...epilogueExports,
+  ];
   return `/// implementation.ts — realization entry point for ${base}.chz.ts (AUTO-GENERATED by chz-realize).
 /// Loads human prologue, realized symbols, then human epilogue. Do not edit; re-run \`chz realize\` instead.
 
-import "./implementations/__prologue__.ts";
-
-${exports}
-
-import "./implementations/__epilogue__.ts";
+${sections.join("\n")}
 `;
 }
 
@@ -960,10 +1068,6 @@ function collectAllEmittedFiles(baseDir: string, directory = baseDir): EmittedFi
 function readContexts(baseDir: string): string {
   const path = join(baseDir, "CONTEXTS.md");
   return existsSync(path) ? readFileSync(path, "utf8") : "";
-}
-
-function extractProfile(source: string): string | null {
-  return /^\s*@profile\s+([\p{L}_$][\p{L}\p{N}_$]*)/mu.exec(source)?.[1] ?? null;
 }
 
 function boundVerificationFeedback(output: string): string {

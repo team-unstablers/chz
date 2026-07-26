@@ -1,0 +1,4 @@
+// A line terminator after imagine ends the ordinary identifier statement.
+declare const imagine: unknown;
+imagine
+function next(): void {}

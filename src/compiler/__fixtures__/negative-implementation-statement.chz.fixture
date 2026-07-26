@@ -1,0 +1,5 @@
+// Implementation statements are forbidden at the top level of an imagine body.
+imagine function f(): void {
+  requirements(`Describe f.`);
+  const implementation = 1;
+}

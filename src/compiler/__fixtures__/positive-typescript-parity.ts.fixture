@@ -1,0 +1,17 @@
+// Overloads, modifiers, import attributes, and dynamic import remain plain TypeScript.
+export interface Loader {
+  load(value: string): Promise<string>;
+}
+
+export function choose(value: string): string;
+export function choose(value: number): number;
+export function choose(value: string | number): string | number {
+  return value;
+}
+
+export class Service {
+  static readonly version = 1;
+  public async load(path: string): Promise<unknown> {
+    return import(path, { with: { type: "json" } });
+  }
+}

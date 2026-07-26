@@ -29,13 +29,22 @@ graph implementation remain future work; the module-resolution / sidecar-shim
 spec that cross-file imports build on is settled in doc 20. When code and
 docs disagree, the docs are more current.
 
+**The AST-backed parser migration is done.** The v0 brace-depth scanner and
+the source-reading regexes scattered across `graph.ts`, `realize.ts` and
+`human-code.ts` are gone; `src/compiler/` owns parsing, projection,
+diagnostics and preflight, and nothing downstream re-parses source text to
+analyse it. See "AST-backed parser" below, plus docs `10` and `21`.
+
 Design lives in two places (both Korean, living documents): numbered specs in
-`docs/` — `00` intro, `20` module resolution & the no-build principle, `60`
+`docs/` — `00` intro, `10` imagine declaration grammar, `20` module
+resolution & the no-build principle, `21` projection, preflight ordering &
+obligation promotion, `60`
 realize output & overrides, `61` Realizer harness,
 `62` dependency graph, `63` harness rules & tool spec, `64` harness system
 prompt — and `docs/idea-sketches/` for open questions, rationale, and
-discussion history (`260723-00-init.md` is the latest sketch). If this file
-and those docs disagree, the docs are more likely to be current.
+discussion history (`260726-01-projection-spike-findings.md` is the latest
+sketch). If this file and those docs disagree, the docs are more likely to be
+current.
 
 Writing conventions for the numbered specs — number-band allocation, target
 audience and tone, cross-reference and code-fence rules — are defined in
@@ -87,8 +96,11 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   restricted subset (no `eval`, no `any`, no APIs outside the active
   `@profile`).
 - The Cheese extension keywords exist only at declaration level, so the
-  compiler is a declaration-level preprocessor plus the TypeScript compiler
-  API — no full self-built parser. There is deliberately **no `chz build`
+  compiler is a thin extension parser plus the TypeScript compiler API — no
+  full self-built parser. Cheese source is projected into valid TypeScript
+  with offsets preserved, and the AST and Checker are the authority for
+  everything except the extension shell (doc 21). There is deliberately
+  **no `chz build`
   step** (doc 20): realize commits plain TS — including a per-module sidecar
   shim (`example.ts` next to `example.chz.ts`) that consumers import as
   `./example` — so the user's existing toolchain (tsc/esbuild/Vite/Metro/
@@ -172,13 +184,67 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   ensure contracts) changed; otherwise dependents merely re-run their tests
   and are invalidated only if those go red.
 
+## AST-backed parser (docs 10, 21; sketches 260726-00, 260726-01)
+
+`src/compiler/` is the single place source is read: `ts-api.ts` (the only
+file importing `typescript/unstable/*`), `syntax.ts`, `parser.ts`,
+`projection.ts`, `typescript.ts`, `diagnostics.ts`, `module-specifiers.ts`,
+`symbol-references.ts`, and `analyze.ts` behind one `analyzeChzSource()` /
+`analyzeChzSources()` entry, with the grammar fixture corpus in
+`__fixtures__/`. One Program per file batch.
+
+The parser owns only the extension shell — `@profile`, top-level
+`imagine function/class`, imagined class members, and the `requirements` /
+`ensure` statement boundaries inside a contract body. Everything else
+(signatures, type expressions, contract expressions, imports, symbol
+resolution) belongs to the TypeScript AST and Checker.
+
+Projection preserves UTF-16 length and line breaks: top-level `imagine`
+becomes the same-length `declare`, so human code typechecks against a symbol
+that has no implementation yet; contract bodies collapse to `;` plus blanks,
+and the three constructs that would lose their contract AST — class-body
+contract statements, callable contract bodies, imagined property bodies —
+keep an origin-mapped island source alongside. Stripping is an emit step
+reached only after every diagnostic is green, so a fatal source costs zero
+directory creations and zero LLM calls; `--json`, `--dry-run` and realize
+share one analysis and report an identical diagnostic set.
+
+Grammar rules: `imagine` stays a contextual keyword, but a
+declaration-position `imagine` commits unless the next token can continue an
+expression (or a line terminator intervenes) — a blacklist, with no `null`
+fallback after commit. A contract body admits only `requirements(...)` and
+`ensure(...)` at its top level; scenario callbacks and ordinary class
+*members* are unaffected — the restriction is on statements. `requirements`
+takes exactly one static string. imagine callables and properties must
+annotate their type (CHZ1009). `export imagine` is valid;
+`export default` / `declare` / `abstract` are not.
+
+Downstream: entrypoint exposure follows the source's own exports for human
+and imagine symbols alike, values and type-only exports emitted separately;
+human relative specifiers are rewritten against the realization directory.
+Dependency edges come from four sources recorded per edge — signature
+TypeNodes, ensure expressions (both by Checker symbol identity), the
+requirements prose matcher in `src/requirements-mentions.ts`, and confirmed
+usage in realized artifacts. Semantic diagnostics split by the owner of the
+symbol they point at: a member access resolving to an imagine stub is an
+obligation, everything else is a human error that fails realize with zero
+sessions. `ImagineSpec` survives only where a string is genuinely the
+contract — CLI JSON, the realize prompt, deterministic emission, cache
+hashes.
+
+**No diagnostic is suppressed except one**, recorded in sketch `260726-01`
+§7.4: TS1036/1039/1040/1183 inside a human-written member of an
+`imagine class`, which the `declare class` projection provokes and no
+grammar rule can remove. Adding a second needs the same bar.
+
 ## v0 scope
 
 - Syntax: `imagine function/class` + `requirements` + `ensure` + minimal
   wiring statements. Nothing more.
-- Pipeline: `.chz` preprocessing (declaration-level) → tsc diagnostics →
-  realize (through the configured Realizer; OpenAI-compatible by default) →
-  emit TS + vitest tests → on green tests, record the hash in a lockfile.
+- Pipeline: analyze (`.chz` extension parse → TypeScript projection →
+  diagnostics; fatal ones stop here) → realize (through the configured
+  Realizer; OpenAI-compatible by default) → emit TS + vitest tests → on green
+  tests, record the hash in a lockfile.
 - First milestone — a single function (`충돌판정_2D`, 2D collision check)
   end-to-end, `.chz` → realize → tests green — is **done**
   (`examples/collision.chz.ts`).

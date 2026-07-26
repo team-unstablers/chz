@@ -1,0 +1,7 @@
+// Unicode names are Cheese declarations; an escaped spelling of imagine remains an ordinary identifier.
+declare const \u0069magine: () => void;
+\u0069magine();
+
+imagine function 충돌판정_2D(왼쪽: number, 오른쪽: number): boolean {
+  requirements(`Compare the two Unicode-named parameters.`);
+}

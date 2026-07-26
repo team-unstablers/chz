@@ -1,0 +1,2 @@
+// Modifiers must precede the imagine contextual keyword.
+imagine export function f(): void {}
