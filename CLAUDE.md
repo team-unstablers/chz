@@ -29,13 +29,21 @@ graph implementation remain future work; the module-resolution / sidecar-shim
 spec that cross-file imports build on is settled in doc 20. When code and
 docs disagree, the docs are more current.
 
+**In progress: the AST-backed parser migration.** The v0 preprocessor is a
+brace-depth scanner, not a parser, and several modules re-read source
+structure with their own regexes. `docs/idea-sketches/260726-00-ast-backed-cheese-parser.md`
+settles the replacement — a thin Cheese extension parser plus a TypeScript
+projection and an AST overlay — and drives it in phases (see
+"AST-backed parser migration" below for where the work currently stands).
+
 Design lives in two places (both Korean, living documents): numbered specs in
 `docs/` — `00` intro, `20` module resolution & the no-build principle, `60`
 realize output & overrides, `61` Realizer harness,
 `62` dependency graph, `63` harness rules & tool spec, `64` harness system
 prompt — and `docs/idea-sketches/` for open questions, rationale, and
-discussion history (`260723-00-init.md` is the latest sketch). If this file
-and those docs disagree, the docs are more likely to be current.
+discussion history (`260726-01-projection-spike-findings.md` is the latest
+sketch). If this file and those docs disagree, the docs are more likely to be
+current.
 
 Writing conventions for the numbered specs — number-band allocation, target
 audience and tone, cross-reference and code-fence rules — are defined in
@@ -171,6 +179,39 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   propagates to dependents only when a symbol's public surface (signature +
   ensure contracts) changed; otherwise dependents merely re-run their tests
   and are invalidated only if those go red.
+
+## AST-backed parser migration (sketches 260726-00, 260726-01)
+
+The Cheese parser owns only the extension shell — `@profile`, top-level
+`imagine function/class`, imagined class members, and the `requirements` /
+`ensure` statement boundaries inside a contract body. Everything else
+(signatures, type expressions, contract expressions, imports, symbol
+resolution) belongs to the TypeScript AST and Checker. Source text is
+projected into valid TypeScript with UTF-16 length and line breaks
+preserved; the two constructs that would lose their contract AST in that
+projection — class-body contract statements and imagined property bodies —
+keep an origin-mapped island source alongside it. Stripping `imagine`
+declarations becomes an emit step that runs only after every diagnostic is
+green, so a syntax error costs zero directory creations and zero LLM calls.
+
+Settled grammar rules: `imagine` stays a contextual keyword, but a
+declaration-position `imagine` commits unless the next token can continue an
+expression (or a line terminator intervenes) — a blacklist, with no `null`
+fallback after commit. A contract body admits only `requirements(...)` and
+`ensure(...)` at its top level; scenario callbacks admit ordinary
+TypeScript. `requirements` takes exactly one static string.
+`export imagine` is valid, `export default` / `declare` / `abstract` are
+not. Entrypoint exposure follows the source's own exports, for human symbols
+as well as imagine ones, and human relative specifiers are rewritten against
+the realization directory. Obligation promotion is decided by the owner of
+the symbol a diagnostic points at, never by the diagnostic code alone.
+
+Status: Phase 0 (fixture corpus + projection spike, `src/compiler/spike/`,
+`src/compiler/__fixtures__/`) is done and its findings are recorded in
+sketch `260726-01`. `src/compiler/ts-api.ts` is the boundary module that all
+`typescript/unstable/*` access is being collapsed onto. Phases 1–5
+(compiler core, preflight ordering, consumer migration, legacy preprocessor
+removal, docs) are still ahead.
 
 ## v0 scope
 
