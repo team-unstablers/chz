@@ -190,3 +190,78 @@ parser 테스트도 이 corpus를 그대로 읽는 편이 좋다.
 정본 문서는 이번 Phase에서 수정하지 않았다. Phase 1 문서 갱신 때
 “길이 보존 불가능”을 “main AST와 contract AST를 동시에 보존 불가능”으로
 고치는 것이 정확하다.
+
+## 7. 구현을 끝낸 뒤 추가로 확인된 사실 (2026-07-27)
+
+Phase 1~4를 끝낸 뒤, 스파이크 단계에서는 보이지 않던 것들이 드러났다.
+
+### 7.1 projection은 `imagine`을 공백이 아니라 `declare`로 바꾼다
+
+스파이크는 §1에서 "`imagine` 토큰을 같은 길이의 공백으로 바꾼다"고 적었다.
+production projection은 top-level `imagine function/class`에 한해 **같은 길이의
+`declare`**로 바꾼다. 두 토큰 모두 UTF-16 7 code unit이다.
+
+- `export imagine` → `export declare`
+- imagine class 내부의 imagined method/property에 붙은 `imagine`, 그리고
+  imagined `async` modifier는 ambient stub 호환을 위해 공백 처리
+- `@profile`도 공백 처리
+- 계약 body와 class-level 계약 statement는 첫 위치에 `;`를 남기는 placeholder
+
+`declare`를 쓰는 이유는 human 코드가 **아직 실현되지 않은 심볼을 상대로
+타입 검사를 받을 수 있어야** 하기 때문이다. 공백으로만 바꾸면 계약 body가
+사라진 함수가 "본문 없는 일반 선언"이 되어 TypeScript가 구현을 요구한다.
+
+### 7.2 island는 세 종류다
+
+§1은 island를 class-level contract와 imagined property contract 둘로 봤다.
+실제 `ProjectionIslandKind`는 셋이다.
+
+| kind | 원본 구문 |
+|---|---|
+| `class-contract-statement` | imagine class 바로 아래의 `requirements`/`ensure` 한 문장 |
+| `callable-contract-body` | top-level imagine function과 imagined method의 계약 본문 |
+| `property-contract-body` | imagined property의 계약 본문 |
+
+7.1의 결과다. `declare` 선언에는 본문이 올 수 없어 callable의 계약 본문도
+main projection에서 사라지므로, 그쪽에도 origin-mapped island가 필요하다.
+
+### 7.3 반환 타입 주석을 필수로 만들었다 (CHZ1009)
+
+7.1의 ambient stub은 반환 타입 주석이 없으면 `TS7010`을 낸다. 원본이 짓지
+않은 진단이므로 제외 목록에 넣는 안이 먼저 나왔지만, 260726-00 §6의
+"인위적인 TS diagnostic을 suppression 목록으로 숨기지 않는다"에 어긋난다.
+
+사용자 결정으로 **문법 쪽을 바꿨다.** imagine callable과 property는 타입
+주석이 필수이며, 없으면 CHZ1009다. 반환값이 없으면 `: void`를 쓴다. 공식
+예제 중 `phone-number-normalizer.chz.ts` 하나가 걸려 `: string`을 추가했다.
+
+### 7.4 `declare class` 안의 human 멤버 — 유일하게 남은 예외
+
+`imagine class`가 `declare class`가 되면, 같은 클래스 안의 **human이 직접
+구현한 멤버**가 ambient context 위반으로 잡힌다.
+
+- `TS1036` statements are not allowed in ambient contexts
+- `TS1039` initializers are not allowed in ambient contexts
+- `TS1040` modifier is not allowed in an ambient context
+- `TS1183` an implementation cannot be declared in ambient contexts
+
+human 멤버는 `docs/00-chz-intro.ko.md`가 명시적으로 약속한 기능이므로
+문법을 좁혀 해결할 수 없다(7.3과 달리 선택지가 없다). 계약 본문은 `{}`처럼
+짧을 수 있어, 길이를 보존하면서 임의의 반환 타입을 만족시키는 본문을 끼워
+넣는 것도 불가능하다.
+
+사용자 결정으로 **이 네 코드만, human 멤버 span 안에서만 제외**한다. 같은
+멤버 안의 일반 타입 오류는 그대로 보고된다. **§6의 suppression 금지 원칙에
+대한 유일한 예외이며, 다른 예외는 없다.** 늘리려면 같은 수준의 근거 —
+"문법으로는 해결할 수 없고, 길이 보존과 양립하지 않는다" — 가 필요하다.
+
+### 7.5 CHZ1004가 클래스 멤버 선언까지 막고 있었다
+
+260726-00 §4.1은 "계약 body 최상위의 **statement**"를 제한했는데, 구현이
+클래스 본문 전체에 적용해 human 멤버 선언까지 거부했다. 00 문서의
+`collisionDetection2D` 예제가 파싱되지 않는 상태였다.
+
+멤버 선언은 statement가 아니다. 판정을 "TypeScript가 클래스 멤버로
+파싱했는가"로 바꿔 고쳤다. 허용 목록을 두지 않은 이유는, 새 멤버 문법이
+생길 때마다 같은 버그가 재발하기 때문이다. 클래스 본문의 statement는 계속
+CHZ1004이며, positive/negative fixture 짝으로 고정했다.
