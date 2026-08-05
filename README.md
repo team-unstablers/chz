@@ -169,6 +169,14 @@ specification leaves a meaningful product decision open, the Realizer can ask
 the human; answers are recorded in `CONTEXTS.md` and become part of subsequent
 realization context and cache invalidation.
 
+Standing project rules go in `CHZPROJECT.md`, the Cheese counterpart of a
+`CLAUDE.md` — a symlink to one works. Each session picks up the nearest such
+file at or above its source directory and quotes it into the prompt inside a
+tag whose closing sequence is defused, so file content cannot impersonate the
+sections the engine writes around it. It is guidance only: it cannot lift a
+harness boundary or widen the active profile. Editing it does not invalidate
+symbols that are already realized.
+
 Generated code is optimized for auditability as well as correctness. Ambiguous
 decisions must be marked with `ASSUMPTION:` comments so reviewers can find the
 places where the implementation interpreted underspecified intent.

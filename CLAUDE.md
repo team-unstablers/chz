@@ -198,13 +198,20 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   markers untouchable), explicit session endings. Structure: system =
   [fixed role part (byte-identical across sessions, cache-friendly),
   per-session baseline]. Baseline is deterministic and frozen per session:
-  `<env>` block (read/write roots, @profile, model, date) → symbol spec
-  (verbatim) → resolved dependency surfaces (name-sorted excerpts) →
-  CONTEXTS.md → verification feedback (retries only); absent sources are
-  omitted, unreadable ones fail the session start. At the turn cap only
-  Finish/Block/Abort stay materialized and a closing prompt forces an
+  `<env>` block (read/write roots, @profile, model, date, configured blocked
+  paths, output language) → output-language rule → `CHZPROJECT.md` guidance →
+  symbol spec (verbatim) → resolved dependency surfaces (name-sorted
+  excerpts) → CONTEXTS.md → verification feedback (retries only); absent
+  sources are omitted, unreadable ones fail the session start. At the turn cap
+  only Finish/Block/Abort stay materialized and a closing prompt forces an
   explicit ending with a handover summary; no ending → `failed`. Whether
   prompt revisions join the invalidation hash is an open question.
+  `CHZPROJECT.md` is the Cheese counterpart of a `CLAUDE.md` and may be a
+  symlink to one: the nearest file at or above the source's directory wins
+  outright (no accumulation, never above the project root), and its content is
+  quoted inside a `<chzproject>` tag whose closing sequence is defused so file
+  text cannot impersonate an engine section. Like `outputLanguage` it stays
+  out of the invalidation hash — doc 64 records that as an open question.
 - **Dependency graph (62)** — a symbol-level DAG drives realize order
   (topological, leaves first). Edges are discovered in three stages:
   signature type refs → requirements/ensure mentions → actual usage extracted
