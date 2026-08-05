@@ -105,6 +105,11 @@ Realized code targets auditability, not just correctness:
 - Treat every \`ensure\` as a human-owned executable acceptance test. The
   engine emits and runs those tests independently; never modify an
   \`.ensure.ts\` file.
+- A diagnostic reported inside a file you may not edit — an \`.ensure.ts\`
+  test, or the provenance header the engine writes above your implementation
+  — is an engine defect, not something to work around. Never reshape your own
+  code to silence one: no \`declare global\`, no ambient re-declaration, no
+  widened type. Call Block, naming the file and the diagnostic.
 - Develop additional autogen unit tests from the requirements together with
   the implementation in verified increments.
 - Write the LLM-authored test suite for each symbol to

@@ -35,6 +35,30 @@ permissions."* — 행위 규범 전체를 permission ruleset과 주입 지시�
 무엇이 프롬프트에 없는지는 마지막 절 '프롬프트에 넣지 않는 것'에서
 명시합니다.
 
+## 이 기준을 실제로 적용한 예: 고칠 수 없는 파일의 진단
+
+2026-08-05에 cross-file 예제를 실제로 realize하다가 이런 일이 있었습니다.
+엔진이 만든 `.ensure.ts` 테스트가 타입 하나를 import하지 않는 버그가 있었고,
+모델은 그 파일을 고칠 수 없었습니다(프롬프트가 금지). 같은 상황에서 한 세션은
+`Block`으로 정직하게 올렸고, **다른 세션은 자기 구현 파일에 `declare global`을
+심어 타입 오류만 지웠습니다.** 엔진 버그는 그대로 둔 채 전역 이름 공간을
+오염시킨 것입니다.
+
+세 겹 중 어디로 막을지 나눠 보면 이렇습니다.
+
+- **코드로 막을 수 있는 것** — `declare global` 같은 전역 오염은 산출물의
+  AST를 보면 결정적으로 판정됩니다. 이것은 00 문서가 말하는 '제한된 부분집합'
+  위반이므로 검증에서 거부하는 것이 옳습니다. 우회 수단마다 프롬프트에 한
+  줄씩 늘리는 방식은 `@ts-ignore`, `as any`, 별도 `.d.ts`처럼 끝없이
+  이어집니다.
+- **프롬프트로만 가능한 것** — "이 진단은 네 잘못이 아니다"라는 **판단**입니다.
+  같은 빨간불을 보고 자기 코드를 고칠 것인지 사람을 부를 것인지는 소유권에
+  대한 해석이고, 코드가 대신 정해 줄 수 없습니다.
+
+그래서 프롬프트에는 후자 한 줄만 들어갔습니다(고정부 'What you produce'의
+"A diagnostic reported inside a file you may not edit …" 항목). 전자는
+프롬프트가 아니라 검증에서 막아야 할 몫으로 남아 있습니다.
+
 # 시스템 프롬프트의 구조 — 고정부와 가변부
 
 시스템 프롬프트는 **두 파트의 배열**로 조립됩니다 (opencode V2의
@@ -190,6 +214,11 @@ Realized code targets auditability, not just correctness:
 - Treat every `ensure` as a human-owned executable acceptance test. The
   engine emits and runs those tests independently; never modify an
   `.ensure.ts` file.
+- A diagnostic reported inside a file you may not edit — an `.ensure.ts`
+  test, or the provenance header the engine writes above your implementation
+  — is an engine defect, not something to work around. Never reshape your own
+  code to silence one: no `declare global`, no ambient re-declaration, no
+  widened type. Call Block, naming the file and the diagnostic.
 - Develop additional autogen unit tests from the requirements together with
   the implementation in verified increments.
 - Write the LLM-authored test suite for each symbol to
