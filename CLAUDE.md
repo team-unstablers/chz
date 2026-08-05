@@ -23,11 +23,20 @@ artifact falls back to re-realization, an edited CONTEXTS.md discards the
 cache, and a changed human layer (prologue/epilogue) routes every reused
 symbol through the retest net. `chz realize -j N` runs independent graph
 groups concurrently (AskUser batches are serialized FIFO), and the file-less
-form realizes the `include` globs from chz.config.js file by file. Broader
-syntax, override (`@chz-realize-override`) preservation, and the cross-file
-graph implementation remain future work; the module-resolution / sidecar-shim
-spec that cross-file imports build on is settled in doc 20. When code and
-docs disagree, the docs are more current.
+form realizes the `include` globs from chz.config.js file by file. The doc-20
+sidecar shim is emitted (`src/shim.ts`): a resolved run writes `example.ts`
+next to `example.chz.ts`, re-exporting the entry point **without a file
+extension** so a consuming project never needs
+`allowImportingTsExtensions`, and a slot already held by a human-written file
+fails the run before any directory or session — which is what lets a
+dependent `.chz.ts` typecheck against a realized one at all. v0 records no
+shim hash, so an edited shim is silently overwritten rather than reported as
+drift (noted in doc 20). Broader syntax, override
+(`@chz-realize-override`) preservation, and the cross-file dependency graph
+itself remain future work: realize still walks files one at a time in
+include-glob order, and `buildDependencyGraph` takes a single
+`ChzSourceFile`, so cross-file realize order is the human's to arrange. When
+code and docs disagree, the docs are more current.
 
 **The AST-backed parser migration is done.** The v0 brace-depth scanner and
 the source-reading regexes scattered across `graph.ts`, `realize.ts` and
