@@ -379,9 +379,15 @@ function pathContains(root: string, target: string): boolean {
 }
 
 function resolveHarnessOutputPath(context: ChzRealizeContext, path: string): string {
-  const lexical = resolve(context.projectRoot, path);
-  const canonical = canonicalizePossiblyMissing(lexical);
   const output = canonicalizePossiblyMissing(resolve(context.outputDir));
+  const primary = resolve(context.projectRoot, path);
+  // Same second reading the write tools accept, on the same terms: a relative
+  // path may be based on the output directory the session works inside, but
+  // only an existing test file is evidence that it was meant that way.
+  const fallback = isAbsolute(path) ? undefined : resolve(context.outputDir, path);
+  const lexical =
+    !existsSync(primary) && fallback !== undefined && existsSync(fallback) ? fallback : primary;
+  const canonical = canonicalizePossiblyMissing(lexical);
   if (!pathContains(output, canonical)) {
     throw new Error(
       `Test file access denied: ${path} is outside the realization output directory (${context.outputDir}). Choose test files inside the output directory.`,

@@ -75,6 +75,63 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
     );
   });
 
+  it("reads a relative path as output-directory-relative when the project root has no such file", async () => {
+    // The realize engine creates this layout before a session starts.
+    mkdirSync(join(outputDir, "implementations"), { recursive: true });
+    const runtime = new ChzFilesystemToolRuntime(context());
+
+    // The session works inside the output directory, so this is where the
+    // model means to put an implementation — no wasted turn correcting it.
+    await expect(
+      runtime.execute("WriteFile", { path: "implementations/answer.ts", content: "export const a = 1;\n" }),
+    ).resolves.toBe("Created file successfully: implementations/answer.ts");
+    expect(existsSync(join(outputDir, "implementations", "answer.ts"))).toBe(true);
+    expect(existsSync(join(projectRoot, "implementations", "answer.ts"))).toBe(false);
+
+    // A read of the same relative path finds the artifact just written, so the
+    // two families cannot disagree about which file a path names.
+    await expect(runtime.execute("ReadFile", { path: "implementations/answer.ts" })).resolves.toContain(
+      "export const a = 1;",
+    );
+    await expect(
+      runtime.execute("FindAndReplace", {
+        path: "implementations/answer.ts",
+        oldString: "const a = 1",
+        newString: "const a = 2",
+      }),
+    ).resolves.toContain("Edit applied successfully");
+    expect(readFileSync(join(outputDir, "implementations", "answer.ts"), "utf8")).toContain("const a = 2");
+  });
+
+  it("prefers the project-root reading and never lets the fallback widen a boundary", async () => {
+    mkdirSync(join(projectRoot, "shared"), { recursive: true });
+    writeFileSync(join(projectRoot, "shared", "note.txt"), "project copy\n", "utf8");
+    mkdirSync(join(outputDir, "shared"), { recursive: true });
+    writeFileSync(join(outputDir, "shared", "note.txt"), "output copy\n", "utf8");
+    const runtime = new ChzFilesystemToolRuntime(context());
+
+    // Both readings exist: the documented base still wins.
+    await expect(runtime.execute("ReadFile", { path: "shared/note.txt" })).resolves.toContain(
+      "project copy",
+    );
+
+    // The fallback only ever proposes another path inside the output directory,
+    // so an escape stays an escape and a blocked path stays blocked.
+    await expect(runtime.execute("WriteFile", { path: "../escape.ts", content: "x" })).resolves.toContain(
+      "Write access denied",
+    );
+    await expect(runtime.execute("ReadFile", { path: ".env" })).resolves.toContain(
+      "Read access denied",
+    );
+
+    // A denied write must not come back as an invented location: the fallback
+    // needs a directory that is already part of the realization layout.
+    await expect(
+      runtime.execute("WriteFile", { path: "nowhere/deep/created.ts", content: "x" }),
+    ).resolves.toContain("Write access denied");
+    expect(existsSync(join(outputDir, "nowhere"))).toBe(false);
+  });
+
   it("resolves symlinks before checking boundaries and hides escaping directory entries", async () => {
     const outside = mkdtempSync(join(tmpdir(), "chz-filesystem-outside-"));
     tempDirectories.push(outside);

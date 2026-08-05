@@ -18,7 +18,8 @@ const objectSchema = (properties: Record<string, unknown> = {}, required: string
 
 const pathProperty = {
   type: "string",
-  description: "An absolute path or a path relative to the project root.",
+  description:
+    "An absolute path, or a path relative to the project root; a relative path that does not resolve there is also tried against the realization output directory.",
 };
 const pageProperties = {
   offset: { type: "integer", minimum: 1, description: "One-based starting line or entry." },

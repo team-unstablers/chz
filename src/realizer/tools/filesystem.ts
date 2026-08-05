@@ -396,8 +396,35 @@ export class ChzFilesystemToolRuntime {
     }
   }
 
+  /**
+   * The second reading of a relative path, or undefined when there is none.
+   *
+   * A session spends nearly all of its time inside the output directory, so
+   * `implementations/foo.ts` is at least as likely to mean the artifact it just
+   * wrote as a file at the top of the project. The project root stays the
+   * documented base and always wins; this is only consulted when that reading
+   * turns out not to work.
+   *
+   * It must never *invent* a location, which is the danger of a blanket retry:
+   * a path denied for escaping the output directory would come back as a
+   * plausible-looking path inside it, and the model would silently get a file
+   * it did not ask for. Each caller therefore requires evidence that the
+   * fallback names something already there.
+   */
+  #outputRelative(displayPath: string): string | undefined {
+    if (isAbsolute(displayPath)) return undefined;
+    const primary = resolve(this.#context.projectRoot, displayPath);
+    const fallback = resolve(this.#context.outputDir, displayPath);
+    return fallback === primary ? undefined : fallback;
+  }
+
   #resolveRead(displayPath: string): string {
-    const lexical = resolve(this.#context.projectRoot, displayPath);
+    const primary = resolve(this.#context.projectRoot, displayPath);
+    const fallback = this.#outputRelative(displayPath);
+    // Evidence for a read is the file itself. When neither reading exists the
+    // primary is used, so "File not found" still names what was asked for.
+    const lexical =
+      !existsSync(primary) && fallback !== undefined && existsSync(fallback) ? fallback : primary;
     const canonical = canonicalizePossiblyMissing(lexical);
     if (!contains(this.#projectRoot, canonical)) {
       throw new Error(
@@ -417,7 +444,20 @@ export class ChzFilesystemToolRuntime {
   }
 
   #resolveWrite(displayPath: string): string {
-    const lexical = resolve(this.#context.projectRoot, displayPath);
+    const primary = resolve(this.#context.projectRoot, displayPath);
+    const fallback = this.#outputRelative(displayPath);
+    // Evidence for a write is an existing directory to write into: the file
+    // itself may legitimately be new, but its parent must already be part of
+    // the realization layout. Without that condition a path that escapes the
+    // output directory — through `..` or through a symlink — would be quietly
+    // rewritten into a fresh tree inside it.
+    const lexical =
+      !contains(this.#outputDir, canonicalizePossiblyMissing(primary)) &&
+      fallback !== undefined &&
+      existsSync(dirname(fallback)) &&
+      contains(this.#outputDir, canonicalizePossiblyMissing(fallback))
+        ? fallback
+        : primary;
     const canonical = canonicalizePossiblyMissing(lexical);
     if (!contains(this.#outputDir, canonical)) {
       throw new Error(
