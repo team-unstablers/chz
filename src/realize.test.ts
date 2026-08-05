@@ -604,13 +604,13 @@ describe("canonical prompt and symbol graph", () => {
       const entryPoint = renderEntryPoint(analysis, humanCode, specs);
 
       expect(humanCode.epilogue).toContain(
-        'import { 충돌판정_2D } from "./충돌판정_2D.ts";',
+        'import { checkCollision2D } from "./checkCollision2D.ts";',
       );
       expect(entryPoint).toContain(
-        'import "./implementations/충돌판정_2D.ts";',
+        'import "./implementations/checkCollision2D.ts";',
       );
       expect(entryPoint).not.toContain(
-        'export { 충돌판정_2D } from "./implementations/충돌판정_2D.ts";',
+        'export { checkCollision2D } from "./implementations/checkCollision2D.ts";',
       );
     } finally {
       analysis.dispose();

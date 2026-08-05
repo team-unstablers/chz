@@ -213,7 +213,7 @@ describe("splitHumanCode", () => {
       shimFile,
       [
         "export interface CombatStats { attack: number; defense: number; luck: number; }",
-        "export function 크리티컬_판정(_stats: CombatStats): boolean { return false; }",
+        "export function isCriticalHit(_stats: CombatStats): boolean { return false; }",
         "",
       ].join("\n"),
       "utf8",

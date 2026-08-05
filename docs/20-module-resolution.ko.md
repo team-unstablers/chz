@@ -132,7 +132,7 @@ import합니다:
 /// battle.chz.ts (발췌)
 import { ShootingGame } from './example';
 
-imagine function 보스전_시작(game: ShootingGame): void {
+imagine function startBossFight(game: ShootingGame): void {
   requirements(`
     # 보스전을 시작하십시오.
     - 진행 중인 게임의 일반 적을 모두 제거하고 보스를 등장시켜야 합니다.
@@ -158,7 +158,7 @@ realize는 사람이 쓴 코드를 그대로 두지 않고 realization 디렉토
 
 ```typescript chz
 /// battle.chz.ts (발췌)
-import { 크리티컬_판정, type CombatStats } from "./stats";
+import { isCriticalHit, type CombatStats } from "./stats";
 ```
 
 `battle.chz.ts` 옆에는 `stats.ts` shim이 있으니 이 경로는 맞습니다. 그런데 이
@@ -171,7 +171,7 @@ import { 크리티컬_판정, type CombatStats } from "./stats";
 
 ```typescript
 /// chz/realization/battle/implementations/__prologue__.ts (발췌)
-import { 크리티컬_판정, type CombatStats } from "../../../stats";
+import { isCriticalHit, type CombatStats } from "../../../stats";
 ```
 
 가리키는 파일은 원본과 정확히 같습니다. 다시 쓰는 것은 **경로뿐이고, 무엇을
@@ -185,8 +185,8 @@ import { 크리티컬_판정, type CombatStats } from "../../../stats";
 import { readFileSync } from "node:fs";     // 그대로
 import { z } from "zod";                     // 그대로
 import { config } from "@app/settings";      // 그대로 (경로 별칭)
-import { 원점 } from "./geometry";           // 다시 씁니다
-import { 상수 } from "../shared/const";      // 다시 씁니다
+import { origin } from "./geometry";         // 다시 씁니다
+import { constants } from "../shared/const"; // 다시 씁니다
 ```
 
 패키지 이름(`zod`, `node:fs`)이나 tsconfig에 설정한 경로 별칭(`@app/...`)은
@@ -202,9 +202,9 @@ import { 상수 } from "../shared/const";      // 다시 씁니다
 경로가 **실행해 봐야 알 수 있는 값**이면 다시 쓸 수 없습니다.
 
 ```typescript chz
-const 이름 = 조건 ? "./a" : "./b";
-const 모듈 = await import(이름);
-//                        ^ CHZ3001: 동적 import의 경로는 고정된 문자열이어야 합니다
+const name = condition ? "./a" : "./b";
+const mod = await import(name);
+//                       ^ CHZ3001: 동적 import의 경로는 고정된 문자열이어야 합니다
 ```
 
 이런 코드를 조용히 넘기면, 복사된 뒤에 엉뚱한 곳을 가리키는 채로 실행되다가

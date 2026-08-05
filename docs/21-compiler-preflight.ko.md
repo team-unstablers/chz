@@ -52,7 +52,7 @@ TypeScript는 `imagine`이라는 단어를 모릅니다. 그러니 TypeScript에
 그래서 지금은 자르지 않고 **같은 자리에 같은 길이의 다른 것을 놓습니다.**
 
 ```typescript chz
-imagine function 점수계산(콤보: number): number {
+imagine function calculateScore(combo: number): number {
   requirements(`콤보 수에 비례해 점수를 계산합니다.`);
 }
 ```
@@ -60,7 +60,7 @@ imagine function 점수계산(콤보: number): number {
 TypeScript에게는 이렇게 넘어갑니다.
 
 ```typescript
-declare function 점수계산(콤보: number): number ;
+declare function calculateScore(combo: number): number ;
 
 ```
 
@@ -76,9 +76,9 @@ declare function 점수계산(콤보: number): number ;
 바뀐 결과는 **글자 수도 줄 수도 원본과 똑같습니다.** 그래서 TypeScript가
 알려주는 위치를 번역 없이 그대로 쓸 수 있습니다. 어긋날 일이 없습니다.
 
-이렇게 해 두면 TypeScript는 `점수계산`이 "숫자 하나를 받아 숫자를 돌려주는
+이렇게 해 두면 TypeScript는 `calculateScore`가 "숫자 하나를 받아 숫자를 돌려주는
 함수"라는 것을 **아직 구현이 없는데도** 알게 됩니다. 그래서 여러분이 사람
-코드에서 `점수계산(3)`을 호출하면 타입 검사가 제대로 됩니다.
+코드에서 `calculateScore(3)`을 호출하면 타입 검사가 제대로 됩니다.
 
 ### 지워 버린 계약은 어디로 가나요
 
@@ -96,14 +96,14 @@ declare function 점수계산(콤보: number): number ;
 두 번째 종이가 필요한 자리는 세 군데입니다.
 
 ```typescript chz
-imagine class 카운터 {
+imagine class Counter {
   requirements(`카운터를 관리합니다.`);      // ← ① 클래스 본문의 계약
 
-  imagine readonly 점수: number {
+  imagine readonly score: number {
     requirements(`현재 점수입니다.`);        // ← ② 프로퍼티의 계약 본문
   }
 
-  imagine 증가(): void {
+  imagine increment(): void {
     requirements(`점수를 1 올립니다.`);      // ← ③ 함수·메서드의 계약 본문
   }
 }
@@ -177,15 +177,15 @@ LLM을 부르는 데는 시간과 비용이 드니, 고칠 수 있는 오류라�
 생깁니다.**
 
 ```typescript chz
-imagine class 게임 {
+imagine class Game {
   requirements(`간단한 게임을 관리합니다.`);
 }
 
-const 게임하나 = new 게임();
-게임하나.시작();   // 아직 만들지 않은 메서드
+const game = new Game();
+game.start();   // 아직 만들지 않은 메서드
 ```
 
-`시작()`은 아직 어디에도 없습니다. 보통의 TypeScript라면 "그런 속성은
+`start()`는 아직 어디에도 없습니다. 보통의 TypeScript라면 "그런 속성은
 없습니다"라는 오류(`TS2339`)가 납니다. 하지만 치즈기여어에서는 오류가
 아니라 **LLM에게 주는 숙제**입니다. 여러분이 그것을 썼다는 사실 자체가
 "이걸 만들어 주세요"라는 요청이니까요.
@@ -193,8 +193,8 @@ const 게임하나 = new 게임();
 그런데 똑같은 오류가 진짜 실수일 때도 있습니다.
 
 ```typescript
-const 사용자 = { 이름: "렌", 나이: 14 };
-console.log(사용자.이름름);   // 오타
+const user = { name: "Ren", age: 14 };
+console.log(user.namee);   // 오타
 ```
 
 이것도 `TS2339`입니다. 하지만 이건 숙제가 아니라 그냥 오타입니다.
@@ -212,8 +212,8 @@ LLM에게 부탁하게 되는 셈이죠.
 
 둘 다 맞을 때만 숙제입니다. 나머지는 전부 사람이 고쳐야 할 오류입니다.
 
-`게임하나.시작()`은 `게임하나`의 타입이 `imagine class 게임`이므로 숙제가
-됩니다. `사용자.이름름`은 `사용자`가 여러분이 만든 평범한 객체이므로
+`game.start()`는 `game`의 타입이 `imagine class Game`이므로 숙제가
+됩니다. `user.namee`는 `user`가 여러분이 만든 평범한 객체이므로
 오타입니다.
 
 ### 사람이 고칠 오류는 LLM을 부르지 않습니다

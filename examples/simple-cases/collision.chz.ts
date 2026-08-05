@@ -29,7 +29,7 @@ interface Rectangle {
 /** A shape used for collision detection: a discriminated union of a circle or rectangle. */
 type Shape = Circle | Rectangle;
 
-imagine function 충돌판정_2D(a: Shape, b: Shape): boolean {
+imagine function checkCollision2D(a: Shape, b: Shape): boolean {
   requirements(`
     # Implement a function that determines whether two 2D shapes collide (overlap).
 
@@ -51,7 +51,7 @@ imagine function 충돌판정_2D(a: Shape, b: Shape): boolean {
 
   // Write short contracts directly as boolean expressions, like assertions.
   ensure(
-    충돌판정_2D(
+    checkCollision2D(
       { kind: "circle", center: { x: 0, y: 0 }, radius: 5 },
       { kind: "circle", center: { x: 0, y: 0 }, radius: 5 },
     ) === true,
@@ -60,46 +60,46 @@ imagine function 충돌판정_2D(a: Shape, b: Shape): boolean {
 
   // Write contracts that need setup or multiple assertions as executable scenarios.
   ensure("Distant shapes must not collide.", () => {
-    const 원: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 1 };
-    const 사각형: Shape = {
+    const circle: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 1 };
+    const rectangle: Shape = {
       kind: "rectangle",
       origin: { x: 10, y: 10 },
       width: 2,
       height: 2,
     };
 
-    assert(충돌판정_2D(원, 사각형) === false);
+    assert(checkCollision2D(circle, rectangle) === false);
   });
 
   ensure("Collision detection must be symmetric with respect to argument order.", () => {
-    const 원: Shape = { kind: "circle", center: { x: 2, y: 2 }, radius: 2 };
-    const 사각형: Shape = {
+    const circle: Shape = { kind: "circle", center: { x: 2, y: 2 }, radius: 2 };
+    const rectangle: Shape = {
       kind: "rectangle",
       origin: { x: 3, y: 1 },
       width: 3,
       height: 3,
     };
 
-    assert(충돌판정_2D(원, 사각형) === 충돌판정_2D(사각형, 원));
+    assert(checkCollision2D(circle, rectangle) === checkCollision2D(rectangle, circle));
   });
 
   ensure("A circle and rectangle touching at one point must collide.", () => {
-    const 원: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 2 };
-    const 사각형: Shape = {
+    const circle: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 2 };
+    const rectangle: Shape = {
       kind: "rectangle",
       origin: { x: 2, y: -1 },
       width: 2,
       height: 2,
     };
 
-    assert(충돌판정_2D(원, 사각형) === true);
+    assert(checkCollision2D(circle, rectangle) === true);
   });
 }
 
 // --- Minimal wiring: call the realized function and print the result. ---
 
-const 원A: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 5 };
-const 사각형B: Shape = { kind: "rectangle", origin: { x: 3, y: 3 }, width: 4, height: 4 };
+const circleA: Shape = { kind: "circle", center: { x: 0, y: 0 }, radius: 5 };
+const rectangleB: Shape = { kind: "rectangle", origin: { x: 3, y: 3 }, width: 4, height: 4 };
 
-const 충돌여부 = 충돌판정_2D(원A, 사각형B);
-console.log(`Collision: ${충돌여부}`);
+const collided = checkCollision2D(circleA, rectangleB);
+console.log(`Collision: ${collided}`);

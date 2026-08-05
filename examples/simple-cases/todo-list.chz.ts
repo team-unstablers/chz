@@ -40,15 +40,15 @@ imagine class TodoList {
     ensure("New IDs start at 1 and increase by 1.", () => {
       const todos = new TodoList();
 
-      assert(todos.add("첫 번째") === 1);
-      assert(todos.add("두 번째") === 2);
+      assert(todos.add("First") === 1);
+      assert(todos.add("Second") === 2);
     });
 
     ensure("Titles are normalized and empty titles are rejected.", () => {
       const todos = new TodoList();
-      todos.add("  문서 읽기  ");
+      todos.add("  Read the docs  ");
 
-      assert(todos.list()[0]?.title === "문서 읽기");
+      assert(todos.list()[0]?.title === "Read the docs");
 
       let rejected = false;
       try {
@@ -68,7 +68,7 @@ imagine class TodoList {
 
     ensure("Completing an existing ID is idempotent.", () => {
       const todos = new TodoList();
-      const id = todos.add("완료할 일");
+      const id = todos.add("Task to complete");
 
       assert(todos.complete(id) === true);
       assert(todos.complete(id) === true);
@@ -82,8 +82,8 @@ imagine class TodoList {
 
     ensure("The list is a snapshot that preserves ID order and completion state.", () => {
       const todos = new TodoList();
-      const first = todos.add("첫 번째");
-      const second = todos.add("두 번째");
+      const first = todos.add("First");
+      const second = todos.add("Second");
       assert(todos.complete(second) === true);
 
       const snapshot = todos.list();
@@ -95,8 +95,8 @@ imagine class TodoList {
 
     ensure("Modifying a returned snapshot does not change internal state.", () => {
       const todos = new TodoList();
-      todos.add("원래 제목");
-      todos.add("남아 있을 일");
+      todos.add("Original title");
+      todos.add("Task that must remain");
 
       const snapshot = todos.list();
       const mutableSnapshot = snapshot as Array<{
@@ -107,7 +107,7 @@ imagine class TodoList {
 
       // Also allow exceptions when the implementation freezes the snapshot.
       try {
-        mutableSnapshot[0]!.title = "변조된 제목";
+        mutableSnapshot[0]!.title = "Tampered title";
       } catch {}
       try {
         mutableSnapshot.pop();
@@ -115,8 +115,8 @@ imagine class TodoList {
 
       const freshSnapshot = todos.list();
       assert(freshSnapshot.length === 2);
-      assert(freshSnapshot[0]?.title === "원래 제목");
-      assert(freshSnapshot[1]?.title === "남아 있을 일");
+      assert(freshSnapshot[0]?.title === "Original title");
+      assert(freshSnapshot[1]?.title === "Task that must remain");
     });
   }
 }
@@ -124,8 +124,8 @@ imagine class TodoList {
 // --- Minimal wiring: print state changes from the realized class. ---
 
 const todos = new TodoList();
-todos.add("치즈 언어 문서 읽기");
-const firstRealizeId = todos.add("첫 클래스 realize 해보기");
+todos.add("Read the Cheese language docs");
+const firstRealizeId = todos.add("Realize the first class");
 todos.complete(firstRealizeId);
 
 console.log("Todo list:", todos.list());

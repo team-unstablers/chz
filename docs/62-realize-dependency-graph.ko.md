@@ -11,25 +11,25 @@ realize는 한 번에 하나의 imagine 선언을 하나의 세션([61 문서](6
 ```typescript chz
 /// battle.chz.ts (발췌)
 
-imagine function 크리티컬_판정(attacker: CombatStats): boolean {
+imagine function isCriticalHit(attacker: CombatStats): boolean {
   requirements(`
     # 공격자의 스탯을 기반으로 이번 공격이 크리티컬인지 판정하십시오.
     - attacker.luck(0~100)이 높을수록 크리티컬 확률이 높아야 합니다.
   `);
   ensure(
-    typeof 크리티컬_판정({ attack: 10, defense: 5, luck: 100 }) === "boolean",
+    typeof isCriticalHit({ attack: 10, defense: 5, luck: 100 }) === "boolean",
     "크리티컬 판정은 boolean을 반환합니다.",
   );
 }
 
-imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats): number {
+imagine function calculateDamage(attacker: CombatStats, defender: CombatStats): number {
   requirements(`
     # 공격자와 방어자의 스탯을 기반으로 최종 데미지를 계산하십시오.
-    - 크리티컬 여부는 \`크리티컬_판정\`을 사용하여 판정하고,
+    - 크리티컬 여부는 \`isCriticalHit\`를 사용하여 판정하고,
       크리티컬이면 최종 데미지를 2배로 적용하십시오.
   `);
   ensure("최종 데미지는 음이 아닌 정수입니다.", () => {
-    const damage = 데미지_계산(
+    const damage = calculateDamage(
       { attack: 10, defense: 5, luck: 0 },
       { attack: 5, defense: 5, luck: 0 },
     );
@@ -39,12 +39,12 @@ imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats):
 }
 ```
 
-여기서 `데미지_계산`을 먼저 realize하려고 하면 두 가지 문제가 생깁니다:
+여기서 `calculateDamage`를 먼저 realize하려고 하면 두 가지 문제가 생깁니다:
 
-1. **컨텍스트가 없습니다.** requirements가 `크리티컬_판정`을 사용하라고 지시하지만,
+1. **컨텍스트가 없습니다.** requirements가 `isCriticalHit`를 사용하라고 지시하지만,
    아직 그 함수의 구현도, realize가 emit한 타입 정의도, `ASSUMPTION:` 주석도
    존재하지 않습니다. LLM은 존재하지 않는 코드 위에 구현을 쌓아야 합니다.
-2. **검증할 수 없습니다.** `데미지_계산`의 유닛 테스트를 실행하면 `크리티컬_판정`이
+2. **검증할 수 없습니다.** `calculateDamage`의 유닛 테스트를 실행하면 `isCriticalHit`가
    실제로 호출됩니다. 구현이 없으므로 테스트는 실패하는 것이 아니라 **컴파일조차
    되지 않습니다.** realize의 완료 조건이 '테스트 green'인 이상([60 문서](60-realize-intro.ko.md) 참조),
    의존 대상이 먼저 완성되어 있어야 합니다.
@@ -75,7 +75,7 @@ imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats):
    선언이거나 그 산출물이라면, 확실한 엣지입니다.
 2. **ensure의 실행 코드** — `ensure` 안에 적은 식은 실제로 실행되는 코드이므로,
    거기서 다른 imagine 심볼을 호출하면 엣지가 됩니다.
-3. **requirements의 자연어 언급** — 위 예시처럼 requirements가 `크리티컬_판정`을
+3. **requirements의 자연어 언급** — 위 예시처럼 requirements가 `isCriticalHit`를
    사용하라고 글로 지시했다면, 그 문장에서 이름을 찾아 엣지로 등록합니다.
 4. **realize 산출물의 실제 사용** — 세션이 끝난 뒤, emit된 구현에서 import와
    호출을 추출하여 **확정 엣지**로 등록합니다. LLM이 세션 도중 (requirements에
@@ -88,7 +88,7 @@ imagine function 데미지_계산(attacker: CombatStats, defender: CombatStats):
 지역 변수, 우연히 같은 이름을 쓰는 객체의 속성은 가짜 엣지를 만들지 않습니다.
 
 3만 글자를 찾는 방식입니다. 자연어에는 문법 구조가 없으니 다른 방법이
-없습니다 — `크리티컬_판정을`, `크리티컬_판정이`처럼 조사가 붙은 형태까지
+없습니다 — `isCriticalHit를`, `isCriticalHit가`처럼 조사가 붙은 형태까지
 찾아야 하고요. 이것은 **코드 분석을 대신하는 수단이 아니라, 이름이 붙은 별개의
 분석 단계**입니다. 각 엣지에는 넷 중 무엇이 발견했는지가 함께 기록됩니다.
 
@@ -108,16 +108,16 @@ import하는 모순이 생길 수 있기 때문입니다. (스펙이 변경된 �
 # Realize 순서
 
 의존성 그래프에 **위상 정렬(topological sort)**을 수행하여, 의존이 없는 노드
-(leaf)부터 realize합니다. 위 예시에 `데미지_계산`을 사용하는
-`전투_시뮬레이션`이 하나 더 있다면:
+(leaf)부터 realize합니다. 위 예시에 `calculateDamage`를 사용하는
+`simulateBattle`이 하나 더 있다면:
 
 ```mermaid
 graph LR
-  전투_시뮬레이션 --> 데미지_계산 --> 크리티컬_판정
+  simulateBattle --> calculateDamage --> isCriticalHit
 ```
 
-realize 순서는 화살표의 역순, 즉 `크리티컬_판정` → `데미지_계산` →
-`전투_시뮬레이션`이 됩니다.
+realize 순서는 화살표의 역순, 즉 `isCriticalHit` → `calculateDamage` →
+`simulateBattle`이 됩니다.
 
 - 각 세션이 시작될 때, **이미 realize된 의존 심볼의 산출물**(타입 정의, 구현,
   `ASSUMPTION:` 주석)이 세션의 읽기 가능 범위에 포함됩니다(61 문서의 Realizer

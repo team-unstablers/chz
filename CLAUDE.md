@@ -254,6 +254,6 @@ grammar rule can remove. Adding a second needs the same bar.
   diagnostics; fatal ones stop here) → realize (through the configured
   Realizer; OpenAI-compatible by default) → emit TS + vitest tests → on green
   tests, record the hash in a lockfile.
-- First milestone — a single function (`충돌판정_2D`, 2D collision check)
+- First milestone — a single function (`checkCollision2D`, 2D collision check)
   end-to-end, `.chz` → realize → tests green — is **done**
   (`examples/collision.chz.ts`).

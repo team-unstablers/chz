@@ -94,14 +94,14 @@ imagine imagine function f(): void {}
 
 ```typescript chz
 /// coffee.chz.ts
-imagine function 아메리카노_가격(잔수: number): number {
+imagine function americanoPrice(cups: number): number {
   requirements(`
     아메리카노 한 잔은 4500원입니다.
     5잔 이상 주문하면 전체 금액의 10%를 할인합니다.
   `);
 
-  ensure(아메리카노_가격(1) === 4500);
-  ensure(아메리카노_가격(5) === 20250);
+  ensure(americanoPrice(1) === 4500);
+  ensure(americanoPrice(5) === 20250);
 }
 ```
 
@@ -110,7 +110,7 @@ imagine function 아메리카노_가격(잔수: number): number {
 복잡한 객체 타입도 여러분이 아는 그대로 쓸 수 있습니다.
 
 ```typescript chz
-imagine function 감싸기<T>(값: T): Promise<{ 값: T; 시각: Date }> {
+imagine function wrap<T>(value: T): Promise<{ value: T; at: Date }> {
   requirements(`값과 현재 시각을 함께 담아 반환합니다.`);
 }
 ```
@@ -121,8 +121,8 @@ imagine function 감싸기<T>(값: T): Promise<{ 값: T; 시각: Date }> {
 줍니다. 하지만 `imagine` 선언에서는 **반드시 적어야 합니다.**
 
 ```typescript chz
-imagine function 아메리카노_가격(잔수: number) {
-  //                                     ^ CHZ1009: 타입 주석이 필요합니다
+imagine function americanoPrice(cups: number) {
+  //                                         ^ CHZ1009: 타입 주석이 필요합니다
   requirements(`...`);
 }
 ```
@@ -142,7 +142,7 @@ imagine function 아메리카노_가격(잔수: number) {
 바깥에서 쓸 함수라면 `export`를 붙입니다.
 
 ```typescript chz
-export imagine function 데미지_계산(공격력: number, 방어력: number): number {
+export imagine function calculateDamage(attack: number, defense: number): number {
   requirements(`공격력에서 방어력을 빼되, 최소 1은 보장합니다.`);
 }
 ```
@@ -174,11 +174,11 @@ default로 내보내고 싶다면 이름을 붙여 선언한 뒤, 사람이 쓰�
 내보내면 됩니다.
 
 ```typescript chz
-export imagine function 데미지_계산(공격력: number, 방어력: number): number {
+export imagine function calculateDamage(attack: number, defense: number): number {
   requirements(`공격력에서 방어력을 빼되, 최소 1은 보장합니다.`);
 }
 
-export default 데미지_계산;
+export default calculateDamage;
 ```
 
 ## imagine 클래스
@@ -187,7 +187,7 @@ export default 데미지_계산;
 
 ```typescript chz
 /// gacha.chz.ts
-imagine class 뽑기함 {
+imagine class GachaBox {
   // (1) 클래스 전체에 대한 요구사항
   requirements(`
     10연차 뽑기를 관리합니다.
@@ -195,19 +195,19 @@ imagine class 뽑기함 {
   `);
 
   // (2) 구현이 필요한 프로퍼티
-  imagine readonly 남은횟수: number {
+  imagine readonly remainingDraws: number {
     requirements(`이번 판에 남은 뽑기 횟수입니다.`);
   }
 
   // (3) 구현이 필요한 메서드
-  imagine 뽑기(): "노말" | "레어" | "에픽" {
+  imagine draw(): "normal" | "rare" | "epic" {
     requirements(`한 번 뽑고 결과 등급을 반환합니다.`);
 
     ensure("10연차의 마지막은 레어 이상입니다.", () => {
-      const 함 = new 뽑기함();
-      for (let i = 0; i < 9; i++) 함.뽑기();
+      const box = new GachaBox();
+      for (let i = 0; i < 9; i++) box.draw();
 
-      assert(함.뽑기() !== "노말");
+      assert(box.draw() !== "normal");
     });
   }
 }
@@ -223,12 +223,12 @@ imagine class 뽑기함 {
 적습니다.
 
 ```typescript chz
-imagine readonly 남은횟수: number {
+imagine readonly remainingDraws: number {
   requirements(`이번 판에 남은 뽑기 횟수입니다.`);
 }
 ```
 
-이것은 TypeScript에는 없는 모양입니다. 보통의 프로퍼티라면 `남은횟수: number;`로
+이것은 TypeScript에는 없는 모양입니다. 보통의 프로퍼티라면 `remainingDraws: number;`로
 끝나고 중괄호가 올 자리가 아니니까요. 치즈기여어가 직접 소유하는 문법이며,
 `static`이나 `readonly` 같은 modifier를 앞에 붙일 수 있습니다.
 
@@ -299,8 +299,8 @@ imagine function f(): void {
 **하나. 조건식으로 적기.**
 
 ```typescript chz
-ensure(아메리카노_가격(1) === 4500);
-ensure(아메리카노_가격(5) === 20250, "5잔부터 10% 할인이 적용됩니다.");
+ensure(americanoPrice(1) === 4500);
+ensure(americanoPrice(5) === 20250, "5잔부터 10% 할인이 적용됩니다.");
 ```
 
 두 번째 인자인 설명은 생략할 수 있고, 적는다면 **고정된 문자열**이어야 합니다.
@@ -311,10 +311,10 @@ ensure(아메리카노_가격(5) === 20250, "5잔부터 10% 할인이 적용됩�
 
 ```typescript chz
 ensure("빈 장바구니의 합계는 0원입니다.", () => {
-  const 담은것 = new 장바구니();
+  const cart = new Cart();
 
-  assert(담은것.합계() === 0);
-  assert(담은것.개수() === 0);
+  assert(cart.total() === 0);
+  assert(cart.count() === 0);
 });
 ```
 

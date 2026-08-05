@@ -8,7 +8,7 @@
 // Because the requirements explicitly prohibit an arbitrary ASSUMPTION, a
 // diligent Realizer must use AskUser to confirm the convention before coding.
 
-imagine function 더치페이(총액: number, 인원수: number): number[] {
+imagine function splitBill(total: number, peopleCount: number): number[] {
   requirements(`
     # Group Bill Splitter
 
@@ -35,35 +35,35 @@ imagine function 더치페이(총액: number, 인원수: number): number[] {
   `);
 
   // Short contract: splitting for one person leaves no room for the distribution policy.
-  ensure(더치페이(10000, 1)[0] === 10000, "One person pays the full total.");
+  ensure(splitBill(10000, 1)[0] === 10000, "One person pays the full total.");
 
   ensure("Everyone pays the same amount when the total divides evenly.", () => {
-    const 금액들 = 더치페이(9000, 3);
+    const amounts = splitBill(9000, 3);
 
-    assert(금액들.length === 3);
-    assert(금액들.every((금액) => 금액 === 3000));
+    assert(amounts.length === 3);
+    assert(amounts.every((amount) => amount === 3000));
   });
 
   // Key contract: when the total does not divide evenly, this deliberately does
   // not check who pays the extra won. That policy must be confirmed through AskUser.
   ensure("Sum and fairness invariants hold even when some won remain.", () => {
-    const 금액들 = 더치페이(10000, 3);
+    const amounts = splitBill(10000, 3);
 
-    assert(금액들.length === 3);
-    assert(금액들.every((금액) => Number.isInteger(금액) && 금액 >= 0));
-    assert(금액들.reduce((합, 금액) => 합 + 금액, 0) === 10000);
-    assert(Math.max(...금액들) - Math.min(...금액들) <= 1);
+    assert(amounts.length === 3);
+    assert(amounts.every((amount) => Number.isInteger(amount) && amount >= 0));
+    assert(amounts.reduce((sum, amount) => sum + amount, 0) === 10000);
+    assert(Math.max(...amounts) - Math.min(...amounts) <= 1);
   });
 
   ensure("Nobody pays anything when the total is zero.", () => {
-    const 금액들 = 더치페이(0, 4);
+    const amounts = splitBill(0, 4);
 
-    assert(금액들.length === 4);
-    assert(금액들.every((금액) => 금액 === 0));
+    assert(amounts.length === 4);
+    assert(amounts.every((amount) => amount === 0));
   });
 }
 
 // --- Minimal wiring: call the realized function and print the result. ---
 
-const 정산_결과 = 더치페이(10000, 3);
-console.log(`Result of splitting 10,000 won among 3 people: ${정산_결과.join(" won, ")} won`);
+const settlement = splitBill(10000, 3);
+console.log(`Result of splitting 10,000 won among 3 people: ${settlement.join(" won, ")} won`);

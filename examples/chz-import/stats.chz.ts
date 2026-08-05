@@ -15,11 +15,11 @@ export interface CombatStats {
 }
 
 /** Return unmodified base stats. This function is written directly by a human. */
-export function 기본_스탯(): CombatStats {
+export function baseStats(): CombatStats {
   return { attack: 10, defense: 5, luck: 0 };
 }
 
-export imagine function 크리티컬_판정(attacker: CombatStats): boolean {
+export imagine function isCriticalHit(attacker: CombatStats): boolean {
   requirements(`
     # Determine whether this attack is a critical hit based on the attacker's stats.
     - Critical-hit probability must increase as attacker.luck (0–100) increases.
@@ -28,12 +28,12 @@ export imagine function 크리티컬_판정(attacker: CombatStats): boolean {
   `);
 
   ensure(
-    typeof 크리티컬_판정({ attack: 10, defense: 5, luck: 50 }) === "boolean",
+    typeof isCriticalHit({ attack: 10, defense: 5, luck: 50 }) === "boolean",
     "Critical-hit detection returns a boolean.",
   );
 
   ensure("Luck 0 never produces a critical hit, while luck 100 always does.", () => {
-    assert(크리티컬_판정({ attack: 10, defense: 5, luck: 0 }) === false);
-    assert(크리티컬_판정({ attack: 10, defense: 5, luck: 100 }) === true);
+    assert(isCriticalHit({ attack: 10, defense: 5, luck: 0 }) === false);
+    assert(isCriticalHit({ attack: 10, defense: 5, luck: 100 }) === true);
   });
 }
