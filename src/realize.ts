@@ -35,6 +35,7 @@ import {
   symbolComesOnlyFromTypeScriptLib,
   type ChzSourceFile,
 } from "./compiler/index.ts";
+import { assertShimSlotAvailable, writeShim } from "./shim.ts";
 import { SyntaxKind } from "./compiler/ts-api.ts";
 import { ChzVerificationToolRuntime } from "./realizer/tools/verification.ts";
 import {
@@ -88,6 +89,12 @@ export interface RealizeResult {
   symbols: RealizedSymbol[];
   resolutions: ChzImagineSymbolResolution[];
   files: EmittedFile[];
+  /**
+   * Absolute path of the sidecar shim (docs/20), present once a resolved run
+   * has written it. It sits next to the source rather than inside `baseDir`,
+   * so it is deliberately not part of `files`.
+   */
+  shim?: string;
   reason?: string;
   todo?: string;
 }
@@ -188,6 +195,9 @@ export async function realize(
   const maxRetries = options.maxRetries ?? 2;
   const activeProfile =
     options.activeProfile ?? analysis.profile?.name ?? "console";
+  // The shim slot is a human-owned naming decision, checked alongside the
+  // diagnostics above: a taken slot costs zero directories and zero sessions.
+  assertShimSlotAvailable(fileName);
   mkdirSync(join(baseDir, "implementations"), { recursive: true });
   mkdirSync(join(baseDir, "tests"), { recursive: true });
   const humanCode = splitHumanCode(analysis);
@@ -696,12 +706,16 @@ export async function realize(
     );
   }
 
+  let shim: string | undefined;
   if (realizedSymbols.length > 0) {
     writeFileSync(
       join(baseDir, "implementation.ts"),
       renderEntryPoint(analysis, humanCode, specs),
       "utf8",
     );
+    // The shim follows the entry point it re-exports, so it never points at a
+    // file that does not exist yet (docs/20).
+    shim = writeShim(fileName);
   }
 
   // Per-symbol verification is scoped, so the human epilogue wiring, the entry
@@ -736,6 +750,7 @@ export async function realize(
     symbols: realizedSymbols,
     resolutions,
     files,
+    ...(shim === undefined ? {} : { shim }),
   };
 
   function resultWithFailure(

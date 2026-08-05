@@ -494,6 +494,9 @@ async function realizeAnalyzedSourceFile(
   io.out(`${displayName}: realized ${count} symbol${count === 1 ? "" : "s"}${reuseNote}`);
   io.out(`  output: ${result.baseDir}`);
   for (const file of result.files) io.out(`  + ${file.relPath}`);
+  // The shim lives next to the source, not under the output directory, so it
+  // is reported on its own line (docs/20).
+  if (result.shim !== undefined) io.out(`  shim: ${result.shim}`);
 
   const realizedAt = (deps.now ? deps.now() : new Date()).toISOString();
   if (parsed.skipTests) {

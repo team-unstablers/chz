@@ -1253,6 +1253,174 @@ describe("realize engine", () => {
   });
 });
 
+describe("sidecar shim (docs/20)", () => {
+  it("writes the shim next to the source, re-exporting without a file extension", async () => {
+    const data = fixture();
+    const result = await realizeSource(data.source, data.sourceFile, {
+      realizers: [new RetryingEngineRealizer()],
+      projectRoot: data.root,
+      skipVerification: true,
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(result.shim).toBe(join(data.root, "sample.ts"));
+    const shim = readFileSync(result.shim!, "utf8");
+    // The one realize output a plain TypeScript consumer imports directly, so
+    // the specifier must resolve without allowImportingTsExtensions.
+    expect(shim).toContain('export * from "./chz/realization/sample/implementation";');
+    expect(shim).not.toContain("implementation.ts");
+    // It is a sibling of the source, never part of the realization directory.
+    expect(result.files.map((file) => file.relPath)).not.toContain("../sample.ts");
+  });
+
+  it("refuses the run before any session when a human file holds the shim slot", async () => {
+    const data = fixture();
+    writeFileSync(join(data.root, "sample.ts"), "export const mine = 1;\n", "utf8");
+    let calls = 0;
+    const realizer: ChzRealizer = {
+      name: "NeverCalledRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol) {
+        calls += 1;
+        return { outcome: "failed", symbol, reason: "must not be called" };
+      },
+    };
+
+    await expect(
+      realizeSource(data.source, data.sourceFile, {
+        realizers: [realizer],
+        projectRoot: data.root,
+        skipVerification: true,
+      }),
+    ).rejects.toThrow(/human-written file already occupies/);
+
+    expect(calls).toBe(0);
+    // A taken slot costs no directory creation either.
+    expect(existsSync(data.outputDir)).toBe(false);
+    expect(readFileSync(join(data.root, "sample.ts"), "utf8")).toBe("export const mine = 1;\n");
+  });
+
+  it("rejects a source whose own name is the shim slot", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-shim-self-"));
+    roots.push(root);
+    const sourceFile = join(root, "plain.ts");
+    const source = [
+      "imagine function greet(name: string): string {",
+      "  requirements(`인사말을 만듭니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    await expect(
+      realizeSource(source, sourceFile, {
+        realizers: [new RetryingEngineRealizer()],
+        projectRoot: root,
+        skipVerification: true,
+      }),
+    ).rejects.toThrow(/overwrite the source file itself/);
+  });
+
+  it("makes a dependent file analyzable once its dependency is realized", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-shim-cross-file-"));
+    roots.push(root);
+    const statsFile = join(root, "stats.chz.ts");
+    const battleFile = join(root, "battle.chz.ts");
+    const stats = [
+      "export const 기본값 = 3;",
+      "",
+      "export imagine function 두배(n: number): number {",
+      "  requirements(`숫자를 두 배로 만듭니다.`);",
+      "  ensure(두배(2) === 4, '2는 4가 됩니다.');",
+      "}",
+      "",
+    ].join("\n");
+    const battle = [
+      'import { 두배, 기본값 } from "./stats";',
+      "",
+      "export imagine function 세배(n: number): number {",
+      "  requirements(`\\`두배\\`와 기본값으로 계산합니다.`);",
+      "  ensure(세배(1) >= 기본값, '기본값 이상입니다.');",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(statsFile, stats, "utf8");
+    writeFileSync(battleFile, battle, "utf8");
+
+    const analyzeBattle = (): readonly unknown[] => {
+      const analysis = analyzeChzSource(battle, battleFile);
+      try {
+        return analysis.diagnostics;
+      } finally {
+        analysis.dispose();
+      }
+    };
+
+    // Before the dependency is realized the shim does not exist yet — the
+    // documented first-realize gap (docs/20 NOTE).
+    expect(analyzeBattle()).toEqual([
+      expect.objectContaining({ code: "TS2307" }),
+    ]);
+
+    const doubler: ChzRealizer = {
+      name: "DoublerRealizer",
+      supportedSymbolTypes: ["function"],
+      async realize(symbol, context) {
+        const implementation = join(context.outputDir, "implementations", `${symbol.name}.ts`);
+        const test = join(context.outputDir, "tests", `test_${symbol.name}.autogen.ts`);
+        mkdirSync(dirname(implementation), { recursive: true });
+        mkdirSync(dirname(test), { recursive: true });
+        writeFileSync(
+          implementation,
+          `export function ${symbol.name}(n: number): number { return n * 2; }\n`,
+          "utf8",
+        );
+        writeFileSync(test, "export {};\n", "utf8");
+        return {
+          outcome: "resolved",
+          symbol,
+          resolvedFile: implementation,
+          resolvedTestFiles: [test],
+          resolvedAt: new Date(),
+          resolvedBy: "doubler-model",
+        };
+      },
+    };
+
+    const result = await realizeSource(stats, statsFile, {
+      realizers: [doubler],
+      projectRoot: root,
+      skipVerification: true,
+    });
+    expect(result.outcome).toBe("resolved");
+
+    // The shim closes the gap: `./stats` now resolves through standard
+    // TypeScript rules, exposing the human constant and the realized symbol
+    // alike (docs/20).
+    expect(analyzeBattle()).toEqual([]);
+  });
+
+  it("overwrites a shim it wrote itself", async () => {
+    const data = fixture();
+    writeFileSync(
+      join(data.root, "sample.ts"),
+      "/// stale — AUTO-GENERATED by chz realize. Do not edit.\nexport * from './nowhere';\n",
+      "utf8",
+    );
+
+    const result = await realizeSource(data.source, data.sourceFile, {
+      realizers: [new RetryingEngineRealizer()],
+      projectRoot: data.root,
+      skipVerification: true,
+    });
+
+    expect(result.outcome).toBe("resolved");
+    expect(readFileSync(join(data.root, "sample.ts"), "utf8")).toContain(
+      './chz/realization/sample/implementation"',
+    );
+  });
+});
+
 describe("parallel realize (-j)", () => {
   const green = async () => ({ passed: true, output: "green" });
   const wait = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
