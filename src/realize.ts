@@ -886,13 +886,16 @@ function collectExternalTypeNames(
   const addReferences = (
     references: ReturnType<typeof collectTypeSymbolReferences>,
   ): void => {
-    for (const { symbol } of references) {
+    for (const { node, symbol } of references) {
       if (symbolComesOnlyFromTypeScriptLib(symbol)) continue;
       if (humanCode.humanSymbolLayers.get(symbol.id) !== "prologue") {
         continue;
       }
-      if (!valueImports.has(symbol.name)) {
-        symbols.set(symbol.id, symbol.name);
+      // The name as written here, not the symbol's own name: an aliased import
+      // (`import type { A as B }`) is re-exported by the prologue under the
+      // local name, and that is also the name the copied ensure body uses.
+      if (!valueImports.has(node.text)) {
+        symbols.set(symbol.id, node.text);
       }
     }
   };
@@ -1025,12 +1028,27 @@ ${sections.join("\n")}
 `;
 }
 
+/**
+ * Fold a declaration onto one line for the provenance header.
+ *
+ * `spec.parameters` and `spec.returnType` keep the source's own line breaks,
+ * but the header is a run of `///` comment lines: an unfolded signature pushes
+ * its tail past the prefix, and the artifact stops parsing as TypeScript.
+ */
+function provenanceDeclaration(spec: ImagineSpec): string {
+  if (spec.type !== "function") return `imagine class ${spec.name}`;
+  const fold = (text: string): string => text.replace(/\s+/g, " ").trim();
+  // A multi-line parameter list usually carries a trailing comma; folding it
+  // onto one line would leave it dangling before the closing parenthesis.
+  const parameters = fold(spec.parameters).replace(/,$/, "");
+  const returnType = spec.returnType ? `: ${fold(spec.returnType)}` : "";
+  return `imagine function ${spec.name}(${parameters})${returnType}`;
+}
+
 function attachProvenance(spec: ImagineSpec, resolution: ChzResolutionResolved, now: Date): void {
   const implementation = readFileSync(resolution.resolvedFile, "utf8");
   if (!implementation.includes("AUTO-GENERATED CODE - DO NOT EDIT")) {
-    const declaration = spec.type === "function"
-      ? `imagine function ${spec.name}(${spec.parameters})${spec.returnType ? `: ${spec.returnType}` : ""}`
-      : `imagine class ${spec.name}`;
+    const declaration = provenanceDeclaration(spec);
     writeFileSync(
       resolution.resolvedFile,
       `/// ${spec.name}.ts\n/// realization of \`${declaration}\`\n/// realized by ${resolution.resolvedBy} (via chz-realize) on ${now.toISOString()}\n///\n/// AUTO-GENERATED CODE - DO NOT EDIT (manual edits must be marked with @chz-realize-override)\n\n${implementation.trim()}\n\n/// END OF AUTO-GENERATED CODE\n`,

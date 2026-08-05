@@ -83,6 +83,20 @@ interface HumanStatement {
   content: string;
 }
 
+/**
+ * One identifier occurrence, kept as both symbols it stands for.
+ *
+ * `target` is the identity every downstream consumer uses — ensure type
+ * imports and dependency edges both resolve through {@link unaliasSymbol}. But
+ * a symbol imported from another Cheese module declares nothing in this file,
+ * so `target` alone cannot say which statement owns it. `local` is the import
+ * alias, whose declaration is right here in the import statement.
+ */
+interface StatementSymbol {
+  local: TypeScriptSymbol;
+  target: TypeScriptSymbol;
+}
+
 interface TopLevelBinding {
   name: string;
   typeOnly: boolean;
@@ -153,7 +167,12 @@ export function splitHumanCode(
   );
   const symbolsByStatement = humanStatements.map((statement) =>
     checker.getSymbolAtLocation(statement.identifiers)
-      .map((symbol) => unaliasSymbol(checker, symbol)),
+      .flatMap((symbol): StatementSymbol[] => {
+        const target = unaliasSymbol(checker, symbol);
+        return symbol === undefined || target === undefined
+          ? []
+          : [{ local: symbol, target }];
+      }),
   );
   const ownersBySymbol = collectSymbolOwners(
     symbolsByStatement,
@@ -266,39 +285,48 @@ function collectHumanSymbolLayers(
 }
 
 function collectSymbolOwners(
-  symbolGroups: readonly (TypeScriptSymbol | undefined)[][],
+  symbolGroups: readonly (readonly StatementSymbol[])[],
   statements: readonly HumanStatement[],
   sourceFile: SourceFile,
 ): Map<number, Set<number>> {
   const owners = new Map<number, Set<number>>();
-  const symbols = new Map<number, TypeScriptSymbol>();
+  // Keyed by the target identity, but searched through both symbols. A type
+  // imported from another Cheese module declares nothing here, so only the
+  // local alias can point at the import statement that owns it — and that
+  // statement is the prologue's, which is what re-exports the name.
+  const candidates = new Map<number, Set<TypeScriptSymbol>>();
   for (const group of symbolGroups) {
-    for (const symbol of group) {
-      if (symbol !== undefined) symbols.set(symbol.id, symbol);
+    for (const { local, target } of group) {
+      const known = candidates.get(target.id) ?? new Set<TypeScriptSymbol>();
+      known.add(target);
+      known.add(local);
+      candidates.set(target.id, known);
     }
   }
 
-  for (const symbol of symbols.values()) {
-    for (const declarationHandle of symbol.declarations) {
-      // Handles retain their canonical Project, so resolving them reuses the
-      // analyzer snapshot without exposing or constructing another Program.
-      const declaration = declarationHandle.resolve();
-      if (declaration === undefined || declaration.getSourceFile().fileName !== sourceFile.fileName) continue;
-      const position = declaration.getStart(sourceFile);
-      const owner = statements.findIndex(
-        (statement) => position >= statement.node.getStart(sourceFile) && position < statement.node.end,
-      );
-      if (owner < 0) continue;
-      const symbolOwners = owners.get(symbol.id) ?? new Set<number>();
-      symbolOwners.add(owner);
-      owners.set(symbol.id, symbolOwners);
+  for (const [symbolId, symbols] of candidates) {
+    for (const symbol of symbols) {
+      for (const declarationHandle of symbol.declarations) {
+        // Handles retain their canonical Project, so resolving them reuses the
+        // analyzer snapshot without exposing or constructing another Program.
+        const declaration = declarationHandle.resolve();
+        if (declaration === undefined || declaration.getSourceFile().fileName !== sourceFile.fileName) continue;
+        const position = declaration.getStart(sourceFile);
+        const owner = statements.findIndex(
+          (statement) => position >= statement.node.getStart(sourceFile) && position < statement.node.end,
+        );
+        if (owner < 0) continue;
+        const symbolOwners = owners.get(symbolId) ?? new Set<number>();
+        symbolOwners.add(owner);
+        owners.set(symbolId, symbolOwners);
+      }
     }
   }
   return owners;
 }
 
 function classifyEpilogueStatements(
-  symbolGroups: readonly (TypeScriptSymbol | undefined)[][],
+  symbolGroups: readonly (readonly StatementSymbol[])[],
   imagineSymbolIds: ReadonlySet<number>,
   ownersBySymbol: ReadonlyMap<number, ReadonlySet<number>>,
 ): Set<number> {
@@ -306,10 +334,11 @@ function classifyEpilogueStatements(
   const dependencies = symbolGroups.map(() => new Set<number>());
 
   symbolGroups.forEach((symbols, statementIndex) => {
-    for (const symbol of symbols) {
-      if (symbol === undefined) continue;
-      if (imagineSymbolIds.has(symbol.id)) epilogue.add(statementIndex);
-      for (const owner of ownersBySymbol.get(symbol.id) ?? []) {
+    // Layering is decided on the target: an alias of an imagine symbol must
+    // pull its statement into the epilogue just like a direct reference.
+    for (const { target } of symbols) {
+      if (imagineSymbolIds.has(target.id)) epilogue.add(statementIndex);
+      for (const owner of ownersBySymbol.get(target.id) ?? []) {
         if (owner !== statementIndex) dependencies[statementIndex]!.add(owner);
       }
     }

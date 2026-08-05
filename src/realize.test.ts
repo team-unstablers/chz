@@ -288,7 +288,7 @@ describe("canonical prompt and symbol graph", () => {
     }
   });
 
-  it("collects lowercase and Unicode prologue types but excludes lib and imported declarations", () => {
+  it("collects lowercase, Unicode and imported prologue types under their local names", () => {
     const root = mkdtempSync(join(tmpdir(), "chz-external-types-"));
     roots.push(root);
     const fileName = join(root, "types.chz.ts");
@@ -320,12 +320,110 @@ describe("canonical prompt and symbol graph", () => {
       const spec = imagineSpecsFromChzSource(analysis)[0]!;
       const harness = renderEnsureHarness(analysis, spec);
 
+      // The imported type is included: the prologue re-exports it, and the
+      // ensure body annotates a local with it, so omitting it is a type error
+      // in an engine-owned file the realizer is not allowed to fix. It appears
+      // under the local alias, which is the name both the prologue export and
+      // the copied ensure body use.
       expect(
         harness.split("\n").find((line) => line.startsWith("import type")),
       ).toBe(
-        'import type { lowercase, 유니코드타입 } from "../implementations/__prologue__.ts";',
+        'import type { importedAlias, lowercase, 유니코드타입 } from "../implementations/__prologue__.ts";',
       );
       expect(harness).not.toContain("Promise } from");
+    } finally {
+      analysis.dispose();
+    }
+  });
+
+  it("keeps a type imported from another module resolvable in the ensure harness", () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-cross-module-ensure-"));
+    roots.push(root);
+    // Stands in for a realized Cheese module's shim (docs/20): the dependent
+    // file imports it exactly the way a human would.
+    writeFileSync(
+      join(root, "stats.ts"),
+      [
+        "export interface CombatStats { attack: number; luck: number }",
+        "export function 크리티컬_판정(attacker: CombatStats): boolean { return attacker.luck > 0; }",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const fileName = join(root, "battle.chz.ts");
+    const source = [
+      'import { 크리티컬_판정, type CombatStats } from "./stats.ts";',
+      "",
+      "imagine function 데미지_계산(attacker: CombatStats): number {",
+      "  requirements(`공격력과 크리티컬 여부로 데미지를 계산합니다.`);",
+      "  ensure('데미지는 음수가 아닙니다.', () => {",
+      "    const 공격자: CombatStats = { attack: 10, luck: 0 };",
+      "    assert(데미지_계산(공격자) >= 0);",
+      "  });",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(fileName, source, "utf8");
+
+    const analysis = analyzeChzSource(source, fileName);
+    try {
+      expect(analysis.diagnostics).toEqual([]);
+      const spec = imagineSpecsFromChzSource(analysis)[0]!;
+      const humanCode = splitHumanCode(analysis);
+      const harness = renderEnsureHarness(analysis, spec);
+
+      expect(
+        harness.split("\n").find((line) => line.startsWith("import type")),
+      ).toBe(
+        'import type { CombatStats } from "../implementations/__prologue__.ts";',
+      );
+
+      // The import line is only half the claim. This gap first surfaced as a
+      // typecheck failure in an engine-owned file the realizer may not edit,
+      // so the harness is compiled where it actually lands.
+      const baseDir = join(root, "chz", "realization", "battle");
+      const implementations = join(baseDir, "implementations");
+      const tests = join(baseDir, "tests");
+      mkdirSync(implementations, { recursive: true });
+      mkdirSync(tests, { recursive: true });
+      writeFileSync(join(implementations, "__prologue__.ts"), humanCode.prologue, "utf8");
+      writeFileSync(join(implementations, "__epilogue__.ts"), humanCode.epilogue, "utf8");
+      writeFileSync(
+        join(implementations, "데미지_계산.ts"),
+        [
+          'import { 크리티컬_판정, type CombatStats } from "./__prologue__.ts";',
+          "export function 데미지_계산(attacker: CombatStats): number {",
+          "  return 크리티컬_판정(attacker) ? attacker.attack * 2 : attacker.attack;",
+          "}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      writeFileSync(join(tests, "test_데미지_계산.ensure.ts"), harness, "utf8");
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ type: "module" }),
+        "utf8",
+      );
+      const configPath = join(root, "tsconfig.json");
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          compilerOptions: {
+            allowImportingTsExtensions: true,
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            noEmit: true,
+            strict: true,
+            target: "ES2022",
+            verbatimModuleSyntax: true,
+          },
+          files: [join(tests, "test_데미지_계산.ensure.ts")],
+        }),
+        "utf8",
+      );
+
+      expect(typeCheckProject(configPath, root)).toEqual([]);
     } finally {
       analysis.dispose();
     }
@@ -859,6 +957,42 @@ describe("realize engine", () => {
         "utf8",
       ),
     ).not.toContain("@profile server");
+  });
+
+  it("folds a multi-line signature into the provenance header", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chz-provenance-fold-"));
+    roots.push(root);
+    const sourceFile = join(root, "wide.chz.ts");
+    const source = [
+      "imagine function greet(",
+      "  name: string,",
+      "  greeting: string,",
+      "): string {",
+      "  requirements(`인사말을 만듭니다.`);",
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const result = await realizeSource(source, sourceFile, {
+      realizers: [new RetryingEngineRealizer()],
+      projectRoot: root,
+      skipVerification: true,
+    });
+
+    expect(result.outcome).toBe("resolved");
+    const artifact = readFileSync(
+      join(result.baseDir, "implementations", "greet.ts"),
+      "utf8",
+    );
+    // The signature keeps the source's line breaks, but the header is a run of
+    // `///` lines: an unfolded parameter list puts its tail outside the comment
+    // and the artifact stops parsing as TypeScript.
+    const header = artifact.split("\n").slice(0, 5);
+    expect(header.every((line) => line.startsWith("///"))).toBe(true);
+    expect(artifact).toContain(
+      "/// realization of `imagine function greet(name: string, greeting: string): string`",
+    );
   });
 
   it("feeds independent verification failures into bounded retry sessions", async () => {
