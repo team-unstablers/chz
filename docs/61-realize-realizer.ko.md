@@ -17,9 +17,9 @@ Realizer는 LLM과 상호작용하며 imagine 선언에 대한 구현을 생성�
 
 | 이름                   | 설명                                                                                                                             | 생성 가능한 리소스 | 구현 여부 |
 |----------------------|--------------------------------------------------------------------------------------------------------------------------------|------------|------|
-| `ChzRealizerBase`    | 베이스 Realizer. <br /> 기본 하네스로의 룰만 정의되어 있으며, LLM과 상호작용할 수 있는 기능은 없습니다.                                                           | 코드, 이미지    | 구현 중 |
-| `ChzOpenAIRealizer`  | OpenAI (또는 Compatible API)를 사용하는 LLM과 상호작용할 수 있는 Realizer. <br /> `ChzRealizer`를 상속하며, OpenAI API를 통해 imagine 선언에 대한 구현을 생성합니다. | 코드, 이미지    | 구현 중 |
-| `ClaudeCodeRealizer` | Claude Code CLI를 하네스로써 사용합니다. <br /> **`-p` (eval) 옵션을 통해 상호작용 하므로 정액 요금제를 사용하더라도 요금이 발생합니다!**                                 | 코드   | 구현 중 |
+| `ChzRealizerBase`    | 베이스 Realizer. <br /> 기본 하네스로의 룰만 정의되어 있으며, LLM과 상호작용할 수 있는 기능은 없습니다.                                                           | 코드, 이미지    | 구현됨 |
+| `ChzOpenAIRealizer`  | OpenAI (또는 Compatible API)를 사용하는 LLM과 상호작용할 수 있는 Realizer. <br /> `ChzRealizerBase`를 상속하며, OpenAI API를 통해 imagine 선언에 대한 구현을 생성합니다. | 코드, 이미지    | 구현됨 |
+| `ClaudeCodeRealizer` | Claude Code를 하네스로써 사용합니다. <br /> **비대화형 세션을 여는 것이므로 정액 요금제를 쓰더라도 사용량을 소모합니다!**                                                            | 코드   | 구현됨 |
 | `ComfyRealizer`      | ComfyUI 워크플로우를 API로써 호출하여 이미지/비디오/오디오 리소스를 생성합니다.                                                                              | 이미지, 비디오, 오디오 | 구현 중 |
 
 
@@ -51,33 +51,68 @@ type ChzImagineSymbol = {
 
 /** 세션에 주어지는 주변 정보. 엔진이 구성하여 Realizer에 전달합니다. */
 type ChzRealizeContext = {
-  projectRoot: string; // 읽기 허용 범위의 최상단
-  outputDir: string;   // 산출물이 쓰여야 하는 위치이자, 유일한 쓰기 허용 범위
+  projectRoot: string;   // 읽기 허용 범위의 최상단
+  outputDir: string;     // 산출물이 쓰여야 하는 위치이자, 유일한 쓰기 허용 범위
+  activeProfile: string; // 이 세션에 적용되는 @profile 이름
+
+  /** 이번 세션이 책임지는 심볼들. 검증의 판정 범위가 됩니다 (후술) */
+  scope?: ChzRealizationScope;
 
   /** 이미 realize된 의존 심볼들의 산출물. LLM이 읽고 그 위에 구현을 쌓습니다 (62 문서) */
-  resolvedDependencies: ChzImagineSymbolResolution[];
+  resolvedDependencies: ChzResolutionResolved[];
 
   maxTurns: number;   // 에이전틱 루프의 턴 상한
   maxRetries: number; // 검증 실패 시 재시도 상한
+
+  baseContexts: string; // 지난 세션에서 사람이 답해 준 결정들 (CONTEXTS.md, 63 문서)
+  askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
+
+  attempt?: number;              // 재시도라면 몇 번째인지
+  verificationFeedback?: string; // 직전 시도가 검증에서 red였다면 그 로그
+  now?: () => Date;              // 프롬프트·기록의 시각을 고정하기 위한 주입 지점
+  harness?: ChzHarnessServices;  // 엔진이 소유한 검증 실행기와 관찰 이벤트 수신자
 };
 
-type ChzImagineSymbolResolution = {
+/**
+ * 세션의 결말은 셋 중 하나입니다. `outcome`을 먼저 보고 나머지 필드를 읽는
+ * 형태라서, 실패한 세션에서 산출물 경로를 꺼내려다 undefined를 만나는 일이
+ * 생기지 않습니다. 세 결말의 의미는 63 문서에서 정합니다.
+ */
+type ChzImagineSymbolResolution =
+  | ChzResolutionResolved
+  | ChzResolutionBlocked
+  | ChzResolutionFailed;
+
+type ChzResolutionResolved = {
+  outcome: "resolved";
   symbol: ChzImagineSymbol;
 
-  resolved: boolean;               // 구현 생성에 성공했는지 여부
-  resolvedFile?: string;           // 구현이 생성된 파일 경로
-  resolvedTestFiles?: string[];    // Realizer가 함께 emit한 autogen 유닛 테스트
+  resolvedFile: string;            // 구현이 생성된 파일 경로
+  resolvedTestFiles: string[];     // Realizer가 함께 emit한 autogen 유닛 테스트
   assumptionsReport?: string;      // ASSUMPTIONS 리포트 경로 (60 문서)
   resolvedLine?: [number, number]; // 구현이 생성된 라인 범위
-  resolvedAt?: Date;               // 구현이 생성된 시각
+  resolvedAt: Date;                // 구현이 생성된 시각
+  resolvedBy: string;              // 모델 이름 (claude-opus-4.8, gpt-5-... 등)
+};
 
-  resolvedBy?: string;  // 모델 이름 (claude-opus-4.8, gpt-5-... 등)
-  failReason?: string;  // resolved === false인 경우: Abort 사유, 턴 상한 초과, 검증 실패 등
+/** 사람이 환경을 준비해 주면 풀립니다. 캐시에는 아무것도 남기지 않습니다. */
+type ChzResolutionBlocked = {
+  outcome: "blocked";
+  symbol: ChzImagineSymbol;
+  reason: string; // 무엇이 부족한지
+  todo: string;   // 사람이 그대로 실행할 수 있는 조치
+};
+
+/** 사람이 `.chz.ts`를 고쳐야 풀립니다. Abort, 턴 상한 초과, 검증 실패 등. */
+type ChzResolutionFailed = {
+  outcome: "failed";
+  symbol: ChzImagineSymbol;
+  reason: string;
 };
 
 interface ChzRealizer {
-  name: string;
-  supportedSymbolTypes: ChzImagineSymbolType[];
+  readonly name: string;
+  readonly supportedSymbolTypes: readonly ChzImagineSymbolType[];
 
   realize(
     symbol: ChzImagineSymbol,
@@ -123,7 +158,7 @@ class ChzExampleOpenAIOneShotRealizer implements ChzRealizer {
 
     return {
       symbol,
-      resolved: true,
+      outcome: 'resolved',
       resolvedFile,
       resolvedLine: [1, implementation.split('\n').length],
       resolvedAt: new Date(),
@@ -200,14 +235,14 @@ class ChzExampleOpenAIAgenticRealizer implements ChzRealizer {
     if (!done?.ok) {
       return {
         symbol,
-        resolved: false,
-        failReason: done?.reason ?? `턴 상한(${context.maxTurns}) 초과`,
+        outcome: 'failed',
+        reason: done?.reason ?? `턴 상한(${context.maxTurns}) 초과`,
       };
     }
 
     return {
       symbol,
-      resolved: true,
+      outcome: 'resolved',
       // resolvedFile 등은 dispatchTool이 기록해 둔 WriteFile 내역으로 채웁니다.
       ...this.collectArtifacts(context),
       resolvedAt: new Date(),
@@ -233,21 +268,74 @@ abstract class ChzRealizerBase implements ChzRealizer {
   // 서브클래스가 구현하는 것은 '메시지를 보내고 응답을 받는' 전송 계층뿐입니다.
   protected abstract chat(
     messages: ChzChatMessage[],
-    tools: ChzToolDef[],
+    tools: ChzToolDefinition[],
   ): Promise<ChzChatResponse>;
 }
 ```
 
 - `ChzOpenAIRealizer`는 `chat()`을 OpenAI SDK로 구현한 것입니다.
 - `ClaudeCodeRealizer`는 예외적으로 이 루프를 사용하지 않습니다. Claude Code
-  자체가 이미 에이전틱 하네스이므로 루프를 통째로 위임하고, 대신 위의 하네스
-  룰(읽기/쓰기 경계)을 시스템 프롬프트와 퍼미션 설정으로 주입합니다.
-  말하자면 '하네스 속의 하네스'입니다.
+  자체가 이미 에이전틱 하네스이므로 루프를 통째로 위임합니다. 말하자면
+  '하네스 속의 하네스'입니다.
+
+### 루프만 넘기고, 툴은 넘기지 않습니다
+
+Claude Code에게도 파일을 읽고 쓰는 자기 툴이 있습니다. 그것을 쓰면 편할 것
+같지만, 치즈는 그 툴을 **전부 꺼 버리고** 위에서 정한 하네스 툴 13종을 대신
+꽂아 줍니다. 넘기는 것은 '누가 다음에 무엇을 할지 정하는 루프'뿐이고, '무엇을
+할 수 있는지'는 여전히 치즈가 정합니다.
+
+이유는 셋입니다.
+
+- **경계는 산문이 아니라 코드입니다.** 읽기는 프로젝트 루트, 쓰기는 출력
+  디렉토리라는 규칙을 남의 툴에 설정으로 부탁하는 것과, 우리 디스패처가 직접
+  거부하는 것은 다릅니다. 후자만이 [63 문서](63-realize-harness-rules.ko.md)가
+  요구하는 보증입니다. 편집 전 읽기 강제, 그 사이 파일이 바뀌었는지 검사, 출력
+  길이 제한, 쓰기 직후 진단 첨부, 검색 결과에서 비밀 파일 걸러내기 — 이것들은
+  설정으로 표현할 수 있는 종류의 것이 아닙니다.
+- **셸이 없어야 합니다.** Claude Code의 툴에는 셸이 포함되어 있고, 셸 하나면
+  파일시스템·프로세스·네트워크 권한이 통째로 넘어갑니다. 63 문서가 피하려고
+  한 바로 그 표면입니다. 테스트와 타입 체크는 셸 대신 엔진이 미리 정해 둔
+  검증 툴로만 돌립니다.
+- **세션의 끝을 선언할 방법이 필요합니다.** `Finish`/`Block`/`Abort`, 그리고
+  사람에게 묻는 `AskUser`는 Claude Code에 대응물이 없습니다. 우리 툴을 꽂기
+  때문에 이것들이 그대로 살아 있습니다.
+
+`AskUser`는 오히려 이득을 봅니다. 툴을 실행하는 쪽이 `chz` 프로세스 자신이라,
+질문이 곧바로 사람의 터미널에 뜹니다. 물어볼 사람이 없는 세션에서는 질문을
+blocked로 격하해야 한다는 63 문서의 규칙이, 이 Realizer에는 적용되지 않습니다.
+
+한편 잃는 것도 하나 있는데, 이건 설계가 아니라 한계입니다.
+[64 문서](64-realize-harness-prompt.ko.md)는 마지막 턴에 툴을 종료 3종으로
+좁히고 클로징 프롬프트를 넣어, 턴이 다 떨어진 세션도 인계 요약은 남기게
+합니다. 루프를 넘겨 버리면 그 마지막 턴에 끼어들 자리가 없어서, 턴 상한은
+그냥 세션이 끊기는 것으로 끝나고 요약은 받지 못합니다.
+
+### 이 Realizer를 붙이려면
+
+```javascript
+// chz.config.js
+import { ClaudeCodeRealizer, defineConfig } from "chz";
+
+export default defineConfig({
+  realizers: [
+    new ClaudeCodeRealizer({
+      model: "opus",
+      effort: "high",
+      maxBudgetUsd: 5, // 이 금액에 닿으면 세션이 blocked로 끝납니다
+    }),
+  ],
+});
+```
+
+Claude Code 연동에 필요한 패키지는 **선택 사항**이라 치즈를 설치할 때 같이
+따라오지 않습니다. 이 Realizer를 처음 쓰면 세션이 blocked로 끝나면서 설치
+명령을 알려 주므로, 그대로 실행한 뒤 `chz realize`를 다시 돌리면 됩니다.
 
 ## 하네스 툴
 
 에이전틱 세션에서 LLM에게 주어지는 툴의 목록과 명세는
-[63 문서](63-realize-harness-rules.ko.md)의 '하네스 툴 명세' 절에서 정의합니다.
+63 문서의 '하네스 툴 명세' 절에서 정의합니다.
 요약하면 — 읽기(`ReadFile`/`ReadDir`)와 검색(`Glob`/`Grep`)은 `projectRoot`로,
 쓰기(`WriteFile`/`FindAndReplace`)는 `outputDir`로 제한되고,
 검증(`RunTests`/`RunTypeCheck`/`RunLinter`)은 엔진이 미리 정해 둔 명령만
@@ -268,14 +356,14 @@ green을 확인했다고 하더라도, 엔진은 이를 신뢰하지 않고 세�
   기록하고([60 문서](60-realize-intro.ko.md)), 의존성 그래프의 다음 심볼로
   진행합니다(62 문서).
 - **검증 실패(red)**: 실패한 테스트와 진단 로그를 피드백으로 붙여 세션을
-  재시도합니다. `maxRetries`를 소진하면 해당 심볼은 `resolved: false`로
+  재시도합니다. `maxRetries`를 소진하면 해당 심볼은 `outcome: 'failed'`로
   확정되고, 62 문서의 규칙에 따라 이 심볼에 의존하는 하류 심볼들의 realize는
   진행되지 않습니다.
 
 독립 검증의 판정 범위는 **세션 스코프**입니다: 이 세션이 realize한 심볼의
 구현·autogen·ensure 파일과, 그 파일들이 import하는 대상(프롤로그, 이미
 realize된 의존 심볼). 아직 realize되지 않은 다른 심볼의 파일이나 사람 소유
-`__epilogue__` 때문에 심볼의 검증이 red가 되는 일은 없습니다([63 문서](63-realize-harness-rules.ko.md)의
+`__epilogue__` 때문에 심볼의 검증이 red가 되는 일은 없습니다(63 문서의
 검증 툴 참조). 대신 모든 심볼이 resolve된 뒤 엔진은 스코프 없는 **전체 검증**을
 한 번 더 실행하여, 에필로그 배선과 심볼 간 통합까지 판정합니다. 이 단계의
 실패는 특정 심볼의 책임이 아니므로 세션 재시도로 이어지지 않고, realize 전체의
@@ -344,7 +432,7 @@ for (const node of graph.topologicalOrder()) {
     recordToCache(resolution); // realization-cache.json (60 문서)
     console.log(`realized: ${node.symbol.name} → ${resolution.resolvedFile}`);
   } else {
-    console.error(`failed: ${node.symbol.name} — ${resolution?.failReason}`);
+    console.error(`failed: ${node.symbol.name} — ${resolution?.reason}`);
     graph.markFailed(node); // 이 심볼에 의존하는 하류는 realize하지 않습니다 (62 문서)
   }
 }

@@ -141,17 +141,31 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   `realize(symbol, context) → resolution`. `ChzRealizerBase` owns the agentic
   loop, tool dispatch, boundary checks (reads inside project root, writes
   only to the realization output dir), turn caps, and retries; subclasses
-  implement only the transport (`chat()`). `ClaudeCodeRealizer` is the
-  exception: it delegates the whole loop to Claude Code and injects the
-  harness rules instead. The tool set is fixed (ReadFile, ReadDir, Glob,
-  Grep, WriteFile, FindAndReplace, RunTests, RunTypeCheck, RunLinter,
-  AskUser, Finish, Block, Abort — full spec in doc 63) — deliberately no
-  shell tool. `Finish` is only a claim: the engine re-runs verification
-  independently, feeds red results back as bounded retries, and on final
-  failure halts realize for dependent symbols.
-  The current v0 implementation ships `ChzOpenAIRealizer` and accepts custom
-  `ChzRealizer` instances through `chz.config.js`; the documented
-  `ClaudeCodeRealizer` exception remains planned rather than implemented.
+  implement only the transport (`chat()`). The tool set is fixed (ReadFile,
+  ReadDir, Glob, Grep, WriteFile, FindAndReplace, RunTests, RunTypeCheck,
+  RunLinter, AskUser, Finish, Block, Abort — full spec in doc 63) —
+  deliberately no shell tool. `Finish` is only a claim: the engine re-runs
+  verification independently, feeds red results back as bounded retries, and
+  on final failure halts realize for dependent symbols.
+  v0 ships `ChzOpenAIRealizer` and `ClaudeCodeRealizer`, and accepts custom
+  `ChzRealizer` instances through `chz.config.js`.
+  `ClaudeCodeRealizer` (`src/realizer/claude-code/`) is the documented
+  exception that does not inherit the shared loop: it delegates the loop to
+  Claude Code through `@anthropic-ai/claude-agent-sdk` while keeping the tool
+  surface — `tools: []` switches every built-in tool off and the doc-63
+  catalog is republished over an in-process MCP server backed by the same
+  `ChzHarnessSession` (`src/realizer/session.ts`) the shared loop uses, so
+  boundaries stay enforced in code rather than in permission globs and there
+  is still no shell. Registering low-level MCP handlers (rather than the
+  SDK's Zod-only `tool()` helper) keeps `CHZ_HARNESS_TOOLS`
+  (`src/realizer/tools/catalog.ts`) the single schema and preserves doc 63's
+  canonical `Invalid tool input:` wording. Two consequences: `AskUser` reaches
+  `context.askUser` in-process, so doc 63's non-interactive downgrade-to-
+  blocked rule does not apply; and doc 64's turn-cap closing prompt is
+  unreachable, so the turn cap is a hard stop with no handover summary. The
+  SDK and `@modelcontextprotocol/sdk` are optional peer dependencies loaded by
+  dynamic import — `bridge.ts` hand-declares the SDK contract so the project
+  typechecks without them installed.
 - **Harness rules & tool spec (63)** — decision boundaries plus the detailed
   tool contract. Escalation ladder for decisions the LLM must not make alone:
   `ASSUMPTION:` comment → `AskUser` (structured multi-question schema;
