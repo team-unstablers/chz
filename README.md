@@ -197,6 +197,13 @@ Successful symbols are recorded in `realization-cache.json`. On later runs:
 - changes to human layers or `CONTEXTS.md` trigger the corresponding safety
   checks.
 
+When nothing changed but the result is simply not good enough, `chz realize
+--reroll` asks for another attempt at the same contract; `--reroll=<a,b>`
+limits it to named symbols. It suppresses cache reuse and nothing else, so
+dependents fall under the unchanged-surface rule above and only re-run their
+tests. The previous artifact is overwritten — realized code is committed, so
+git already holds it.
+
 ## Current scope and roadmap
 
 The implemented v0 focuses on:

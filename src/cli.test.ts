@@ -460,6 +460,70 @@ export default {
     expect(err.join("\n")).toContain("declares no 'include' globs");
   });
 
+  it("rerolls a cached symbol only when asked, and re-runs it when asked", async () => {
+    const file = makeFixture();
+    const projectRoot = dirname(file);
+    const first = new CliRealizer();
+    const runOnce = async (extra: string[], realizer: CliRealizer): Promise<string[]> => {
+      const out: string[] = [];
+      const code = await run(
+        ["realize", file, ...extra],
+        { out: (message) => out.push(message), err: () => {} },
+        { config: { realizers: [realizer] }, projectRoot, runTests: greenTests },
+      );
+      expect(code).toBe(0);
+      return out;
+    };
+
+    await runOnce([], first);
+    expect(first.calls).toBe(1);
+
+    // A plain re-run reuses the green cache entry; --reroll discards it.
+    const reused = new CliRealizer();
+    await runOnce([], reused);
+    expect(reused.calls).toBe(0);
+
+    const rerolled = new CliRealizer();
+    await runOnce(["--reroll"], rerolled);
+    expect(rerolled.calls).toBe(1);
+
+    const named = new CliRealizer();
+    await runOnce(["--reroll=greet"], named);
+    expect(named.calls).toBe(1);
+  });
+
+  it("rejects a --reroll name that matches no imagine symbol before any session", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer();
+    const err: string[] = [];
+    const code = await run(
+      ["realize", file, "--reroll=gret"],
+      { out: () => {}, err: (message) => err.push(message) },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file), runTests: greenTests },
+    );
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("--reroll names no imagine symbol: 'gret'");
+    // The error is a recovery hint, and a typo must cost nothing.
+    expect(err.join("\n")).toContain("available: greet");
+    expect(realizer.calls).toBe(0);
+  });
+
+  it("keeps a bare --reroll boolean so the positional file still parses", async () => {
+    const file = makeFixture();
+    const realizer = new CliRealizer();
+    const out: string[] = [];
+    const code = await run(
+      ["realize", "--reroll", file],
+      { out: (message) => out.push(message), err: () => {} },
+      { config: { realizers: [realizer] }, projectRoot: dirname(file), runTests: greenTests },
+    );
+
+    expect(code).toBe(0);
+    expect(realizer.calls).toBe(1);
+    expect(out.join("\n")).toContain("realized 1 symbol");
+  });
+
   it("rejects a non-positive --jobs value and accepts the attached -jN form", async () => {
     const err: string[] = [];
     expect(

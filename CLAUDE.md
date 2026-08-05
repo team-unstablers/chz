@@ -220,7 +220,13 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   extracting a human-owned interface is the recommended fix. Invalidation
   propagates to dependents only when a symbol's public surface (signature +
   ensure contracts) changed; otherwise dependents merely re-run their tests
-  and are invalidated only if those go red.
+  and are invalidated only if those go red. `chz realize --reroll`
+  (`--reroll=<a,b>` for named symbols) is the "code gacha" escape hatch for an
+  unchanged spec whose result is merely unsatisfying: it suppresses cache
+  reuse and nothing else, so the unchanged surface routes dependents through
+  the no-LLM retest net, and the previous artifact is overwritten rather than
+  backed up (git already holds committed realizations). An unknown name fails
+  before any session opens.
 
 ## AST-backed parser (docs 10, 21; sketches 260726-00, 260726-01)
 

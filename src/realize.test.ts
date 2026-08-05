@@ -2009,6 +2009,89 @@ describe("realize re-runs (docs/62)", () => {
     ]);
   });
 
+  it("rerolls only the named symbol, retesting dependents without a session", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    // Nothing about the source changed: the reroll alone discards the entry.
+    const realizer = new CountingSlugRealizer();
+    const retests: string[][] = [];
+    const second = await realizeSource(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      reroll: ["slugify"],
+      verify: green,
+      verifyRealization: green,
+      retest: async (input) => {
+        retests.push([...input.scope.symbolNames]);
+        return { passed: true, output: "green" };
+      },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify"]);
+    // The spec is untouched, so the public surface is too: dependents get the
+    // no-LLM retest net rather than a re-realization they did not ask for.
+    expect(retests).toEqual([["buildUniqueSlugs"]]);
+    expect(second.symbols.map((symbol) => [symbol.name, symbol.reused])).toEqual([
+      ["slugify", false],
+      ["buildUniqueSlugs", true],
+    ]);
+  });
+
+  it("rerolls every symbol on a bare reroll and reports it as an engine event", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+    await firstRun(source, root, sourceFile);
+
+    const realizer = new CountingSlugRealizer();
+    const events: string[] = [];
+    const second = await realizeSource(source, sourceFile, {
+      realizers: [realizer],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      reroll: "all",
+      verify: green,
+      verifyRealization: green,
+      harness: { onEvent: (event) => void events.push(event.text) },
+      now: () => new Date("2026-07-24T00:00:00.000Z"),
+    });
+
+    if (second.outcome !== "resolved") throw new Error(second.reason);
+    expect(realizer.calls).toEqual(["slugify", "buildUniqueSlugs"]);
+    expect(second.symbols.every((symbol) => !symbol.reused)).toBe(true);
+    expect(events.filter((text) => text.includes("rerolling"))).toEqual([
+      "[chz-realize] 'slugify': rerolling — discarding the cached realization",
+      "[chz-realize] 'buildUniqueSlugs': rerolling — discarding the cached realization",
+    ]);
+  });
+
+  it("stays silent about rerolling when there is no cached realization to discard", async () => {
+    const { root, sourceFile } = fixtureRoot();
+    const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");
+    writeFileSync(sourceFile, source, "utf8");
+
+    const events: string[] = [];
+    const first = await realizeSource(source, sourceFile, {
+      realizers: [new CountingSlugRealizer()],
+      projectRoot: root,
+      chzVersion: CHZ_VERSION,
+      reroll: "all",
+      verify: green,
+      verifyRealization: green,
+      harness: { onEvent: (event) => void events.push(event.text) },
+      now: () => new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    if (first.outcome !== "resolved") throw new Error(first.reason);
+    expect(events.filter((text) => text.includes("rerolling"))).toEqual([]);
+  });
+
   it("invalidates dependents when a public surface changes", async () => {
     const { root, sourceFile } = fixtureRoot();
     const source = makeSlugSource("소문자로 만듭니다.", "ensure(slugify('AB') === 'ab', '소문자.');");

@@ -146,6 +146,14 @@ export interface RealizeOptions {
   /** chz tool version gating cache reuse. Defaults to the packaged version. */
   chzVersion?: string;
   /**
+   * Symbols to realize again even though their cache entry is green and
+   * undrifted — `"all"`, or the names to reroll. Nothing else about the run
+   * changes: the spec, the human layer, and every other symbol's cache entry
+   * are untouched, so this asks the model for another attempt at the same
+   * contract rather than re-deriving anything.
+   */
+  reroll?: "all" | readonly string[];
+  /**
    * Maximum realize sessions running concurrently (`-j`). Groups become
    * eligible as soon as every outside dependency has settled; per-symbol
    * verification scopes keep concurrent sessions from judging each other.
@@ -278,6 +286,13 @@ export async function realize(
   // test re-run safety net instead (docs/62, per-hop rule).
   const changedSurface = new Set<string>();
   const changedInternal = new Set<string>();
+  // A reroll suppresses reuse and nothing else. Because the spec is unchanged,
+  // the new artifact classifies as an internal change below, so dependents get
+  // the no-LLM retest safety net rather than a re-realization they did not ask
+  // for (docs/62, per-hop rule).
+  const rerollAll = options.reroll === "all";
+  const rerollNames = new Set(rerollAll || options.reroll === undefined ? [] : options.reroll);
+  const rerolled = (name: string): boolean => rerollAll || rerollNames.has(name);
   const askUser = options.askUser === undefined ? undefined : serializeAskUser(options.askUser);
 
   let launchedGroups = 0;
@@ -388,6 +403,8 @@ export async function realize(
     const memberReuseEntry = (member: ChzImagineSymbol): RealizationCacheSymbol | null => {
       const entry = cachedSymbols[member.name];
       if (entry === undefined || entry.testsPassed !== true) return null;
+      // A cycle is one session, so rerolling any member rerolls the group.
+      if (rerolled(member.name)) return null;
       // The cache is on-disk JSON: a hand-edited or corrupted entry must
       // degrade to a fresh realization, never crash a later engine step
       // (the reused provenance is written back verbatim at cache time).
@@ -403,6 +420,18 @@ export async function realize(
       if (!existsSync(autogen) || sha256(readFileSync(autogen, "utf8")) !== entry.autogenTestHash) return null;
       return entry;
     };
+    // Announced only when a green entry actually exists: on a first run there
+    // is nothing to discard, and reporting a reroll would misdescribe it.
+    const discarded = members.filter(
+      (member) => rerolled(member.name) && cachedSymbols[member.name]?.testsPassed === true,
+    );
+    if (discarded.length > 0) {
+      emitEvent(
+        `${discarded.map((member) => `'${member.name}'`).join(", ")}: rerolling — discarding the cached realization`,
+        { group: representative.name },
+      );
+    }
+
     const reuseEntries = new Map<string, RealizationCacheSymbol>();
     for (const member of members) {
       const entry = memberReuseEntry(member);

@@ -76,6 +76,8 @@ interface RealizeArguments {
   dryRun: boolean;
   skipTests: boolean;
   simplify: boolean;
+  /** `"all"` from a bare `--reroll`, or the names from `--reroll=<names>`. */
+  reroll?: "all" | string[];
   jobs?: number;
   model?: string;
   baseURL?: string;
@@ -96,7 +98,21 @@ function parseRealizeArguments(args: string[], io: CliIO): RealizeArguments | nu
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
     if (argument === "--json") parsed.json = true;
-    else if (argument === "--dry-run") parsed.dryRun = true;
+    // Bare `--reroll` is a boolean so `--reroll <file>` still reads the
+    // positional source file; naming symbols therefore takes the `=` form.
+    else if (argument === "--reroll") parsed.reroll = "all";
+    else if (argument.startsWith("--reroll=")) {
+      const names = argument
+        .slice("--reroll=".length)
+        .split(",")
+        .map((name) => name.trim());
+      if (names.some((name) => name.length === 0)) {
+        io.err(`${BIN_NAME} realize: --reroll= requires symbol names, got '${argument}'`);
+        return null;
+      }
+      // A bare --reroll already covers every name, so it simply wins.
+      if (parsed.reroll !== "all") parsed.reroll = [...(parsed.reroll ?? []), ...names];
+    } else if (argument === "--dry-run") parsed.dryRun = true;
     else if (argument === "--skip-tests") parsed.skipTests = true;
     else if (argument === "-s" || argument === "--simplify-output") parsed.simplify = true;
     else if (argument === "-j" || argument === "--jobs") {
@@ -175,7 +191,7 @@ const realizeCommand: CommandHandler = async (args, io, deps) => {
       `${BIN_NAME} realize: missing <file> argument and the configuration declares no 'include' globs`,
     );
     io.err(
-      `usage: ${BIN_NAME} realize [file] [--json] [--dry-run] [--skip-tests] [-j <n>] [--model <name>] [--base-url <url>] [--config <path>]`,
+      `usage: ${BIN_NAME} realize [file] [--json] [--dry-run] [--skip-tests] [--reroll[=<symbols>]] [-j <n>] [--model <name>] [--base-url <url>] [--config <path>]`,
     );
     return 1;
   }
@@ -250,6 +266,31 @@ async function realizeSourceFiles(
   } catch (error) {
     io.err(`${BIN_NAME} realize: ${(error as Error).message}`);
     return 1;
+  }
+
+  // A mistyped --reroll name must not cost a session. Names are checked
+  // against the whole batch before any realization starts, because in the
+  // file-less form the symbol may live in any of the included files.
+  if (Array.isArray(parsed.reroll)) {
+    const known = new Set<string>();
+    for (const analysis of batch.sourceFiles) {
+      if (analysis.diagnostics.length > 0) continue;
+      for (const spec of imagineSpecsFromChzSource(analysis)) known.add(spec.name);
+    }
+    const unknown = parsed.reroll.filter((name) => !known.has(name));
+    if (unknown.length > 0) {
+      const names = [...known].sort((left, right) => left.localeCompare(right, "en"));
+      io.err(
+        `${BIN_NAME} realize: --reroll names no imagine symbol: ${unknown.map((name) => `'${name}'`).join(", ")}`,
+      );
+      io.err(
+        names.length === 0
+          ? "  the sources declare no imagine symbols"
+          : `  available: ${names.join(", ")}`,
+      );
+      batch.dispose();
+      return 1;
+    }
   }
 
   // The CLI owns one compiler snapshot for the complete source batch. Every
@@ -457,6 +498,7 @@ async function realizeAnalyzedSourceFile(
       maxRetries: configured.config.maxRetries,
       maxCycleSize: configured.config.maxCycleSize,
       jobs: parsed.jobs ?? configured.config.jobs,
+      ...(parsed.reroll === undefined ? {} : { reroll: parsed.reroll }),
       chzVersion: deps.chzVersion,
       askUser,
       now: deps.now,
@@ -637,6 +679,9 @@ export function buildUsage(): string {
     "                   [--json]          print extracted specs",
     "                   [--dry-run]       print canonical Realizer prompts",
     "                   [--skip-tests]    skip independent verification",
+    "                   [--reroll]        realize again, ignoring green cache",
+    "                                     entries; --reroll=<a,b> for named",
+    "                                     symbols only",
     "                   [-j, --jobs <n>]  concurrent realize sessions",
     "                   [-s, --simplify-output]",
     "                                     compact per-session progress instead of",
