@@ -10,9 +10,19 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  matchesGlob,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 
+import { CHZ_CONFIG_FILE } from "../config.ts";
 import type { ChzDiagnostic, ChzRealizeContext } from "../types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -139,6 +149,65 @@ function toPosix(path: string): string {
   return path.split(sep).join("/");
 }
 
+/**
+ * A glob match that also succeeds on the lowercased pair. The project may sit
+ * on a case-insensitive filesystem — macOS APFS by default — where `Secrets/k`
+ * and `secrets/k` name the same bytes, so a case-sensitive blocklist would be
+ * a one-keystroke bypass. Over-blocking is the safe direction for a blocklist,
+ * and it keeps the local check aligned with the case-insensitive `--iglob`
+ * arguments handed to ripgrep.
+ */
+function matchesGlobLoosely(path: string, pattern: string): boolean {
+  return matchesGlob(path, pattern) ||
+    matchesGlob(path.toLowerCase(), pattern.toLowerCase());
+}
+
+/**
+ * The configured pattern blocking `rel`, or undefined when none does.
+ *
+ * `rel` is project-relative and POSIX-separated. Patterns follow the
+ * gitignore/ripgrep reading the built-in list already uses, so the two halves
+ * of the blocklist behave alike:
+ *
+ * - A pattern without `/` matches a path component at any depth: `*.pem`
+ *   blocks `a/b/c.pem`, exactly as `--iglob=!*.pem` does.
+ * - A pattern with `/` is anchored at the project root and blocks everything
+ *   beneath what it matches, so `secrets/keys` blocks `secrets/keys/id`.
+ * - A trailing `/**` additionally names the directory itself, so `secrets/**`
+ *   blocks `secrets` and `ReadDir` cannot even list it.
+ */
+function configuredBlockMatch(rel: string, patterns: readonly string[]): string | undefined {
+  if (patterns.length === 0) return undefined;
+  const segments = toPosix(rel).split("/").filter((segment) => segment !== "" && segment !== ".");
+  if (segments.length === 0) return undefined;
+  const ancestors = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
+
+  return patterns.find((pattern) => {
+    if (!pattern.includes("/")) {
+      return segments.some((segment) => matchesGlobLoosely(segment, pattern));
+    }
+    const named = pattern.endsWith("/**") ? pattern.slice(0, -"/**".length) : undefined;
+    return ancestors.some(
+      (ancestor) =>
+        matchesGlobLoosely(ancestor, pattern) ||
+        (named !== undefined && matchesGlobLoosely(ancestor, named)),
+    );
+  });
+}
+
+/**
+ * Pre-filter arguments for ripgrep. These are an optimization, not the
+ * boundary: `#isBlockedPath` re-checks every path ripgrep returns, so a
+ * pattern ripgrep reads differently costs a wasted scan, never a leak.
+ */
+function ripgrepBlockArgs(patterns: readonly string[]): string[] {
+  return patterns.flatMap((pattern) =>
+    pattern.endsWith("/**")
+      ? [`--iglob=!${pattern}`, `--iglob=!${pattern.slice(0, -"/**".length)}`]
+      : [`--iglob=!${pattern}`, `--iglob=!${pattern.replace(/\/+$/, "")}/**`],
+  );
+}
+
 function hash(contents: Uint8Array): string {
   return createHash("sha256").update(contents).digest("hex");
 }
@@ -257,6 +326,8 @@ export class ChzFilesystemToolRuntime {
   readonly #context: ChzRealizeContext;
   readonly #projectRoot: string;
   readonly #outputDir: string;
+  readonly #blockedPaths: readonly string[];
+  readonly #ripgrepBlockArgs: readonly string[];
   readonly #readHashes = new Map<string, string>();
   #outputSequence = 0;
 
@@ -264,6 +335,12 @@ export class ChzFilesystemToolRuntime {
     this.#context = context;
     this.#projectRoot = canonicalizePossiblyMissing(resolve(context.projectRoot));
     this.#outputDir = canonicalizePossiblyMissing(resolve(context.outputDir));
+    // Configured patterns add to the built-in list, never replace it (docs/63).
+    this.#blockedPaths = [...(context.blockedPaths ?? [])];
+    this.#ripgrepBlockArgs = [
+      ...RIPGREP_BLOCKED_PATH_ARGS,
+      ...ripgrepBlockArgs(this.#blockedPaths),
+    ];
     this.#cleanExpiredToolOutputs();
   }
 
@@ -435,10 +512,9 @@ export class ChzFilesystemToolRuntime {
       this.#projectRoot,
       relative(resolve(this.#context.projectRoot), lexical),
     );
-    if (this.#isBlockedPath(policyLexical) || this.#isBlockedPath(canonical)) {
-      throw new Error(
-        `Read access denied: ${displayPath} matches the blocked-path list (${BLOCKED_PATH_DESCRIPTION}).`,
-      );
+    const blocked = this.#blockedPathReason(policyLexical) ?? this.#blockedPathReason(canonical);
+    if (blocked !== undefined) {
+      throw new Error(`Read access denied: ${displayPath} matches the blocked-path list (${blocked}).`);
     }
     return canonical;
   }
@@ -468,19 +544,28 @@ export class ChzFilesystemToolRuntime {
       this.#projectRoot,
       relative(resolve(this.#context.projectRoot), lexical),
     );
-    if (this.#isBlockedPath(policyLexical) || this.#isBlockedPath(canonical)) {
-      throw new Error(
-        `Write access denied: ${displayPath} matches the blocked-path list (${BLOCKED_PATH_DESCRIPTION}).`,
-      );
+    const blocked = this.#blockedPathReason(policyLexical) ?? this.#blockedPathReason(canonical);
+    if (blocked !== undefined) {
+      throw new Error(`Write access denied: ${displayPath} matches the blocked-path list (${blocked}).`);
     }
     return canonical;
   }
 
   #isBlockedPath(path: string): boolean {
+    return this.#blockedPathReason(path) !== undefined;
+  }
+
+  /**
+   * How `path` is blocked, or undefined when it is not. The two halves are
+   * reported differently on purpose: a built-in match names the fixed list,
+   * while a configured match names the pattern, because only the second one
+   * has an edit the human can make in response.
+   */
+  #blockedPathReason(path: string): string | undefined {
     const rel = relative(this.#projectRoot, path);
-    if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
+    if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
     const components = rel.split(sep);
-    return components.some((component) => {
+    const builtIn = components.some((component) => {
       const lower = component.toLowerCase();
       if (lower === ".git") return true;
       if (lower === "chz.config.js") return true;
@@ -489,6 +574,12 @@ export class ChzFilesystemToolRuntime {
       if (lower.endsWith(".pem") || lower.endsWith(".key")) return true;
       return lower.startsWith("id_rsa");
     });
+    if (builtIn) return BLOCKED_PATH_DESCRIPTION;
+
+    const configured = configuredBlockMatch(rel, this.#blockedPaths);
+    return configured === undefined
+      ? undefined
+      : `configured pattern '${configured}' in ${CHZ_CONFIG_FILE}`;
   }
 
   #readFile(displayPath: string, offset: number, limit: number): string {
@@ -624,7 +715,7 @@ export class ChzFilesystemToolRuntime {
       "--files",
       "--no-config",
       `--glob=${pattern}`,
-      ...RIPGREP_BLOCKED_PATH_ARGS,
+      ...this.#ripgrepBlockArgs,
       startRelative,
     ];
     const { stdout } = await this.#runRipgrep(args);
@@ -669,7 +760,7 @@ export class ChzFilesystemToolRuntime {
       "--hidden",
     ];
     if (include !== undefined) args.push(`--glob=${include}`);
-    args.push(...RIPGREP_BLOCKED_PATH_ARGS);
+    args.push(...this.#ripgrepBlockArgs);
     args.push("--", pattern, startRelative);
 
     let stdout: string;
@@ -685,6 +776,9 @@ export class ChzFilesystemToolRuntime {
           "--no-config",
           "--hidden",
           "--glob=**/.env.example",
+          // The allowlisted name is still subject to the configured patterns:
+          // the built-in list is a floor, and a project may raise it.
+          ...ripgrepBlockArgs(this.#blockedPaths),
           "--",
           pattern,
           startRelative,

@@ -206,6 +206,36 @@ V1/V2 구현을 정독하고 얻었으며, '하지 말아야 할 것'은 실제 
 - **쓰기 계열**(`WriteFile`/`FindAndReplace`)의 허용 루트는 `outputDir`입니다.
   읽기 계열과 동일한 차단 목록도 적용됩니다.
 
+#### 프로젝트가 차단 목록을 늘릴 수 있습니다 — `blockedPaths`
+
+`chz.config.js`의 `blockedPaths`(61 문서)는 프로젝트 루트 기준 글롭 목록이며,
+읽기와 쓰기 양쪽에 **기본 목록과 동일한 자격으로** 적용됩니다.
+
+**더하기만 됩니다.** 기본 목록은 시크릿 보호의 하한선이므로 설정으로 풀 수
+없고, `!` 부정 패턴은 설정 로드 단계에서 에러입니다. `chz.config.js` 자신을
+읽을 수 있게 만드는 설정 한 줄이 곧 API 키 유출이기 때문입니다.
+
+패턴 해석은 gitignore/ripgrep과 같습니다:
+
+- `/`가 없는 패턴은 **깊이에 상관없이 경로 컴포넌트**에 매치됩니다.
+  `*.snapshot.json`은 `a/b/c.snapshot.json`도 막습니다.
+- `/`가 있는 패턴은 **프로젝트 루트에 앵커**되고, 매치된 것 아래 전부를
+  막습니다. `secrets/keys`는 `secrets/keys/id`도 막습니다.
+- 끝의 `/**`는 **그 디렉토리 자체**까지 가리킵니다. `infra/**`는 `infra`를
+  막으므로 `ReadDir infra`는 목록조차 내주지 않습니다.
+
+매칭은 소문자로 한 번 더 시도합니다. macOS APFS처럼 대소문자를 구분하지 않는
+파일시스템에서 `Secrets/key`와 `secrets/key`는 같은 파일이므로, 대소문자를
+구분하는 차단 목록은 키 한 번으로 우회됩니다. 차단 목록에서 과하게 막는 쪽이
+안전한 방향입니다.
+
+ripgrep에 넘기는 `--iglob=!…` 인자는 **경계가 아니라 사전 필터**입니다. 실제
+판정은 ripgrep이 돌려준 모든 경로를 하네스가 다시 검사하는 쪽이며, ripgrep이
+패턴을 달리 읽으면 스캔 한 번이 낭비될 뿐 유출로 이어지지는 않습니다.
+
+세션에는 설정된 패턴 목록이 `<env>` 블록으로 전달됩니다(64 문서). 접근
+에러를 하나씩 맞아 가며 발견하는 데 턴을 쓰지 않게 하기 위해서입니다.
+
 opencode는 루트 밖 접근을 "사용자에게 물어봄(external_directory 승인)"으로
 처리하지만, 치즈의 realize 세션은 비대화형이 기본이므로 승인 플로우를 두지
 않습니다. **경계 밖은 즉시 에러입니다**:
@@ -215,7 +245,13 @@ opencode는 루트 밖 접근을 "사용자에게 물어봄(external_directory �
 | 읽기 루트 밖 | `Read access denied: {path} is outside the project root ({projectRoot}).` |
 | 읽기 차단 목록 매치 | `Read access denied: {path} matches the blocked-path list (.env files (except .env.example), chz.config.js, keys, .git).` |
 | 쓰기 차단 목록 매치 | `Write access denied: {path} matches the blocked-path list (.env files (except .env.example), chz.config.js, keys, .git).` |
+| `blockedPaths` 매치 | `Read access denied: {path} matches the blocked-path list (configured pattern '{pattern}' in chz.config.js).` (쓰기는 `Write access denied:`) |
 | 쓰기 루트 밖 | `Write access denied: {path} is outside the realization output directory ({outputDir}). Realized code and tests must be written there.` |
+
+내장 목록과 `blockedPaths`의 문구가 갈리는 것은 의도된 것입니다. 내장 매치는
+고정 목록의 이름을 대지만, 설정 매치는 **어떤 패턴에 걸렸는지**를 댑니다.
+사람이 손댈 수 있는 것은 두 번째뿐이기 때문입니다 — 이 문서의 "모든 에러
+메시지는 회복 힌트다" 원칙의 적용입니다.
 
 ### 읽은 파일 추적 — read-before-write는 코드로 강제됩니다
 

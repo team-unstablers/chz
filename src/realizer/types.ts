@@ -111,6 +111,11 @@ export interface ChzRealizeContext {
   projectRoot: string;
   outputDir: string;
   activeProfile: string;
+  /**
+   * Project-configured globs the harness must never read or write, applied on
+   * top of the built-in secrets list rather than replacing it (docs/63).
+   */
+  blockedPaths?: readonly string[];
   /** Verification scope of this session; absent = the whole realization. */
   scope?: ChzRealizationScope;
   resolvedDependencies: ChzResolutionResolved[];
@@ -225,4 +230,10 @@ export interface ChzProjectConfig {
   include?: string[];
   /** Concurrent realize sessions (`-j`); the CLI flag overrides this. */
   jobs?: number;
+  /**
+   * Extra project-relative globs the harness may neither read nor write, added
+   * to the built-in secrets list (docs/63). Add-only: the built-in entries
+   * cannot be lifted, so `!` negation is rejected.
+   */
+  blockedPaths?: string[];
 }

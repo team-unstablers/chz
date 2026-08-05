@@ -69,19 +69,19 @@ export const CHZ_HARNESS_TOOLS: readonly ChzToolDefinition[] = [
   {
     name: "ReadFile",
     description:
-      "Read a UTF-8 text file with line-number prefixes. Use it freely on your own artifacts in the output directory; read any other project file only to fetch a specific fact that a concrete next edit is blocked on — never to survey the codebase or learn conventions. Sensitive paths such as chz.config.js and .env files (except .env.example) are inaccessible. Continue with a larger offset; prefer a large window over tiny repeated slices. Use Grep for specific content and Glob for uncertain paths. Do not copy line-number prefixes into edits.",
+      "Read a UTF-8 text file with line-number prefixes. Use it freely on your own artifacts in the output directory; read any other project file only to fetch a specific fact that a concrete next edit is blocked on — never to survey the codebase or learn conventions. Sensitive paths such as chz.config.js and .env files (except .env.example) are inaccessible, as are any paths the project blocked in its configuration; the blocked ones are listed in <env>. Continue with a larger offset; prefer a large window over tiny repeated slices. Use Grep for specific content and Glob for uncertain paths. Do not copy line-number prefixes into edits.",
     inputSchema: objectSchema({ path: pathProperty, ...pageProperties }, ["path"]),
   },
   {
     name: "ReadDir",
     description:
-      "List a directory inside the project root, only when a specific missing fact, such as an exact artifact path, blocks the next concrete edit — never to orient yourself in the codebase. Excludes sensitive paths; directories first and then lexically, with deterministic paging.",
+      "List a directory inside the project root, only when a specific missing fact, such as an exact artifact path, blocks the next concrete edit — never to orient yourself in the codebase. Excludes sensitive and project-blocked paths; directories first and then lexically, with deterministic paging.",
     inputSchema: objectSchema({ path: pathProperty, ...pageProperties }, ["path"]),
   },
   {
     name: "Glob",
     description:
-      "Find files by a gitignore-style glob inside the project root, only when a missing exact path blocks the next concrete edit — never to survey the project. Sensitive paths are excluded. Results are project-relative and unordered; do not rely on result order.",
+      "Find files by a gitignore-style glob inside the project root, only when a missing exact path blocks the next concrete edit — never to survey the project. Sensitive and project-blocked paths are excluded. Results are project-relative and unordered; do not rely on result order.",
     inputSchema: objectSchema(
       {
         pattern: { type: "string" },

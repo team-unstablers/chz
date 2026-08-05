@@ -204,6 +204,65 @@ describe("ChzFilesystemToolRuntime path boundaries", () => {
 
     expect(await runtime.execute("ReadFile", { path: "config.js" })).not.toContain("chz.config.js");
   });
+
+  it("adds configured blockedPaths to reads, writes, and searches, naming the pattern", async () => {
+    mkdirSync(join(projectRoot, "infra", "deep"), { recursive: true });
+    writeFileSync(join(projectRoot, "infra", "deep", "plan.txt"), "needle in infra");
+    writeFileSync(join(projectRoot, "infra", "top.txt"), "needle in infra");
+    writeFileSync(join(projectRoot, "notes.snapshot.json"), "needle in snapshot");
+    writeFileSync(join(projectRoot, "public.txt"), "needle in public");
+    writeFileSync(join(outputDir, "keep.snapshot.json"), "human-owned");
+    const runtime = new ChzFilesystemToolRuntime(
+      context({ blockedPaths: ["infra/**", "*.snapshot.json"] }),
+    );
+
+    // An anchored pattern blocks what is beneath it and the directory itself,
+    // so ReadDir cannot even enumerate the tree.
+    expect(await runtime.execute("ReadFile", { path: "infra/deep/plan.txt" })).toBe(
+      "Read access denied: infra/deep/plan.txt matches the blocked-path list " +
+        "(configured pattern 'infra/**' in chz.config.js).",
+    );
+    expect(await runtime.execute("ReadDir", { path: "infra" })).toContain("Read access denied");
+
+    // A pattern without '/' matches a component at any depth, exactly as the
+    // equivalent ripgrep --iglob does.
+    expect(await runtime.execute("ReadFile", { path: "notes.snapshot.json" })).toContain(
+      "configured pattern '*.snapshot.json' in chz.config.js",
+    );
+
+    // Writes inside the output directory are denied on the same terms.
+    expect(await runtime.execute("WriteFile", {
+      path: "chz/realization/example/keep.snapshot.json",
+      content: "overwritten",
+    })).toContain("Write access denied");
+    expect(readFileSync(join(outputDir, "keep.snapshot.json"), "utf8")).toBe("human-owned");
+
+    // Search results never surface a blocked path, and unblocked ones still do.
+    const listing = await runtime.execute("ReadDir", { path: "." });
+    expect(listing).not.toContain("infra/");
+    expect(listing).not.toContain("notes.snapshot.json");
+    expect(listing).toContain("public.txt");
+    expect(await runtime.execute("Glob", { pattern: "**/*.txt" })).toBe("public.txt");
+    const matches = await runtime.execute("Grep", { pattern: "needle" });
+    expect(matches).toContain("public.txt");
+    expect(matches).not.toContain("infra");
+    expect(matches).not.toContain("snapshot");
+  });
+
+  it("keeps the built-in list in force and matches case-insensitively", async () => {
+    mkdirSync(join(projectRoot, "Secrets"), { recursive: true });
+    writeFileSync(join(projectRoot, "Secrets", "token.txt"), "secret");
+    writeFileSync(join(projectRoot, ".env"), "TOKEN=secret");
+    // Configured patterns are add-only: this one cannot reach the built-ins.
+    const runtime = new ChzFilesystemToolRuntime(context({ blockedPaths: ["secrets/**"] }));
+
+    expect(await runtime.execute("ReadFile", { path: "Secrets/token.txt" })).toContain(
+      "configured pattern 'secrets/**' in chz.config.js",
+    );
+    expect(await runtime.execute("ReadFile", { path: ".env" })).toContain(
+      "(.env files (except .env.example), chz.config.js, keys, .git)",
+    );
+  });
 });
 
 describe("ReadFile and ReadDir", () => {

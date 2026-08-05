@@ -349,6 +349,9 @@ async function realizeAnalyzedSourceFile(
         outputDir: realizationBaseDir(sourceFile),
         activeProfile:
           configured.config.profile ?? analysis.profile?.name ?? "console",
+        ...(configured.config.blockedPaths === undefined
+          ? {}
+          : { blockedPaths: configured.config.blockedPaths }),
         resolvedDependencies: [],
         maxTurns: configured.config.maxTurns ?? 24,
         maxRetries: configured.config.maxRetries ?? 2,
@@ -445,6 +448,7 @@ async function realizeAnalyzedSourceFile(
       realizers: configured.config.realizers,
       projectRoot: configured.projectRoot,
       activeProfile: configured.config.profile,
+      blockedPaths: configured.config.blockedPaths,
       maxTurns: configured.config.maxTurns,
       maxRetries: configured.config.maxRetries,
       maxCycleSize: configured.config.maxCycleSize,
@@ -640,7 +644,9 @@ export function buildUsage(): string {
     "configuration:",
     "  chz.config.js exports { realizers: [...] }; the first Realizer supporting",
     "  a symbol type is selected. Optional keys: include (source globs for the",
-    "  file-less form), jobs, maxTurns, maxRetries, maxCycleSize, profile.",
+    "  file-less form), jobs, maxTurns, maxRetries, maxCycleSize, profile,",
+    "  blockedPaths (extra globs the harness may not read or write, added to the",
+    "  built-in secrets list).",
     "  Without a config, OPENAI_MODEL/OPENAI_API_KEY/OPENAI_BASE_URL configure",
     "  the default ChzOpenAIRealizer.",
     "",

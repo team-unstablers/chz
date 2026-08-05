@@ -246,6 +246,10 @@ export function buildSessionBaseline(
     String(now.getMonth() + 1).padStart(2, "0"),
     String(now.getDate()).padStart(2, "0"),
   ].join("-");
+  // Naming the project's own denials up front saves the turns the model would
+  // otherwise spend discovering them one access error at a time. The built-in
+  // secrets list stays out of <env>: the tool descriptions already carry it.
+  const blockedPaths = [...(context.blockedPaths ?? [])].sort((a, b) => a.localeCompare(b, "en"));
   const sections: string[] = [
     `Here is information about the session you are running in:
 <env>
@@ -253,7 +257,8 @@ export function buildSessionBaseline(
   Realization output directory (write boundary): ${context.outputDir}
   Active profile: ${context.activeProfile}
   Model: ${model}
-  Today's date: ${date}
+  Today's date: ${date}${blockedPaths.length === 0 ? "" : `
+  Blocked paths (never readable or writable): ${blockedPaths.join(", ")}`}
 </env>`,
   ];
 

@@ -82,6 +82,28 @@ export async function loadChzConfig(path: string): Promise<LoadedChzConfig> {
   if (value.jobs !== undefined && (!Number.isInteger(value.jobs) || (value.jobs as number) < 1)) {
     throw new Error(`${absolute}: jobs must be an integer greater than zero.`);
   }
+  if (value.blockedPaths !== undefined) {
+    if (
+      !Array.isArray(value.blockedPaths) ||
+      !value.blockedPaths.every((item) => typeof item === "string" && item.trim().length > 0)
+    ) {
+      throw new Error(`${absolute}: blockedPaths must be an array of non-empty glob strings.`);
+    }
+    // The built-in secrets list is a floor, not a default: letting a config
+    // re-open .env or chz.config.js would turn one edit into a key leak.
+    const negated = (value.blockedPaths as string[]).find((pattern) => pattern.startsWith("!"));
+    if (negated !== undefined) {
+      throw new Error(
+        `${absolute}: blockedPaths is add-only; '${negated}' cannot un-block a path. Remove the leading '!'.`,
+      );
+    }
+    const absolutePattern = (value.blockedPaths as string[]).find((pattern) => isAbsolute(pattern));
+    if (absolutePattern !== undefined) {
+      throw new Error(
+        `${absolute}: blockedPaths entries are project-relative; '${absolutePattern}' must not be an absolute path.`,
+      );
+    }
+  }
 
   return {
     path: absolute,

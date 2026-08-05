@@ -183,6 +183,29 @@ describe("canonical prompt and symbol graph", () => {
     expect(first).toContain("Today's date: 2026-07-23");
   });
 
+  it("omits the blocked-path line when the project configured none", () => {
+    const data = fixture();
+    const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
+    const baseline = buildSessionBaseline(symbol, contextFor(data.root, data.outputDir), "gpt-test");
+
+    expect(baseline).not.toContain("Blocked paths");
+  });
+
+  it("declares the configured blocked paths in <env>", () => {
+    const data = fixture();
+    const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
+    const baseline = buildSessionBaseline(symbol, {
+      ...contextFor(data.root, data.outputDir),
+      blockedPaths: ["infra/**", "**/*.snapshot.json"],
+    }, "gpt-test");
+
+    // Name-sorted, like every other list in the baseline, so the prompt stays
+    // deterministic across runs.
+    expect(baseline).toContain(
+      "Blocked paths (never readable or writable): **/*.snapshot.json, infra/**",
+    );
+  });
+
   it("uses dependency surfaces before falling back to dependency file reads", () => {
     const data = fixture();
     const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);

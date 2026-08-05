@@ -96,7 +96,8 @@ function buildSystemParts(symbol: ChzImagineSymbol, context: ChzRealizeContext):
 - 소스 순서는 고정입니다: `<env>` → 대상 심볼 → 사람 작성 프롤로그 →
   의존 산출물 → 결정 기록 → 검증 피드백(재시도에만). 소스 사이는 빈
   줄(`\n\n`) 하나로 조인합니다.
-- 목록 성격의 소스(의존 산출물)는 **이름 사전순**으로 정렬합니다.
+- 목록 성격의 소스(의존 산출물, `<env>`의 차단 경로)는 **이름 사전순**으로
+  정렬합니다.
 - 내용이 없는 소스는 헤더까지 통째로 생략합니다. 빈 섹션을 남기지 않습니다.
 - 시각 정보는 `<env>`의 날짜 한 줄뿐이며, 그 외 어떤 소스에도 타임스탬프를
   넣지 않습니다.
@@ -294,6 +295,7 @@ Here is information about the session you are running in:
   Active profile: {@profile 이름, 예: console}
   Model: {모델 ID}
   Today's date: {YYYY-MM-DD}
+  Blocked paths (never readable or writable): {blockedPaths, 사전순 쉼표 구분}
 </env>
 ```
 
@@ -301,6 +303,12 @@ Here is information about the session you are running in:
 툴 디스패처가 강제하는 사실과 프롬프트가 말하는 사실이 문자 그대로
 일치하는 지점입니다. `Active profile`은 realize 산출물이 사용할 수 있는 API
 범위(capability boundary, 00 문서)를 알립니다.
+
+`Blocked paths` 줄은 `chz.config.js`가 `blockedPaths`를 설정했을 때만
+나타나고, 프로젝트가 **추가한** 경로만 담습니다(63 문서). 내장 시크릿 목록은
+여기 넣지 않습니다 — 툴 설명이 이미 지고 있는 사실을 프롬프트에 두 번 적을
+이유가 없습니다. 설정된 경로를 미리 알려 주는 이유는 접근 에러를 하나씩 맞아
+가며 발견하는 데 턴을 쓰지 않게 하기 위해서입니다.
 
 ## 2. 대상 심볼
 
@@ -506,7 +514,7 @@ Do not attempt any other tool call; it will fail.
 
 | 넣지 않는 것 | 담당하는 겹 |
 |--------------|-------------|
-| 경계의 구체 규칙 (경로, 차단 목록, 탈출 방지) | 툴 디스패처의 경로 검사 (63 문서 공통 규칙) |
+| 경계의 구체 규칙 (매칭 방식, 내장 차단 목록, 탈출 방지) | 툴 디스패처의 경로 검사 (63 문서 공통 규칙). `<env>`가 싣는 것은 규칙이 아니라 **이 프로젝트의 값**입니다 — 읽기/쓰기 루트와 마찬가지로, 설정된 차단 경로도 값이므로 실립니다 |
 | read-before-write, 스테일 검사 | 하네스의 읽은-파일 추적 (63 문서) — opencode처럼 프롬프트로만 약속하고 강제하지 않는 실수를 하지 않습니다 |
 | 툴 사용 요령 (offset 이어읽기, 병렬 호출, Grep 유도) | 각 툴의 description (63 문서 각 툴 절) |
 | 에러 상황별 대처법 | 에러 문구 자체 (63 문서 원칙 3 — 모든 에러는 복구 힌트) |

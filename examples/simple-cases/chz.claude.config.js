@@ -40,4 +40,9 @@ export default defineConfig({
   // Realize sessions to run concurrently. AskUser prompts are serialized FIFO
   // across them, so a question from one session never interleaves with another.
   jobs: 1,
+
+  // Extra globs the harness may neither read nor write, on top of the built-in
+  // secrets list (.env*, chz.config.js, .git/, keys). Add-only: a leading '!'
+  // is a load error, because re-opening chz.config.js would leak an API key.
+  // blockedPaths: ["infra/**", "*.snapshot.json"],
 });

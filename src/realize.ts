@@ -118,6 +118,8 @@ export interface RealizeOptions {
   realizers: readonly ChzRealizer[];
   projectRoot?: string;
   activeProfile?: string;
+  /** Extra harness read/write denials, added to the built-in list (docs/63). */
+  blockedPaths?: readonly string[];
   maxTurns?: number;
   maxRetries?: number;
   askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
@@ -505,6 +507,7 @@ export async function realize(
         projectRoot,
         outputDir: baseDir,
         activeProfile,
+        ...(options.blockedPaths === undefined ? {} : { blockedPaths: options.blockedPaths }),
         scope,
         resolvedDependencies: [
           ...new Map(
