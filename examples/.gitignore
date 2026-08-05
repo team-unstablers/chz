@@ -1,3 +1,17 @@
 chz/
 .env
 !chz.config.js
+
+# Sidecar shims (docs/20). `chz realize` writes one next to every .chz.ts
+# source, re-exporting the realization directory ignored above — so a committed
+# shim would be a broken import in a fresh checkout. A shim is an ordinary .ts
+# file named after its source, which no pattern can distinguish from
+# human-written code; add a line here when a new example is added.
+/chz-import/battle.ts
+/chz-import/stats.ts
+/simple-cases/collision.ts
+/simple-cases/dutch-pay.ts
+/simple-cases/gomoku.ts
+/simple-cases/phone-number-normalizer.ts
+/simple-cases/slug-tools.ts
+/simple-cases/todo-list.ts

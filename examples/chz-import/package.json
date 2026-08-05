@@ -1,0 +1,17 @@
+{
+  "name": "chz-examples",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "chz": "file:../../",
+    "dotenv": "^17.4.2",
+    "vitest": "^4.1.10"
+  }
+}
