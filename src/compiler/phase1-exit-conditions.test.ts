@@ -1,7 +1,15 @@
-import { globSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  copyFileSync,
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   analyzeChzSource,
@@ -47,25 +55,47 @@ function syntacticDiagnosticCount(
   return count;
 }
 
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 describe("Phase 1 compiler-core exit conditions", () => {
   it("exit condition 1: preflights every official examples/**/*.chz.ts file", () => {
     const files = globSync("examples/**/*.chz.ts").sort();
     expect(files.length).toBeGreaterThan(0);
+    // The sources are analyzed from a copy holding nothing but the `.chz.ts`
+    // files themselves. Running `chz realize` on an example leaves a sidecar
+    // shim next to its source, and that shim would resolve an import this test
+    // asserts is unresolved — so analyzing in place would answer differently
+    // depending on whether the developer happened to realize the examples
+    // locally. Copying only the sources keeps a checkout and a working tree
+    // full of artifacts in agreement.
+    const root = mkdtempSync(join(tmpdir(), "chz-official-examples-"));
+    temporaryRoots.push(root);
+    for (const file of files) {
+      const destination = join(root, file);
+      mkdirSync(dirname(destination), { recursive: true });
+      copyFileSync(file, destination);
+    }
+
     const batch = analyzeChzSources(
       files.map((file) => ({
         source: readFileSync(file, "utf8"),
-        fileName: file,
+        fileName: join(root, file),
       })),
     );
     try {
       for (const [index, analysis] of batch.sourceFiles.entries()) {
         const file = files[index]!;
         if (file === "examples/chz-import/battle.chz.ts") {
-          // This is a genuine missing-module error, not an obligation
-          // classification failure: the example imports the planned ./stats
-          // sidecar, but no generated stats.ts exists in the repository yet.
-          // Creating or resolving that sidecar belongs to the explicitly
-          // deferred cross-file/module-resolution phase.
+          // A genuine missing-module error, not an obligation classification
+          // failure. The example imports the ./stats sidecar shim, which is a
+          // realize output and therefore not committed — realize emits it next
+          // to the source (docs/20), as the shim tests in realize.test.ts pin.
           expect(analysis.diagnostics.map((diagnostic) => diagnostic.code))
             .toEqual(["TS2307"]);
           continue;
