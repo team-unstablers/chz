@@ -17,6 +17,8 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.222",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^26.1.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
@@ -25,5 +27,17 @@
   "dependencies": {
     "openai": "^6.48.0",
     "picocolors": "^1.1.1"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.222",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    }
   }
 }
