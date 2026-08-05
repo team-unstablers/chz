@@ -183,26 +183,39 @@ describe("canonical prompt and symbol graph", () => {
     expect(first).toContain("Today's date: 2026-07-23");
   });
 
-  it("omits the blocked-path line when the project configured none", () => {
+  it("omits the output-language and blocked-path lines when neither is configured", () => {
     const data = fixture();
     const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
     const baseline = buildSessionBaseline(symbol, contextFor(data.root, data.outputDir), "gpt-test");
 
+    expect(baseline).not.toContain("Output language");
     expect(baseline).not.toContain("Blocked paths");
   });
 
-  it("declares the configured blocked paths in <env>", () => {
+  it("declares the configured output language and blocked paths in the baseline", () => {
     const data = fixture();
     const { symbol } = firstSpecAndSymbol(data.source, data.sourceFile);
     const baseline = buildSessionBaseline(symbol, {
       ...contextFor(data.root, data.outputDir),
+      outputLanguage: "ko",
       blockedPaths: ["infra/**", "**/*.snapshot.json"],
     }, "gpt-test");
 
+    // The tag is resolved to an English display name: a model follows
+    // "Korean (ko)" more reliably than a bare two-letter code.
+    expect(baseline).toContain("Output language: Korean (ko)");
+    expect(baseline).toContain("# Output language");
+    expect(baseline).toContain("Write the prose you author in Korean (ko).");
+    expect(baseline).toContain("Identifiers, type names, and file names.");
     // Name-sorted, like every other list in the baseline, so the prompt stays
     // deterministic across runs.
     expect(baseline).toContain(
       "Blocked paths (never readable or writable): **/*.snapshot.json, infra/**",
+    );
+    // <env> governs everything after it, so the language rule follows it
+    // immediately and precedes the symbol specification (docs/64).
+    expect(baseline.indexOf("# Output language")).toBeLessThan(
+      baseline.indexOf("# Symbol to realize"),
     );
   });
 

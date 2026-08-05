@@ -403,6 +403,12 @@ export default {
   // **더해집니다** — 63 문서의 기본 목록(.env*, chz.config.js, .git/, 키 파일)은
   // 설정으로 풀 수 없으므로 `!` 부정 패턴은 에러입니다.
   blockedPaths: ['infra/**', '*.snapshot.json'],
+
+  // 모델이 쓰는 산문의 언어 (BCP-47 태그). 주석과 ASSUMPTION 노트, AskUser
+  // 질문, Block/Abort 사유, 테스트 설명이 이 언어로 나옵니다. 식별자와 타입명은
+  // 언제나 영어입니다 (64 문서). 무효화 해시에 들어가지 않으므로, 이 값을 바꿔도
+  // 이미 realize된 심볼은 그대로 재사용됩니다.
+  outputLanguage: 'ko',
 };
 ```
 

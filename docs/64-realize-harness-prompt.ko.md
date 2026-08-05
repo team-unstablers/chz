@@ -93,9 +93,9 @@ function buildSystemParts(symbol: ChzImagineSymbol, context: ChzRealizeContext):
 같은 입력(심볼 스펙, 의존 산출물, CONTEXTS.md)에서는 **항상 같은 baseline
 바이트가 나와야** 합니다:
 
-- 소스 순서는 고정입니다: `<env>` → 대상 심볼 → 사람 작성 프롤로그 →
-  의존 산출물 → 결정 기록 → 검증 피드백(재시도에만). 소스 사이는 빈
-  줄(`\n\n`) 하나로 조인합니다.
+- 소스 순서는 고정입니다: `<env>` → 출력 언어(설정된 경우에만) → 대상 심볼 →
+  사람 작성 프롤로그 → 의존 산출물 → 결정 기록 → 검증 피드백(재시도에만).
+  소스 사이는 빈 줄(`\n\n`) 하나로 조인합니다.
 - 목록 성격의 소스(의존 산출물, `<env>`의 차단 경로)는 **이름 사전순**으로
   정렬합니다.
 - 내용이 없는 소스는 헤더까지 통째로 생략합니다. 빈 섹션을 남기지 않습니다.
@@ -296,6 +296,7 @@ Here is information about the session you are running in:
   Model: {모델 ID}
   Today's date: {YYYY-MM-DD}
   Blocked paths (never readable or writable): {blockedPaths, 사전순 쉼표 구분}
+  Output language: {영어 언어명 (태그), 예: Korean (ko)}
 </env>
 ```
 
@@ -304,11 +305,58 @@ Here is information about the session you are running in:
 일치하는 지점입니다. `Active profile`은 realize 산출물이 사용할 수 있는 API
 범위(capability boundary, 00 문서)를 알립니다.
 
-`Blocked paths` 줄은 `chz.config.js`가 `blockedPaths`를 설정했을 때만
-나타나고, 프로젝트가 **추가한** 경로만 담습니다(63 문서). 내장 시크릿 목록은
-여기 넣지 않습니다 — 툴 설명이 이미 지고 있는 사실을 프롬프트에 두 번 적을
-이유가 없습니다. 설정된 경로를 미리 알려 주는 이유는 접근 에러를 하나씩 맞아
-가며 발견하는 데 턴을 쓰지 않게 하기 위해서입니다.
+마지막 두 줄은 `chz.config.js`가 해당 값을 설정했을 때만 나타납니다.
+
+- `Blocked paths`는 프로젝트가 `blockedPaths`로 **추가한** 경로만 담습니다
+  (63 문서). 내장 시크릿 목록은 여기 넣지 않습니다 — 툴 설명이 이미 지고
+  있는 사실을 프롬프트에 두 번 적을 이유가 없습니다. 설정된 경로를 미리
+  알려 주는 이유는 접근 에러를 하나씩 맞아 가며 발견하는 데 턴을 쓰지 않게
+  하기 위해서입니다.
+- `Output language`는 BCP-47 태그를 영어 언어명으로 풀어 함께 적습니다.
+  모델은 `ko`라는 두 글자보다 `Korean (ko)`를 훨씬 안정적으로 따르고,
+  태그를 남겨 두면 드문 로케일도 모호해지지 않습니다.
+
+## 1-1. 출력 언어 (`outputLanguage`가 설정된 경우에만)
+
+```text
+# Output language
+
+Write the prose you author in {언어명 (태그)}.
+This is the language the human supervising this realization reads.
+
+That covers:
+
+- Code comments, including every `ASSUMPTION:` note.
+- `AskUser` question text, headers, and option labels and descriptions — the
+  engine records them verbatim into CONTEXTS.md, so this is what later sessions
+  and the human will read.
+- `Block` and `Abort` `reason` and `todo` text.
+- Test descriptions: the `describe` and `it` strings of your autogen tests.
+
+The following stay in English regardless, because they are machine-read or
+part of the language's own surface:
+
+- Identifiers, type names, and file names.
+- The `ASSUMPTION:` marker itself, the `@chz-realize-override` marker, and
+  every other marker the engine matches on. Only the prose after the marker is
+  translated.
+- Tool argument values: paths, glob patterns, and search patterns.
+```
+
+`<env>` 바로 뒤에 오는 이유는 이 지시가 **그 뒤 모든 섹션의 산출물에**
+걸리기 때문입니다. 고정부에 넣지 않는 이유는 고정부가 바이트 단위로 동일해야
+하기 때문입니다.
+
+번역 대상과 아닌 것을 나눈 기준은 **누가 읽는가**입니다. 사람이 읽는 산문은
+사람의 언어로, 엔진이 매치하는 문자열은 영어 그대로 둡니다. 특히
+`ASSUMPTION:` 마커는 61 문서의 의존 표면 추출이 문자열로 찾는 값이므로,
+번역되면 다음 세션의 컨텍스트에서 조용히 사라집니다.
+
+**이 설정은 무효화 해시에 들어가지 않습니다.** 언어를 바꿔도 이미 green인
+심볼은 캐시에서 그대로 재사용되고, 그 뒤 새로 realize되는 심볼만 새 언어로
+나옵니다. 언어 한 줄을 바꾼 대가로 프로젝트 전체 재실현과 그만큼의 토큰을
+치르지 않기 위한 선택이며, 그 결과로 **한 프로젝트 안에서 주석 언어가 섞일 수
+있습니다**. 전부 맞추려면 realize 산출물을 지우고 다시 돌려야 합니다.
 
 ## 2. 대상 심볼
 

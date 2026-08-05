@@ -104,6 +104,13 @@ export async function loadChzConfig(path: string): Promise<LoadedChzConfig> {
       );
     }
   }
+  if (value.outputLanguage !== undefined) {
+    if (typeof value.outputLanguage !== "string" || !isLanguageTag(value.outputLanguage)) {
+      throw new Error(
+        `${absolute}: outputLanguage must be a BCP-47 language tag such as 'ko', 'ja', or 'en'.`,
+      );
+    }
+  }
 
   return {
     path: absolute,
@@ -118,6 +125,19 @@ export function selectRealizer(
   symbol: ChzImagineSymbol,
 ): ChzRealizer | null {
   return realizers.find((realizer) => realizer.supportedSymbolTypes.includes(symbol.type)) ?? null;
+}
+
+/**
+ * Accept only what {@link Intl} recognizes as a language tag. The prompt turns
+ * the tag into an endonym-free display name, so a free-text value such as
+ * 'Korean' would reach the model unresolved and is rejected here instead.
+ */
+function isLanguageTag(value: string): boolean {
+  try {
+    return Intl.getCanonicalLocales(value).length === 1;
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

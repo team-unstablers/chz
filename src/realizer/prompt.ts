@@ -194,6 +194,20 @@ function requireProjectFile(root: string, path: string, description: string): st
   return requireReadable(canonical, description);
 }
 
+/**
+ * `Korean (ko)` for a tag the runtime knows, the bare tag otherwise. A model
+ * follows an English language name far more reliably than a two-letter code,
+ * and the tag stays alongside it so an unusual locale is still unambiguous.
+ */
+function describeLanguage(tag: string): string {
+  try {
+    const name = new Intl.DisplayNames(["en"], { type: "language" }).of(tag);
+    return name === undefined || name === tag ? tag : `${name} (${tag})`;
+  } catch {
+    return tag;
+  }
+}
+
 function escapeAttribute(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
@@ -246,6 +260,7 @@ export function buildSessionBaseline(
     String(now.getMonth() + 1).padStart(2, "0"),
     String(now.getDate()).padStart(2, "0"),
   ].join("-");
+  const language = context.outputLanguage;
   // Naming the project's own denials up front saves the turns the model would
   // otherwise spend discovering them one access error at a time. The built-in
   // secrets list stays out of <env>: the tool descriptions already carry it.
@@ -258,9 +273,37 @@ export function buildSessionBaseline(
   Active profile: ${context.activeProfile}
   Model: ${model}
   Today's date: ${date}${blockedPaths.length === 0 ? "" : `
-  Blocked paths (never readable or writable): ${blockedPaths.join(", ")}`}
+  Blocked paths (never readable or writable): ${blockedPaths.join(", ")}`}${language === undefined ? "" : `
+  Output language: ${describeLanguage(language)}`}
 </env>`,
   ];
+
+  // Placed right after <env> because it governs every later section's output,
+  // and kept out of the fixed role part so that part stays byte-identical.
+  if (language !== undefined) {
+    sections.push(`# Output language
+
+Write the prose you author in ${describeLanguage(language)}.
+This is the language the human supervising this realization reads.
+
+That covers:
+
+- Code comments, including every \`ASSUMPTION:\` note.
+- \`AskUser\` question text, headers, and option labels and descriptions — the
+  engine records them verbatim into CONTEXTS.md, so this is what later sessions
+  and the human will read.
+- \`Block\` and \`Abort\` \`reason\` and \`todo\` text.
+- Test descriptions: the \`describe\` and \`it\` strings of your autogen tests.
+
+The following stay in English regardless, because they are machine-read or
+part of the language's own surface:
+
+- Identifiers, type names, and file names.
+- The \`ASSUMPTION:\` marker itself, the \`@chz-realize-override\` marker, and
+  every other marker the engine matches on. Only the prose after the marker is
+  translated.
+- Tool argument values: paths, glob patterns, and search patterns.`);
+  }
 
   const cycle = [symbol, ...symbol.circularDependencies]
     .filter((candidate, index, all) => all.findIndex((item) => item.name === candidate.name) === index)

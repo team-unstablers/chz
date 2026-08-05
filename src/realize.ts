@@ -120,6 +120,8 @@ export interface RealizeOptions {
   activeProfile?: string;
   /** Extra harness read/write denials, added to the built-in list (docs/63). */
   blockedPaths?: readonly string[];
+  /** BCP-47 tag for the prose the model writes (docs/64). */
+  outputLanguage?: string;
   maxTurns?: number;
   maxRetries?: number;
   askUser?: (questions: ChzAskUserQuestion[]) => Promise<ChzAskUserAnswer[]>;
@@ -508,6 +510,7 @@ export async function realize(
         outputDir: baseDir,
         activeProfile,
         ...(options.blockedPaths === undefined ? {} : { blockedPaths: options.blockedPaths }),
+        ...(options.outputLanguage === undefined ? {} : { outputLanguage: options.outputLanguage }),
         scope,
         resolvedDependencies: [
           ...new Map(

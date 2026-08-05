@@ -116,6 +116,11 @@ export interface ChzRealizeContext {
    * top of the built-in secrets list rather than replacing it (docs/63).
    */
   blockedPaths?: readonly string[];
+  /**
+   * BCP-47 tag for the prose the model writes — comments, `ASSUMPTION:` notes,
+   * escalation text, test descriptions (docs/64). Absent leaves it to the model.
+   */
+  outputLanguage?: string;
   /** Verification scope of this session; absent = the whole realization. */
   scope?: ChzRealizationScope;
   resolvedDependencies: ChzResolutionResolved[];
@@ -236,4 +241,10 @@ export interface ChzProjectConfig {
    * cannot be lifted, so `!` negation is rejected.
    */
   blockedPaths?: string[];
+  /**
+   * BCP-47 tag (`'ko'`, `'ja'`, `'en'`, …) for the prose the model writes
+   * (docs/64). Code identifiers stay English regardless. Not part of the
+   * invalidation hash: changing it leaves already-realized symbols untouched.
+   */
+  outputLanguage?: string;
 }

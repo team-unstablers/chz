@@ -148,9 +148,15 @@ Cheese is an intermediate language whose syntax is a **TypeScript superset**
   verification independently, feeds red results back as bounded retries, and
   on final failure halts realize for dependent symbols.
   v0 ships `ChzOpenAIRealizer` and `ClaudeCodeRealizer`, and accepts custom
-  `ChzRealizer` instances through `chz.config.js`. `blockedPaths` there adds
-  project globs to the built-in secrets blocklist (add-only — `!` negation is
-  a load error — and applied to reads, writes, and search results alike).
+  `ChzRealizer` instances through `chz.config.js`. Two config keys tune the
+  session rather than the transport: `blockedPaths` adds project globs to the
+  built-in secrets blocklist (add-only — `!` negation is a load error — and
+  applied to reads, writes, and search results alike), and `outputLanguage`
+  (a BCP-47 tag) sets the language of the prose the model writes — comments,
+  `ASSUMPTION:` notes, `AskUser`/`Block`/`Abort` text, test descriptions —
+  while identifiers and engine-matched markers stay English. `outputLanguage`
+  is deliberately outside the invalidation hash, so changing it leaves
+  already-green symbols cached and comment languages can mix.
   `ClaudeCodeRealizer` (`src/realizer/claude-code/`) is the documented
   exception that does not inherit the shared loop: it delegates the loop to
   Claude Code through `@anthropic-ai/claude-agent-sdk` while keeping the tool

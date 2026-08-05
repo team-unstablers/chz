@@ -352,6 +352,9 @@ async function realizeAnalyzedSourceFile(
         ...(configured.config.blockedPaths === undefined
           ? {}
           : { blockedPaths: configured.config.blockedPaths }),
+        ...(configured.config.outputLanguage === undefined
+          ? {}
+          : { outputLanguage: configured.config.outputLanguage }),
         resolvedDependencies: [],
         maxTurns: configured.config.maxTurns ?? 24,
         maxRetries: configured.config.maxRetries ?? 2,
@@ -449,6 +452,7 @@ async function realizeAnalyzedSourceFile(
       projectRoot: configured.projectRoot,
       activeProfile: configured.config.profile,
       blockedPaths: configured.config.blockedPaths,
+      outputLanguage: configured.config.outputLanguage,
       maxTurns: configured.config.maxTurns,
       maxRetries: configured.config.maxRetries,
       maxCycleSize: configured.config.maxCycleSize,
@@ -646,7 +650,8 @@ export function buildUsage(): string {
     "  a symbol type is selected. Optional keys: include (source globs for the",
     "  file-less form), jobs, maxTurns, maxRetries, maxCycleSize, profile,",
     "  blockedPaths (extra globs the harness may not read or write, added to the",
-    "  built-in secrets list).",
+    "  built-in secrets list), outputLanguage (BCP-47 tag for model-written",
+    "  prose; does not invalidate already-realized symbols).",
     "  Without a config, OPENAI_MODEL/OPENAI_API_KEY/OPENAI_BASE_URL configure",
     "  the default ChzOpenAIRealizer.",
     "",

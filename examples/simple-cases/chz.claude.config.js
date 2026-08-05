@@ -45,4 +45,10 @@ export default defineConfig({
   // secrets list (.env*, chz.config.js, .git/, keys). Add-only: a leading '!'
   // is a load error, because re-opening chz.config.js would leak an API key.
   // blockedPaths: ["infra/**", "*.snapshot.json"],
+
+  // Language of the prose the model writes: comments and ASSUMPTION notes,
+  // AskUser questions, Block/Abort reasons, test descriptions. Identifiers and
+  // type names stay English. Changing this does not invalidate symbols that
+  // are already realized, so languages can mix until they are re-realized.
+  // outputLanguage: "ko",
 });

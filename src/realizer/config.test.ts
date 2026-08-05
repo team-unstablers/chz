@@ -57,3 +57,18 @@ describe("blockedPaths", () => {
     ).rejects.toThrow(/array of non-empty glob strings/);
   });
 });
+
+describe("outputLanguage", () => {
+  it("accepts BCP-47 tags", async () => {
+    for (const tag of ["ko", "en", "ja", "zh-Hant", "pt-BR"]) {
+      const loaded = await loadConfig(`{ realizers: [realizer], outputLanguage: '${tag}' }`);
+      expect(loaded.config.outputLanguage).toBe(tag);
+    }
+  });
+
+  it("rejects free text, which the prompt could not resolve to a language", async () => {
+    await expect(
+      loadConfig("{ realizers: [realizer], outputLanguage: 'Korean please' }"),
+    ).rejects.toThrow(/must be a BCP-47 language tag such as 'ko', 'ja', or 'en'/);
+  });
+});
